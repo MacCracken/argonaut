@@ -41,9 +41,9 @@ pub use types::{
     ArgonautConfig, ArgonautStats, BootMode, BootStage, BootStep, BootStepStatus, CrashAction,
     EdgeBootConfig, EmergencyShellConfig, ExitStatus, HealthCheck, HealthCheckResult,
     HealthCheckType, HealthTracker, ManagedService, ProcessSpec, ReadyCheck, RestartConfig,
-    RestartPolicy, Runlevel, RunlevelSwitchPlan, SafeCommand, ServiceDefinition, ServiceEvent,
-    ServiceEventType, ServiceState, ServiceTarget, ShutdownAction, ShutdownPlan, ShutdownStep,
-    ShutdownStepStatus, ShutdownType,
+    RestartPolicy, Runlevel, RunlevelSwitchPlan, RunlevelSwitchResult, SafeCommand,
+    ServiceDefinition, ServiceEvent, ServiceEventType, ServiceState, ServiceTarget, ShutdownAction,
+    ShutdownPlan, ShutdownStep, ShutdownStepStatus, ShutdownType,
 };
 
 use std::collections::HashMap;

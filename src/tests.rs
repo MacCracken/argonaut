@@ -2471,3 +2471,64 @@ fn execute_shutdown_completes_with_no_services() {
         .count();
     assert!(completed > 0);
 }
+
+// -----------------------------------------------------------------------
+// Runlevel switch execution tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn execute_runlevel_switch_stops_and_starts() {
+    // Start in server mode with services running
+    let config = config_with_service("sleeper", "/usr/bin/sleep", vec!["60"]);
+    let mut init = ArgonautInit::new(config);
+    init.start_service("sleeper").unwrap();
+
+    // Plan a switch to emergency — should stop everything
+    let targets = ServiceTarget::defaults();
+    let plan = init.plan_runlevel_switch(Runlevel::Emergency, &targets);
+    let result = init.execute_runlevel_switch(&plan, Duration::from_secs(2));
+
+    assert_eq!(result.to, Runlevel::Emergency);
+    assert!(result.drop_to_shell);
+    assert!(!result.stopped.is_empty());
+    assert!(result.started.is_empty());
+    assert!(result.errors.is_empty());
+    assert!(init.processes.is_empty());
+}
+
+#[test]
+fn execute_runlevel_switch_emergency_with_no_services() {
+    let mut init = ArgonautInit::new(recovery_config());
+    let targets = ServiceTarget::defaults();
+    let plan = init.plan_runlevel_switch(Runlevel::Emergency, &targets);
+    let result = init.execute_runlevel_switch(&plan, Duration::from_secs(1));
+
+    assert!(result.drop_to_shell);
+    assert!(result.stopped.is_empty());
+    assert!(result.started.is_empty());
+    assert!(result.errors.is_empty());
+}
+
+#[test]
+fn execute_runlevel_switch_rescue_drops_to_shell() {
+    let mut init = ArgonautInit::new(ArgonautConfig::default());
+    let targets = ServiceTarget::defaults();
+    let plan = init.plan_runlevel_switch(Runlevel::Rescue, &targets);
+    let result = init.execute_runlevel_switch(&plan, Duration::from_secs(1));
+
+    assert!(result.drop_to_shell);
+}
+
+#[test]
+fn serde_runlevel_switch_result() {
+    use super::types::RunlevelSwitchResult;
+    let result = RunlevelSwitchResult {
+        from: Runlevel::Console,
+        to: Runlevel::Graphical,
+        stopped: vec!["svc-a".into()],
+        started: vec!["svc-b".into()],
+        errors: vec![],
+        drop_to_shell: false,
+    };
+    serde_roundtrip(&result);
+}

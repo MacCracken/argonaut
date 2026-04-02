@@ -806,6 +806,24 @@ pub struct RunlevelSwitchPlan {
     pub drop_to_shell: bool,
 }
 
+/// Result of executing a runlevel switch.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunlevelSwitchResult {
+    /// Runlevel we switched from.
+    pub from: Runlevel,
+    /// Runlevel we switched to.
+    pub to: Runlevel,
+    /// Services that were successfully stopped.
+    pub stopped: Vec<String>,
+    /// Services that were successfully started.
+    pub started: Vec<String>,
+    /// Error messages for any failures.
+    pub errors: Vec<String>,
+    /// Whether the caller should drop to an interactive shell.
+    pub drop_to_shell: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Health check execution types
 // ---------------------------------------------------------------------------

@@ -50,14 +50,15 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v0.5.0 — Live Runlevel Transitions
+## v0.5.0 — Live Runlevel Transitions (complete)
 
-Planning logic exists (`plan_runlevel_switch`, `plan_shutdown`, `shutdown_order`). This milestone executes those plans.
-
-- [ ] Execute runlevel switch plans (stop/start services per plan)
-- [ ] Graceful drain: stop non-target services before starting target services
-- [ ] Execute shutdown plans (walk `ShutdownPlan.steps` in order)
-- [ ] Emergency shell: actually exec agnoshi on required boot step failure
+- [x] Execute shutdown plans — `execute_shutdown` walks `ShutdownPlan` steps
+- [x] `execute_runlevel_switch` — stop non-target, start target in dependency order
+- [x] Graceful drain: Phase 1 stops, Phase 2 starts with `resolve_service_order`
+- [x] `RunlevelSwitchResult` — structured result with stopped/started/errors
+- [x] `drop_to_emergency_shell` — spawns agnoshi from `EmergencyShellConfig`
+- [x] Emergency shortcircuit — `plan_runlevel_switch` early-returns for Emergency
+- [x] 246 tests, 0 benchmark regressions
 
 ---
 

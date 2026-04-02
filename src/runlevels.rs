@@ -7,8 +7,8 @@ use tracing::{debug, error, info, warn};
 
 use super::process::run_command;
 use super::types::{
-    BootMode, Runlevel, RunlevelSwitchPlan, SafeCommand, ServiceState, ServiceTarget,
-    ShutdownAction, ShutdownPlan, ShutdownStep, ShutdownStepStatus, ShutdownType,
+    BootMode, Runlevel, RunlevelSwitchPlan, RunlevelSwitchResult, SafeCommand, ServiceState,
+    ServiceTarget, ShutdownAction, ShutdownPlan, ShutdownStep, ShutdownStepStatus, ShutdownType,
 };
 
 impl super::ArgonautInit {
@@ -208,6 +208,136 @@ impl super::ArgonautInit {
         let mode = runlevel.to_boot_mode();
         debug!(runlevel = %runlevel, boot_mode = ?mode, "resolved runlevel to boot mode");
         mode
+    }
+
+    /// Execute a runlevel switch plan. Stops non-target services first
+    /// (graceful drain), then starts target services in dependency order.
+    ///
+    /// Returns a summary of what was stopped and started, plus any errors.
+    pub fn execute_runlevel_switch(
+        &mut self,
+        plan: &RunlevelSwitchPlan,
+        stop_timeout: Duration,
+    ) -> RunlevelSwitchResult {
+        info!(
+            from = %plan.from,
+            to = %plan.to,
+            stopping = plan.services_to_stop.len(),
+            starting = plan.services_to_start.len(),
+            "executing runlevel switch"
+        );
+
+        let mut stopped = Vec::new();
+        let mut started = Vec::new();
+        let mut errors = Vec::new();
+
+        // Phase 1: Drain — stop services that shouldn't be running
+        for name in &plan.services_to_stop {
+            match self.stop_service(name, stop_timeout) {
+                Ok(code) => {
+                    debug!(service = %name, exit_code = code, "stopped for runlevel switch");
+                    stopped.push(name.clone());
+                }
+                Err(e) => {
+                    warn!(service = %name, error = %e, "failed to stop during runlevel switch");
+                    errors.push(format!("stop {name}: {e}"));
+                }
+            }
+        }
+
+        // Phase 2: Start — bring up services for the target runlevel
+        // Sort by dependency order if possible
+        let start_order = {
+            let defs: Vec<&super::types::ServiceDefinition> = plan
+                .services_to_start
+                .iter()
+                .filter_map(|name| self.services.get(name).map(|s| &s.definition))
+                .collect();
+            match Self::resolve_service_order(&defs) {
+                Ok(order) => order,
+                Err(_) => plan.services_to_start.clone(), // fallback to plan order
+            }
+        };
+
+        for name in &start_order {
+            // Only start if the service is registered
+            if !self.services.contains_key(name) {
+                warn!(service = %name, "service not registered, skipping start");
+                errors.push(format!("start {name}: not registered"));
+                continue;
+            }
+
+            match self.start_service(name) {
+                Ok(pid) => {
+                    debug!(service = %name, pid = pid, "started for runlevel switch");
+                    started.push(name.clone());
+                }
+                Err(e) => {
+                    warn!(service = %name, error = %e, "failed to start during runlevel switch");
+                    errors.push(format!("start {name}: {e}"));
+                }
+            }
+        }
+
+        // Phase 3: Drop to shell if requested (emergency/rescue)
+        if plan.drop_to_shell {
+            info!(
+                runlevel = %plan.to,
+                "runlevel requires shell drop — caller should exec emergency shell"
+            );
+        }
+
+        info!(
+            from = %plan.from,
+            to = %plan.to,
+            stopped = stopped.len(),
+            started = started.len(),
+            errors = errors.len(),
+            "runlevel switch complete"
+        );
+
+        RunlevelSwitchResult {
+            from: plan.from,
+            to: plan.to,
+            stopped,
+            started,
+            errors,
+            drop_to_shell: plan.drop_to_shell,
+        }
+    }
+
+    /// Drop to the emergency shell. Spawns agnoshi (or configured shell)
+    /// as a foreground process.
+    ///
+    /// Returns the shell's exit code, or an error if the shell fails to
+    /// start.
+    pub fn drop_to_emergency_shell(&mut self) -> Result<i32> {
+        let shell_config = self.emergency_shell_config();
+
+        warn!(
+            shell = %shell_config.shell_path.display(),
+            "dropping to emergency shell"
+        );
+
+        // Print the banner
+        info!("{}", shell_config.banner);
+
+        // Build a ProcessSpec for the shell
+        let spec = super::types::ProcessSpec {
+            binary: shell_config.shell_path,
+            args: vec![],
+            environment: shell_config.environment,
+            working_dir: Some(std::path::PathBuf::from("/")),
+            stdout_log: None,
+            stderr_log: None,
+            uid: None,
+            gid: None,
+        };
+
+        let mut proc = super::process::spawn_process(&spec, "emergency-shell")?;
+        let code = proc.wait()?;
+        info!(exit_code = code, "emergency shell exited");
+        Ok(code)
     }
 
     /// Execute a shutdown plan. Walks each step in order, updating
