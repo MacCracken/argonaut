@@ -119,6 +119,7 @@ impl super::ArgonautInit {
     /// Shruti is **not** auto-started — users opt-in by adding the
     /// definition to `ArgonautConfig.services` or enabling it at
     /// runtime via `enable_optional_service("shruti")`.
+    #[must_use]
     pub fn shruti_service() -> ServiceDefinition {
         ServiceDefinition {
             name: "shruti".into(),
@@ -127,10 +128,7 @@ impl super::ArgonautInit {
             args: vec![],
             environment: {
                 let mut env = HashMap::new();
-                env.insert(
-                    "SHRUTI_DATA_DIR".into(),
-                    "/home/${USER}/.local/share/shruti".into(),
-                );
+                env.insert("SHRUTI_DATA_DIR".into(), "/var/lib/shruti".into());
                 env.insert("PIPEWIRE_RUNTIME_DIR".into(), "/run/user/1000".into());
                 env
             },
@@ -360,7 +358,11 @@ impl super::ArgonautInit {
 
         for svc in services {
             in_degree.entry(svc.name.as_str()).or_insert(0);
+            let mut seen_deps = std::collections::HashSet::new();
             for dep in &svc.depends_on {
+                if !seen_deps.insert(dep.as_str()) {
+                    continue; // skip duplicate dependency
+                }
                 if !name_set.contains_key(dep.as_str()) {
                     bail!(
                         "service '{}' depends on '{}' which is not defined",

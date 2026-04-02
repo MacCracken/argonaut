@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use tracing::{debug, warn};
 
-use crate::process::run_command;
-use crate::types::{HealthCheck, HealthCheckResult, HealthCheckType, ReadyCheck, SafeCommand};
+use crate::types::{HealthCheck, HealthCheckResult, HealthCheckType, ReadyCheck};
 
 // ---------------------------------------------------------------------------
 // Execute a single health check
@@ -38,7 +37,7 @@ pub fn execute_health_check(
 
     let result = HealthCheckResult {
         service: service_name.to_string(),
-        check_type: format!("{:?}", check.check_type),
+        check_type: check.check_type.to_string(),
         passed,
         latency_ms: latency.as_millis() as u64,
         message,
@@ -74,7 +73,7 @@ pub fn execute_ready_check(
         if per_check_timeout.is_zero() {
             return HealthCheckResult {
                 service: service_name.to_string(),
-                check_type: format!("{:?}", check.check_type),
+                check_type: check.check_type.to_string(),
                 passed: false,
                 latency_ms: overall_start.elapsed().as_millis() as u64,
                 message: Some("ready check timed out".to_string()),
@@ -102,7 +101,7 @@ pub fn execute_ready_check(
             );
             return HealthCheckResult {
                 service: service_name.to_string(),
-                check_type: format!("{:?}", check.check_type),
+                check_type: check.check_type.to_string(),
                 passed: true,
                 latency_ms: latency.as_millis() as u64,
                 message,
@@ -128,7 +127,7 @@ pub fn execute_ready_check(
     );
     HealthCheckResult {
         service: service_name.to_string(),
-        check_type: format!("{:?}", check.check_type),
+        check_type: check.check_type.to_string(),
         passed: false,
         latency_ms: overall_start.elapsed().as_millis() as u64,
         message: Some(format!(
@@ -177,10 +176,10 @@ fn execute_http_get(url: &str, timeout: Duration) -> (bool, Option<String>) {
 
     let request = format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
 
-    let mut writer = stream.try_clone().unwrap_or_else(|_| {
-        // Fallback: this shouldn't fail on a valid TCP stream
-        TcpStream::connect_timeout(&addr, timeout).expect("reconnect")
-    });
+    let mut writer = match stream.try_clone() {
+        Ok(s) => s,
+        Err(e) => return (false, Some(format!("stream clone failed: {e}"))),
+    };
     if let Err(e) = writer.write_all(request.as_bytes()) {
         return (false, Some(format!("write failed: {e}")));
     }
@@ -206,34 +205,55 @@ fn execute_http_get(url: &str, timeout: Duration) -> (bool, Option<String>) {
 /// TCP connect check — connect and immediately close.
 fn execute_tcp_connect(host: &str, port: u16, timeout: Duration) -> (bool, Option<String>) {
     let addr = format!("{host}:{port}");
-    match TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port))),
-        timeout,
-    ) {
+    let socket_addr: std::net::SocketAddr = match addr.parse() {
+        Ok(a) => a,
+        Err(e) => return (false, Some(format!("invalid address {addr}: {e}"))),
+    };
+    match TcpStream::connect_timeout(&socket_addr, timeout) {
         Ok(_stream) => (true, Some(format!("TCP connect to {addr} succeeded"))),
         Err(e) => (false, Some(format!("TCP connect to {addr} failed: {e}"))),
     }
 }
 
-/// Command check — run command, exit code 0 = healthy.
-fn execute_command_check(cmd_str: &str, _timeout: Duration) -> (bool, Option<String>) {
-    // Parse the command string into binary + args
+/// Command check — run command, exit code 0 = healthy. Enforces timeout.
+fn execute_command_check(cmd_str: &str, timeout: Duration) -> (bool, Option<String>) {
     let parts: Vec<&str> = cmd_str.split_whitespace().collect();
     if parts.is_empty() {
         return (false, Some("empty command".to_string()));
     }
 
-    let cmd = SafeCommand {
-        binary: parts[0].to_string(),
-        args: parts[1..].iter().map(|s| s.to_string()).collect(),
+    let mut child = match std::process::Command::new(parts[0])
+        .args(&parts[1..])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return (false, Some(format!("spawn failed: {e}"))),
     };
 
-    match run_command(&cmd) {
-        Ok(0) => (true, None),
-        Ok(code) => (false, Some(format!("command exited with code {code}"))),
-        Err(e) => (false, Some(format!("command failed: {e}"))),
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let code = status.code().unwrap_or(-1);
+                return if code == 0 {
+                    (true, None)
+                } else {
+                    (false, Some(format!("command exited with code {code}")))
+                };
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return (false, Some("command timed out".to_string()));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => return (false, Some(format!("wait failed: {e}"))),
+        }
     }
 }
 
@@ -241,7 +261,16 @@ fn execute_command_check(cmd_str: &str, _timeout: Duration) -> (bool, Option<Str
 fn execute_process_alive(pid: Option<u32>) -> (bool, Option<String>) {
     match pid {
         Some(pid) => {
-            let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
+            let raw = match i32::try_from(pid) {
+                Ok(r) => r,
+                Err(_) => {
+                    return (
+                        false,
+                        Some(format!("PID {pid} exceeds i32::MAX, cannot check")),
+                    );
+                }
+            };
+            let nix_pid = nix::unistd::Pid::from_raw(raw);
             match nix::sys::signal::kill(nix_pid, None) {
                 Ok(()) => (true, None),
                 Err(e) => (false, Some(format!("process {pid} not alive: {e}"))),
@@ -307,6 +336,7 @@ impl HealthHistory {
     /// Create a new history buffer with the given capacity.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
         Self {
             results: Vec::with_capacity(capacity),
             capacity,
@@ -383,14 +413,13 @@ impl HealthHistory {
 
     /// Iterate over all results in chronological order.
     pub fn iter(&self) -> impl Iterator<Item = &HealthCheckResult> {
-        let len = self.results.len();
-        if len < self.capacity {
-            // Buffer hasn't wrapped yet
-            self.results.iter()
+        let (a, b) = if self.results.len() < self.capacity {
+            (self.results.as_slice(), &[] as &[HealthCheckResult])
         } else {
-            // Return from write_pos (oldest) through the end, then start to write_pos
-            self.results.iter()
-        }
+            let (second, first) = self.results.split_at(self.write_pos);
+            (first, second)
+        };
+        a.iter().chain(b.iter())
     }
 
     /// Reset the history.

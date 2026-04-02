@@ -77,6 +77,13 @@ fn validate_device_path(path: &str) -> Result<(), String> {
         warn!("device path validation failed: empty path");
         return Err("device path cannot be empty".to_string());
     }
+    if path.contains("..") {
+        warn!(
+            path = &path[..path.len().min(20)],
+            "device path validation failed: path traversal attempt"
+        );
+        return Err("device path must not contain '..' components".to_string());
+    }
     if !path.starts_with("/dev/") {
         warn!(
             path = &path[..path.len().min(20)],

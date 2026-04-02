@@ -219,16 +219,26 @@ impl super::ArgonautInit {
                     // Agent notification is handled by the consumer (daimon).
                     Ok(())
                 }
-                ShutdownAction::StopService { name, signal: _ } => {
-                    info!(service = %name, "stopping service for shutdown");
-                    match self.stop_service(name, timeout) {
-                        Ok(code) => {
-                            debug!(service = %name, exit_code = code, "service stopped");
-                            Ok(())
+                ShutdownAction::StopService { name, signal } => {
+                    info!(service = %name, signal = signal, "stopping service for shutdown");
+                    if *signal == 9 {
+                        // SIGKILL — force kill immediately
+                        if let Some(mut proc) = self.processes.remove(name) {
+                            let _ = proc.kill();
+                            let _ = proc.wait();
                         }
-                        Err(e) => {
-                            warn!(service = %name, error = %e, "failed to stop service");
-                            Err(e.to_string())
+                        if let Some(svc) = self.services.get_mut(name) {
+                            svc.pid = None;
+                            svc.state = ServiceState::Stopped;
+                        }
+                        Ok(())
+                    } else {
+                        match self.stop_service(name, timeout) {
+                            Ok(_code) => Ok(()),
+                            Err(e) => {
+                                warn!(service = %name, error = %e, "failed to stop service");
+                                Err(e.to_string())
+                            }
                         }
                     }
                 }

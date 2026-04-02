@@ -64,9 +64,11 @@ impl NotifyListener {
     /// The path is typically `/run/argonaut/notify` or a temp path
     /// for testing.
     pub fn bind(path: &Path) -> io::Result<Self> {
-        // Remove stale socket if it exists
-        if path.exists() {
-            std::fs::remove_file(path)?;
+        // Remove stale socket if it exists (atomic, no TOCTOU)
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
         }
 
         // Ensure parent directory exists

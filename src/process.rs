@@ -102,9 +102,16 @@ impl SpawnedProcess {
         Ok(code)
     }
 
+    /// Convert the stored PID to a nix `Pid`, failing if it exceeds `i32::MAX`.
+    fn nix_pid(&self) -> Result<Pid> {
+        let raw = i32::try_from(self.pid)
+            .with_context(|| format!("PID {} exceeds i32::MAX", self.pid))?;
+        Ok(Pid::from_raw(raw))
+    }
+
     /// Send a signal to the process.
     pub fn signal(&self, sig: Signal) -> Result<()> {
-        let nix_pid = Pid::from_raw(self.pid as i32);
+        let nix_pid = self.nix_pid()?;
         signal::kill(nix_pid, sig).with_context(|| {
             format!(
                 "failed to send {} to service '{}' (pid {})",
@@ -133,7 +140,9 @@ impl SpawnedProcess {
     /// Check if the process is still alive (signal 0).
     #[must_use]
     pub fn is_alive(&self) -> bool {
-        let nix_pid = Pid::from_raw(self.pid as i32);
+        let Ok(nix_pid) = self.nix_pid() else {
+            return false;
+        };
         signal::kill(nix_pid, None).is_ok()
     }
 

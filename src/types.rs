@@ -283,6 +283,17 @@ pub enum HealthCheckType {
     ProcessAlive,
 }
 
+impl fmt::Display for HealthCheckType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HttpGet(url) => write!(f, "http-get({})", url),
+            Self::TcpConnect(host, port) => write!(f, "tcp-connect({}:{})", host, port),
+            Self::Command(cmd) => write!(f, "command({})", cmd),
+            Self::ProcessAlive => write!(f, "process-alive"),
+        }
+    }
+}
+
 /// Periodic health check for a running service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthCheck {

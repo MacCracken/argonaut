@@ -228,13 +228,12 @@ impl ArgonautInit {
     /// Called after a critical boot step failure.
     #[must_use]
     pub fn should_drop_to_emergency(&self) -> bool {
-        let should_drop = self
-            .failed_steps()
+        let failed = self.failed_steps();
+        let should_drop = failed
             .iter()
             .any(|step| step.required && step.status == BootStepStatus::Failed);
         if should_drop {
-            let failed_stages: Vec<_> = self
-                .failed_steps()
+            let failed_stages: Vec<_> = failed
                 .iter()
                 .filter(|s| s.required)
                 .map(|s| s.stage.to_string())
@@ -272,7 +271,9 @@ impl ArgonautInit {
         }
 
         let spec = {
-            let svc = self.services.get(name).unwrap();
+            let Some(svc) = self.services.get(name) else {
+                bail!("service '{}' not found", name);
+            };
             ProcessSpec::from_service(&svc.definition)
         };
 
@@ -374,6 +375,20 @@ impl ArgonautInit {
     /// Restart a service: stop it (if running) then start it again.
     /// Increments the restart counter.
     pub fn restart_service(&mut self, name: &str, stop_timeout: Duration) -> Result<u32> {
+        // Check restart limit before proceeding
+        if let Some(svc) = self.services.get(name)
+            && svc
+                .definition
+                .restart_config
+                .limit_exceeded(svc.restart_count)
+        {
+            bail!(
+                "service '{}' exceeded restart limit ({}/{})",
+                name,
+                svc.restart_count,
+                svc.definition.restart_config.max_restarts
+            );
+        }
         info!(service = name, "restarting service");
 
         // Stop if currently running
@@ -552,8 +567,10 @@ impl ArgonautInit {
         for (name, hc, pid) in &checks {
             let result = health::execute_health_check(name, hc, *pid);
 
-            // Update last_health_check timestamp
-            if let Some(svc) = self.services.get_mut(name.as_str()) {
+            // Update last_health_check timestamp only on passing checks
+            if result.passed
+                && let Some(svc) = self.services.get_mut(name.as_str())
+            {
                 svc.last_health_check = Some(Utc::now());
             }
 
