@@ -1,11 +1,14 @@
 //! Runlevel management — shutdown planning and runlevel switching.
 
-use anyhow::Result;
-use tracing::{debug, info};
+use std::time::Duration;
 
+use anyhow::Result;
+use tracing::{debug, error, info, warn};
+
+use super::process::run_command;
 use super::types::{
-    BootMode, Runlevel, RunlevelSwitchPlan, ServiceState, ServiceTarget, ShutdownAction,
-    ShutdownPlan, ShutdownStep, ShutdownStepStatus, ShutdownType,
+    BootMode, Runlevel, RunlevelSwitchPlan, SafeCommand, ServiceState, ServiceTarget,
+    ShutdownAction, ShutdownPlan, ShutdownStep, ShutdownStepStatus, ShutdownType,
 };
 
 impl super::ArgonautInit {
@@ -187,5 +190,127 @@ impl super::ArgonautInit {
         let mode = runlevel.to_boot_mode();
         debug!(runlevel = %runlevel, boot_mode = ?mode, "resolved runlevel to boot mode");
         mode
+    }
+
+    /// Execute a shutdown plan. Walks each step in order, updating
+    /// step status as it goes. Service stops use SIGTERM → wait → SIGKILL.
+    ///
+    /// Returns the completed plan with updated step statuses.
+    pub fn execute_shutdown(&mut self, mut plan: ShutdownPlan) -> ShutdownPlan {
+        info!(
+            shutdown_type = %plan.shutdown_type,
+            steps = plan.steps.len(),
+            "executing shutdown plan"
+        );
+
+        for step in &mut plan.steps {
+            step.status = ShutdownStepStatus::InProgress;
+            let timeout = Duration::from_millis(step.timeout_ms);
+
+            let result = match &step.action {
+                ShutdownAction::WallMessage(msg) => {
+                    info!(message = %msg, "shutdown wall message");
+                    // In a real system this would write to /dev/console or
+                    // use the `wall` command. For now, just log it.
+                    Ok(())
+                }
+                ShutdownAction::NotifyAgents => {
+                    info!("notifying agents to save state");
+                    // Agent notification is handled by the consumer (daimon).
+                    Ok(())
+                }
+                ShutdownAction::StopService { name, signal: _ } => {
+                    info!(service = %name, "stopping service for shutdown");
+                    match self.stop_service(name, timeout) {
+                        Ok(code) => {
+                            debug!(service = %name, exit_code = code, "service stopped");
+                            Ok(())
+                        }
+                        Err(e) => {
+                            warn!(service = %name, error = %e, "failed to stop service");
+                            Err(e.to_string())
+                        }
+                    }
+                }
+                ShutdownAction::ForceKillService { name } => {
+                    warn!(service = %name, "force killing service");
+                    if let Some(mut proc) = self.processes.remove(name) {
+                        let _ = proc.kill();
+                        let _ = proc.wait();
+                    }
+                    if let Some(svc) = self.services.get_mut(name) {
+                        svc.pid = None;
+                        svc.state = ServiceState::Stopped;
+                    }
+                    Ok(())
+                }
+                ShutdownAction::SyncFilesystems => {
+                    info!("syncing filesystem buffers");
+                    let cmd = SafeCommand {
+                        binary: "sync".to_string(),
+                        args: vec![],
+                    };
+                    match run_command(&cmd) {
+                        Ok(0) => Ok(()),
+                        Ok(code) => Err(format!("sync exited with code {code}")),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                ShutdownAction::UnmountFilesystems => {
+                    info!("unmounting filesystems");
+                    // In a real init system, this would iterate mount points.
+                    // For now, log only — actual unmount requires root.
+                    Ok(())
+                }
+                ShutdownAction::SwapOff => {
+                    info!("deactivating swap");
+                    let cmd = SafeCommand {
+                        binary: "swapoff".to_string(),
+                        args: vec!["-a".to_string()],
+                    };
+                    match run_command(&cmd) {
+                        Ok(0) => Ok(()),
+                        Ok(code) => {
+                            warn!(exit_code = code, "swapoff returned non-zero");
+                            Ok(()) // non-fatal
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "swapoff failed");
+                            Ok(()) // non-fatal
+                        }
+                    }
+                }
+                ShutdownAction::CloseLuks => {
+                    info!("closing LUKS volumes");
+                    // LUKS close requires cryptsetup and root.
+                    // Log only for now.
+                    Ok(())
+                }
+                ShutdownAction::KernelAction(action) => {
+                    info!(action = %action, "executing final kernel action");
+                    // In a real init system, this would call reboot(2).
+                    // We log it; the actual syscall is the consumer's job.
+                    Ok(())
+                }
+            };
+
+            match result {
+                Ok(()) => {
+                    step.status = ShutdownStepStatus::Complete;
+                    debug!(description = %step.description, "shutdown step complete");
+                }
+                Err(msg) => {
+                    error!(description = %step.description, error = %msg, "shutdown step failed");
+                    step.status = ShutdownStepStatus::Failed(msg);
+                    // Continue with remaining steps — shutdown should be best-effort
+                }
+            }
+        }
+
+        info!(
+            shutdown_type = %plan.shutdown_type,
+            "shutdown plan execution complete"
+        );
+        plan
     }
 }

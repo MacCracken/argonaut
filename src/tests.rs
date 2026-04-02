@@ -2231,3 +2231,220 @@ fn serde_service_target() {
         serde_roundtrip(target);
     }
 }
+
+// -----------------------------------------------------------------------
+// Process execution integration tests
+// -----------------------------------------------------------------------
+
+use std::time::Duration;
+
+/// Create a minimal config with a single service pointing to a real binary.
+fn config_with_service(name: &str, binary: &str, args: Vec<&str>) -> ArgonautConfig {
+    ArgonautConfig {
+        boot_mode: BootMode::Minimal,
+        services: vec![ServiceDefinition {
+            name: name.into(),
+            description: format!("test service {name}"),
+            binary_path: PathBuf::from(binary),
+            args: args.into_iter().map(String::from).collect(),
+            environment: HashMap::new(),
+            depends_on: vec![],
+            required_for_modes: vec![BootMode::Minimal],
+            restart_policy: RestartPolicy::Never,
+            restart_config: RestartConfig::default(),
+            health_check: None,
+            ready_check: None,
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn start_service_spawns_process() {
+    let config = config_with_service("sleeper", "/usr/bin/sleep", vec!["60"]);
+    let mut init = ArgonautInit::new(config);
+    let pid = init.start_service("sleeper").unwrap();
+    assert!(pid > 0);
+    assert_eq!(
+        init.get_service_state("sleeper"),
+        Some(&ServiceState::Running)
+    );
+    assert_eq!(init.services.get("sleeper").unwrap().pid, Some(pid));
+
+    // Cleanup
+    init.stop_service("sleeper", Duration::from_secs(2))
+        .unwrap();
+}
+
+#[test]
+fn stop_service_terminates_process() {
+    let config = config_with_service("sleeper", "/usr/bin/sleep", vec!["60"]);
+    let mut init = ArgonautInit::new(config);
+    init.start_service("sleeper").unwrap();
+
+    let code = init
+        .stop_service("sleeper", Duration::from_secs(2))
+        .unwrap();
+    assert_ne!(code, 0); // killed by SIGTERM
+    assert_eq!(
+        init.get_service_state("sleeper"),
+        Some(&ServiceState::Stopped)
+    );
+    assert_eq!(init.services.get("sleeper").unwrap().pid, None);
+    assert!(!init.processes.contains("sleeper"));
+}
+
+#[test]
+fn start_unknown_service_fails() {
+    let mut init = ArgonautInit::new(ArgonautConfig {
+        boot_mode: BootMode::Minimal,
+        ..Default::default()
+    });
+    let result = init.start_service("nonexistent");
+    assert!(result.is_err());
+}
+
+#[test]
+fn start_service_with_bad_binary_transitions_to_failed() {
+    let config = config_with_service("bad", "/nonexistent/binary", vec![]);
+    let mut init = ArgonautInit::new(config);
+    let result = init.start_service("bad");
+    assert!(result.is_err());
+    assert!(matches!(
+        init.get_service_state("bad"),
+        Some(ServiceState::Failed(_))
+    ));
+}
+
+#[test]
+fn restart_service_increments_count() {
+    let config = config_with_service("sleeper", "/usr/bin/sleep", vec!["60"]);
+    let mut init = ArgonautInit::new(config);
+    init.start_service("sleeper").unwrap();
+
+    init.restart_service("sleeper", Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(init.services.get("sleeper").unwrap().restart_count, 1);
+    assert_eq!(
+        init.get_service_state("sleeper"),
+        Some(&ServiceState::Running)
+    );
+
+    // Cleanup
+    init.stop_service("sleeper", Duration::from_secs(2))
+        .unwrap();
+}
+
+#[test]
+fn reap_services_detects_exited() {
+    let config = config_with_service("fast", "/usr/bin/true", vec![]);
+    let mut init = ArgonautInit::new(config);
+    init.start_service("fast").unwrap();
+
+    // Wait for it to exit
+    std::thread::sleep(Duration::from_millis(200));
+
+    let reaped = init.reap_services();
+    assert_eq!(reaped.len(), 1);
+    assert_eq!(reaped[0].0, "fast");
+    assert_eq!(reaped[0].1, 0);
+    assert_eq!(init.get_service_state("fast"), Some(&ServiceState::Stopped));
+}
+
+#[test]
+fn reap_services_marks_nonzero_as_failed() {
+    let config = config_with_service("fail", "/usr/bin/false", vec![]);
+    let mut init = ArgonautInit::new(config);
+    init.start_service("fail").unwrap();
+
+    std::thread::sleep(Duration::from_millis(200));
+
+    let reaped = init.reap_services();
+    assert_eq!(reaped.len(), 1);
+    assert!(matches!(
+        init.get_service_state("fail"),
+        Some(ServiceState::Failed(_))
+    ));
+}
+
+#[test]
+fn stop_all_services_stops_everything() {
+    let mut config = ArgonautConfig {
+        boot_mode: BootMode::Minimal,
+        services: vec![],
+        ..Default::default()
+    };
+    for i in 0..3 {
+        config.services.push(ServiceDefinition {
+            name: format!("svc-{i}"),
+            description: format!("test {i}"),
+            binary_path: PathBuf::from("/usr/bin/sleep"),
+            args: vec!["60".into()],
+            environment: HashMap::new(),
+            depends_on: vec![],
+            required_for_modes: vec![BootMode::Minimal],
+            restart_policy: RestartPolicy::Never,
+            restart_config: RestartConfig::default(),
+            health_check: None,
+            ready_check: None,
+        });
+    }
+
+    let mut init = ArgonautInit::new(config);
+    for i in 0..3 {
+        init.start_service(&format!("svc-{i}")).unwrap();
+    }
+
+    let results = init.stop_all_services(Duration::from_secs(3));
+    assert_eq!(results.len(), 3);
+    assert!(init.processes.is_empty());
+}
+
+// -----------------------------------------------------------------------
+// Shutdown execution tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn execute_shutdown_stops_running_services() {
+    let config = config_with_service("sleeper", "/usr/bin/sleep", vec!["60"]);
+    let mut init = ArgonautInit::new(config);
+    init.start_service("sleeper").unwrap();
+
+    let plan = init.plan_shutdown(ShutdownType::Poweroff).unwrap();
+    let executed = init.execute_shutdown(plan);
+
+    // All steps should be Complete (or non-fatal)
+    for step in &executed.steps {
+        assert!(
+            matches!(
+                step.status,
+                ShutdownStepStatus::Complete | ShutdownStepStatus::Failed(_)
+            ),
+            "step '{}' has unexpected status: {:?}",
+            step.description,
+            step.status,
+        );
+    }
+
+    // Service should be stopped
+    assert_eq!(
+        init.get_service_state("sleeper"),
+        Some(&ServiceState::Stopped)
+    );
+    assert!(init.processes.is_empty());
+}
+
+#[test]
+fn execute_shutdown_completes_with_no_services() {
+    let mut init = ArgonautInit::new(recovery_config());
+    let plan = init.plan_shutdown(ShutdownType::Halt).unwrap();
+    let executed = init.execute_shutdown(plan);
+
+    // All steps should complete (no services to stop)
+    let completed = executed
+        .steps
+        .iter()
+        .filter(|s| s.status == ShutdownStepStatus::Complete)
+        .count();
+    assert!(completed > 0);
+}

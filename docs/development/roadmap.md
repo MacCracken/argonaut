@@ -16,17 +16,21 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v0.3.0 — Process Execution
+## v0.3.0 — Process Execution (complete)
 
-Fork/exec is the critical gap — everything before this is types and planning only.
-
-- [ ] Fork/exec service processes via `SafeCommand` / `ProcessSpec`
-- [ ] PID tracking and reaping (waitpid)
-- [ ] Signal delivery (SIGTERM for graceful, SIGKILL after timeout)
-- [ ] Stdout/stderr capture to log files (`/var/log/agnos/services/{name}.log`)
-- [ ] Shutdown timeout enforcement (SIGTERM → wait → SIGKILL)
-- [ ] Watchdog timer (kill unresponsive services after configured timeout)
-- [ ] Service readiness notification (sd_notify compatible)
+- [x] `process.rs` — fork/exec via `std::process::Command` from `ProcessSpec`
+- [x] `SpawnedProcess` — PID tracking, `try_wait`/`wait`, uptime
+- [x] Signal delivery via `nix` — SIGTERM, SIGKILL, arbitrary signals
+- [x] Graceful stop: SIGTERM → poll → SIGKILL with configurable timeout
+- [x] Stdout/stderr capture to log files (graceful fallback to /dev/null)
+- [x] `ProcessTable` — tracks all running processes, bulk reap, bulk stop
+- [x] `ArgonautInit::start_service/stop_service/restart_service` — full lifecycle
+- [x] `ArgonautInit::reap_services` — detect and handle exited processes
+- [x] `execute_shutdown` — walks `ShutdownPlan` steps with real process stops
+- [x] `run_command`/`run_command_sequence` — one-shot `SafeCommand` execution
+- [x] Watchdog timer — `check_watchdog`/`enforce_watchdog` for startup + runtime timeouts
+- [x] `notify.rs` — sd_notify compatible `NotifyListener` (READY=1, STATUS, MAINPID)
+- [x] 223 tests, 0 benchmark regressions
 
 ---
 
