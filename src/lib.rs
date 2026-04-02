@@ -116,14 +116,13 @@ impl ArgonautInit {
             if step.started_at.is_none() {
                 step.started_at = Some(Utc::now());
             }
+            // Set boot_started on the first step start if not yet set.
+            if self.boot_started.is_none() {
+                self.boot_started = step.started_at;
+            }
             step.status = BootStepStatus::Complete;
             step.completed_at = Some(Utc::now());
             info!(stage = %stage, "boot step complete");
-
-            // Set boot_started on the first step completion if not yet set.
-            if self.boot_started.is_none() {
-                self.boot_started = Some(Utc::now());
-            }
 
             // If this was the BootComplete stage, mark the overall boot time.
             if stage == BootStage::BootComplete {
@@ -144,14 +143,13 @@ impl ArgonautInit {
             if step.started_at.is_none() {
                 step.started_at = Some(Utc::now());
             }
+            // Set boot_started on the first step start if not yet set.
+            if self.boot_started.is_none() {
+                self.boot_started = step.started_at;
+            }
             step.status = BootStepStatus::Failed;
             step.completed_at = Some(Utc::now());
             step.error = Some(error);
-
-            // Set boot_started on the first step if not yet set.
-            if self.boot_started.is_none() {
-                self.boot_started = Some(Utc::now());
-            }
             true
         } else {
             false
@@ -415,14 +413,22 @@ impl ArgonautInit {
 
     /// Reap any service processes that have exited and update their
     /// managed state accordingly. Returns the list of
-    /// (service_name, exit_code) for services that exited.
-    pub fn reap_services(&mut self) -> Vec<(String, i32)> {
+    /// (service_name, exit_code, crash_action) for services that exited.
+    pub fn reap_services(&mut self) -> Vec<(String, i32, CrashAction)> {
         let exited = self.processes.reap_exited();
+        let mut results = Vec::new();
 
-        for (name, code) in &exited {
-            if let Some(svc) = self.services.get_mut(name) {
+        for (name, code) in exited {
+            let exit_status = if code == 0 {
+                ExitStatus::Code(0)
+            } else {
+                ExitStatus::Code(code)
+            };
+
+            // Update state
+            if let Some(svc) = self.services.get_mut(&name) {
                 svc.pid = None;
-                if *code == 0 {
+                if code == 0 {
                     svc.state = ServiceState::Stopped;
                 } else {
                     svc.state = ServiceState::Failed(format!("exit code {}", code));
@@ -434,9 +440,13 @@ impl ArgonautInit {
                     "reaped exited service"
                 );
             }
+
+            // Determine crash action
+            let action = self.on_service_crash(&name, &exit_status);
+            results.push((name, code, action));
         }
 
-        exited
+        results
     }
 
     /// Stop all running services. Used during shutdown.
@@ -502,14 +512,25 @@ impl ArgonautInit {
                 let watchdog_ms = hc.interval_ms * u64::from(hc.retries) + hc.timeout_ms;
                 let watchdog = Duration::from_millis(watchdog_ms);
 
-                // If no health check has ever passed and we've been
-                // running longer than the watchdog window, flag it.
-                if svc.last_health_check.is_none() && uptime > watchdog {
+                let should_trigger = match svc.last_health_check {
+                    // No passing health check ever recorded
+                    None => uptime > watchdog,
+                    // Last passing check is older than the watchdog window
+                    Some(last_pass) => {
+                        let elapsed = Utc::now()
+                            .signed_duration_since(last_pass)
+                            .to_std()
+                            .unwrap_or(Duration::ZERO);
+                        elapsed > watchdog
+                    }
+                };
+
+                if should_trigger {
                     warn!(
                         service = name,
                         uptime_ms = uptime.as_millis() as u64,
                         watchdog_ms = watchdog_ms,
-                        "service exceeded watchdog timeout (no health check recorded)"
+                        "service exceeded watchdog timeout"
                     );
                     timed_out.push(name.to_string());
                 }
@@ -548,11 +569,10 @@ impl ArgonautInit {
     ///
     /// This is meant to be called periodically by the main event loop.
     /// It does NOT enforce timing — the caller decides when to poll.
-    pub fn poll_health(&mut self) -> Vec<HealthCheckResult> {
+    pub fn poll_health(&mut self, tracker: &mut HealthTracker) -> Vec<HealthCheckResult> {
         let mut results = Vec::new();
 
-        // Collect service names + check configs to avoid borrow conflict
-        let checks: Vec<(String, HealthCheck, Option<u32>)> = self
+        let checks: Vec<(String, HealthCheck, Option<u32>, u32)> = self
             .services
             .iter()
             .filter(|(_, svc)| svc.state == ServiceState::Running)
@@ -560,12 +580,22 @@ impl ArgonautInit {
                 svc.definition
                     .health_check
                     .as_ref()
-                    .map(|hc| (name.clone(), hc.clone(), svc.pid))
+                    .map(|hc| (name.clone(), hc.clone(), svc.pid, hc.retries))
             })
             .collect();
 
-        for (name, hc, pid) in &checks {
+        for (name, hc, pid, threshold) in &checks {
             let result = health::execute_health_check(name, hc, *pid);
+
+            // Feed into HealthTracker
+            let should_restart = tracker.record(name, result.passed, *threshold);
+            if should_restart {
+                warn!(
+                    service = %name,
+                    consecutive_failures = tracker.failure_count(name),
+                    "health check threshold exceeded — service should be restarted"
+                );
+            }
 
             // Update last_health_check timestamp only on passing checks
             if result.passed

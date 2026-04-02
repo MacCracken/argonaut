@@ -2030,7 +2030,6 @@ fn serde_service_state() {
         ServiceState::Running,
         ServiceState::Stopping,
         ServiceState::Failed("crash".into()),
-        ServiceState::Restarting,
     ] {
         serde_roundtrip(&state);
     }
@@ -2346,8 +2345,9 @@ fn reap_services_detects_exited() {
 
     let reaped = init.reap_services();
     assert_eq!(reaped.len(), 1);
-    assert_eq!(reaped[0].0, "fast");
-    assert_eq!(reaped[0].1, 0);
+    let (ref name, code, ref _action) = reaped[0];
+    assert_eq!(name, "fast");
+    assert_eq!(code, 0);
     assert_eq!(init.get_service_state("fast"), Some(&ServiceState::Stopped));
 }
 

@@ -288,6 +288,16 @@ pub fn spawn_process(spec: &ProcessSpec, service_name: &str) -> Result<SpawnedPr
     // Don't inherit stdin
     cmd.stdin(Stdio::null());
 
+    // Privilege separation — not yet implemented in safe code.
+    // Return an error rather than silently ignoring uid/gid.
+    if spec.uid.is_some() || spec.gid.is_some() {
+        bail!(
+            "uid/gid privilege drop is not yet implemented for service '{}'. \
+             Set uid/gid to None, or implement privilege drop in the PID 1 binary.",
+            service_name
+        );
+    }
+
     let child = cmd.spawn().with_context(|| {
         format!(
             "failed to spawn service '{}' ({})",
@@ -506,9 +516,28 @@ impl ProcessTable {
             if let Some(proc) = self.processes.get_mut(name) {
                 warn!(service = %name, pid = proc.pid, "sending SIGKILL after timeout");
                 let _ = proc.kill();
-                match proc.wait() {
-                    Ok(code) => results.push((name.clone(), code)),
-                    Err(e) => error!(service = %name, error = %e, "failed to wait after SIGKILL"),
+                // Wait briefly for SIGKILL to take effect (non-blocking with cap)
+                let kill_deadline = Instant::now() + Duration::from_millis(500);
+                loop {
+                    match proc.try_wait() {
+                        Ok(Some(code)) => {
+                            results.push((name.clone(), code));
+                            break;
+                        }
+                        Ok(None) => {
+                            if Instant::now() >= kill_deadline {
+                                error!(service = %name, pid = proc.pid, "process did not exit after SIGKILL");
+                                results.push((name.clone(), -1));
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => {
+                            error!(service = %name, error = %e, "failed to wait after SIGKILL");
+                            results.push((name.clone(), -1));
+                            break;
+                        }
+                    }
                 }
             }
         }

@@ -118,6 +118,35 @@ impl super::ArgonautInit {
         target: Runlevel,
         targets: &[ServiceTarget],
     ) -> RunlevelSwitchPlan {
+        // Emergency: stop everything, start nothing
+        if target == Runlevel::Emergency {
+            let services_to_stop: Vec<String> = self
+                .services
+                .iter()
+                .filter(|(_, svc)| {
+                    svc.state == ServiceState::Running || svc.state == ServiceState::Starting
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
+
+            let plan = RunlevelSwitchPlan {
+                from: Runlevel::from_boot_mode(self.config.boot_mode),
+                to: target,
+                services_to_start: vec![],
+                services_to_stop,
+                drop_to_shell: true,
+            };
+            info!(
+                from = %plan.from,
+                to = %plan.to,
+                starting = plan.services_to_start.len(),
+                stopping = plan.services_to_stop.len(),
+                drop_to_shell = plan.drop_to_shell,
+                "runlevel switch plan created (emergency)"
+            );
+            return plan;
+        }
+
         let mut services_to_start = Vec::new();
         let mut services_to_stop = Vec::new();
 
@@ -152,17 +181,6 @@ impl super::ArgonautInit {
                 && !desired.contains(name)
             {
                 services_to_stop.push(name.clone());
-            }
-        }
-
-        // Emergency/rescue: stop everything except basic shell
-        if target == Runlevel::Emergency {
-            services_to_stop.clear();
-            services_to_start.clear();
-            for (name, svc) in &self.services {
-                if svc.state == ServiceState::Running || svc.state == ServiceState::Starting {
-                    services_to_stop.push(name.clone());
-                }
             }
         }
 

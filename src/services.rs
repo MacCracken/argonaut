@@ -528,7 +528,6 @@ impl super::ArgonautInit {
     }
 
     /// Record a service event in the audit log.
-    #[must_use]
     pub fn record_event(&self, service: &str, event_type: ServiceEventType) -> ServiceEvent {
         let event = ServiceEvent {
             timestamp: Utc::now(),

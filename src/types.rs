@@ -179,6 +179,7 @@ impl fmt::Display for BootStepStatus {
 // ---------------------------------------------------------------------------
 
 /// A single step in the boot sequence.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootStep {
     /// Which stage this step represents.
@@ -359,7 +360,6 @@ pub enum ServiceState {
     Running,
     Stopping,
     Failed(String),
-    Restarting,
 }
 
 impl ServiceState {
@@ -384,7 +384,6 @@ impl ServiceState {
             ServiceState::Failed(_) => {
                 matches!(to, ServiceState::Starting | ServiceState::Stopped)
             }
-            ServiceState::Restarting => matches!(to, ServiceState::Starting),
         }
     }
 }
@@ -397,7 +396,6 @@ impl fmt::Display for ServiceState {
             Self::Running => write!(f, "running"),
             Self::Stopping => write!(f, "stopping"),
             Self::Failed(msg) => write!(f, "failed: {msg}"),
-            Self::Restarting => write!(f, "restarting"),
         }
     }
 }
@@ -452,6 +450,7 @@ impl Default for ArgonautConfig {
 // ---------------------------------------------------------------------------
 
 /// Snapshot of init-system statistics.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArgonautStats {
     pub boot_mode: BootMode,
@@ -650,6 +649,7 @@ impl fmt::Display for ExitStatus {
 }
 
 /// A service lifecycle event recorded in the audit log.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceEvent {
     pub timestamp: DateTime<Utc>,
@@ -729,6 +729,7 @@ impl fmt::Display for ShutdownType {
 }
 
 /// A shutdown plan describing the ordered steps to cleanly shut down.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShutdownPlan {
     pub shutdown_type: ShutdownType,
@@ -738,6 +739,7 @@ pub struct ShutdownPlan {
 }
 
 /// An individual shutdown step.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShutdownStep {
     pub description: String,
@@ -794,6 +796,7 @@ impl fmt::Display for ShutdownStepStatus {
 }
 
 /// Plan for switching between runlevels at runtime.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunlevelSwitchPlan {
     pub from: Runlevel,
@@ -808,6 +811,7 @@ pub struct RunlevelSwitchPlan {
 // ---------------------------------------------------------------------------
 
 /// Result of executing a single health check.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthCheckResult {
     pub service: String,

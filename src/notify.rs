@@ -93,8 +93,8 @@ impl NotifyListener {
     }
 
     /// Try to receive a notification without blocking.
-    /// Returns `None` if no message is available.
-    pub fn try_recv(&self) -> Option<NotifyMessage> {
+    /// Returns `Ok(None)` if no message is available.
+    pub fn try_recv(&self) -> Result<Option<NotifyMessage>, io::Error> {
         let mut buf = [0u8; 4096];
         match self.socket.recv(&mut buf) {
             Ok(n) => {
@@ -105,21 +105,25 @@ impl NotifyListener {
                     main_pid = ?msg.main_pid,
                     "received notify message"
                 );
-                Some(msg)
+                Ok(Some(msg))
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => None,
-            Err(e) => {
-                warn!(error = %e, "error receiving notify message");
-                None
-            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
     /// Drain all pending notifications. Returns all parsed messages.
     pub fn drain(&self) -> Vec<NotifyMessage> {
         let mut messages = Vec::new();
-        while let Some(msg) = self.try_recv() {
-            messages.push(msg);
+        loop {
+            match self.try_recv() {
+                Ok(Some(msg)) => messages.push(msg),
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(error = %e, "error during notify drain");
+                    break;
+                }
+            }
         }
         messages
     }
@@ -196,7 +200,7 @@ mod tests {
         // Send a ready message
         send_notify(&sock_path, "READY=1\nSTATUS=ok\n").unwrap();
 
-        let msg = listener.try_recv().unwrap();
+        let msg = listener.try_recv().unwrap().unwrap();
         assert!(msg.ready);
         assert_eq!(msg.status.as_deref(), Some("ok"));
     }
@@ -207,7 +211,7 @@ mod tests {
         let sock_path = dir.path().join("notify.sock");
         let listener = NotifyListener::bind(&sock_path).unwrap();
 
-        assert!(listener.try_recv().is_none());
+        assert!(listener.try_recv().unwrap().is_none());
     }
 
     #[test]
