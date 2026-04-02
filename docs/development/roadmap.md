@@ -4,74 +4,15 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v0.2.0 — Hardening (complete)
+## v0.6.0 — Edge Boot Execution (complete)
 
-- [x] Serde roundtrip tests for all public types (24 tests)
-- [x] CI workflows (ci.yml, release.yml)
-- [x] Rename "agent-runtime" to "daimon" in all service definitions
-- [x] Add `BootMode::Recovery` with boot sequence, tests, runlevel mapping
-- [x] `#![forbid(unsafe_code)]`
-- [x] `RestartConfig` struct — configurable backoff curve and restart limit per-service
-- [x] Minimum 100ms floor on backoff delay to prevent busy-retry loops
-
----
-
-## v0.3.0 — Process Execution (complete)
-
-- [x] `process.rs` — fork/exec via `std::process::Command` from `ProcessSpec`
-- [x] `SpawnedProcess` — PID tracking, `try_wait`/`wait`, uptime
-- [x] Signal delivery via `nix` — SIGTERM, SIGKILL, arbitrary signals
-- [x] Graceful stop: SIGTERM → poll → SIGKILL with configurable timeout
-- [x] Stdout/stderr capture to log files (graceful fallback to /dev/null)
-- [x] `ProcessTable` — tracks all running processes, bulk reap, bulk stop
-- [x] `ArgonautInit::start_service/stop_service/restart_service` — full lifecycle
-- [x] `ArgonautInit::reap_services` — detect and handle exited processes
-- [x] `execute_shutdown` — walks `ShutdownPlan` steps with real process stops
-- [x] `run_command`/`run_command_sequence` — one-shot `SafeCommand` execution
-- [x] Watchdog timer — `check_watchdog`/`enforce_watchdog` for startup + runtime timeouts
-- [x] `notify.rs` — sd_notify compatible `NotifyListener` (READY=1, STATUS, MAINPID)
-- [x] 223 tests, 0 benchmark regressions
-
----
-
-## v0.4.0 — Health Check Execution (complete)
-
-- [x] `health.rs` — execute all `HealthCheckType` variants (zero external HTTP deps)
-- [x] HTTP GET via raw TCP + HTTP/1.1 status parsing
-- [x] TCP connect check with timeout
-- [x] Command check (exit code 0 = healthy)
-- [x] ProcessAlive check via `kill(pid, 0)`
-- [x] `HealthState` enum (Unknown → Healthy → Degraded → Unhealthy)
-- [x] `HealthHistory` ring buffer with configurable capacity
-- [x] Ready check execution in `start_service` (poll until ready or timeout, kill if failed)
-- [x] `poll_health` method for periodic health checking of all running services
-- [x] Removed `ureq` dependency — raw TCP keeps dep tree lean
-- [x] 240 tests, 0 benchmark regressions
-
----
-
-## v0.5.0 — Live Runlevel Transitions (complete)
-
-- [x] Execute shutdown plans — `execute_shutdown` walks `ShutdownPlan` steps
-- [x] `execute_runlevel_switch` — stop non-target, start target in dependency order
-- [x] Graceful drain: Phase 1 stops, Phase 2 starts with `resolve_service_order`
-- [x] `RunlevelSwitchResult` — structured result with stopped/started/errors
-- [x] `drop_to_emergency_shell` — spawns agnoshi from `EmergencyShellConfig`
-- [x] Emergency shortcircuit — `plan_runlevel_switch` early-returns for Emergency
-- [x] 246 tests, 0 benchmark regressions
-
----
-
-## v0.6.0 — Edge Boot Execution
-
-Command generation exists (`configure_readonly_rootfs`, `verify_rootfs_integrity`). This milestone runs them.
-
-- [ ] Execute rootfs/verity `SafeCommand` sequences
-- [ ] dm-verity integration via agnosys crate
-- [ ] LUKS unlock during boot (TPM or passphrase)
-- [ ] Boot time budget enforcement (watchdog at `EdgeBootConfig.max_boot_time_ms`)
-- [ ] Minimal boot profile validation (< 2s target, < 50MB RAM)
-- [ ] Fleet auto-registration on first boot (daimon edge handshake)
+- [x] `execute_edge_boot` — runs rootfs lockdown, dm-verity, LUKS unlock in sequence
+- [x] `unlock_luks` / `close_luks` — LUKS command generation with input validation
+- [x] `EdgeBootConfig` wired into `ArgonautConfig`
+- [x] Boot time budget enforcement — reports `within_budget` in `EdgeBootResult`
+- [x] `validate_edge_profile` — memory + boot time + rootfs validation
+- [x] `FleetRegistration` — system payload builder from `/proc` + `/etc` (JSON serializable)
+- [x] 256 tests, 0 benchmark regressions
 
 ---
 

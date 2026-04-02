@@ -430,6 +430,8 @@ pub struct ArgonautConfig {
     pub log_to_console: bool,
     /// Whether to run dm-verity rootfs verification at boot.
     pub verify_on_boot: bool,
+    /// Edge boot configuration (used when `boot_mode` is `Edge`).
+    pub edge_boot: EdgeBootConfig,
 }
 
 impl Default for ArgonautConfig {
@@ -441,6 +443,7 @@ impl Default for ArgonautConfig {
             shutdown_timeout_ms: 10_000,
             log_to_console: true,
             verify_on_boot: true,
+            edge_boot: EdgeBootConfig::default(),
         }
     }
 }

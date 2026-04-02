@@ -33,7 +33,10 @@ mod tests;
 
 // Re-export all public types so external consumers see the same flat API
 // as they did when this was a single argonaut.rs file.
-pub use edge_boot::{configure_readonly_rootfs, verify_rootfs_integrity};
+pub use edge_boot::{
+    EdgeBootResult, FleetRegistration, close_luks, configure_readonly_rootfs, execute_edge_boot,
+    unlock_luks, validate_edge_profile, verify_rootfs_integrity,
+};
 pub use health::{HealthHistory, HealthState, execute_health_check, execute_ready_check};
 pub use notify::{NotifyListener, NotifyMessage, send_notify};
 pub use process::{ProcessTable, SpawnedProcess, run_command, run_command_sequence, spawn_process};

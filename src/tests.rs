@@ -2532,3 +2532,140 @@ fn serde_runlevel_switch_result() {
     };
     serde_roundtrip(&result);
 }
+
+// -----------------------------------------------------------------------
+// Edge boot execution tests
+// -----------------------------------------------------------------------
+
+use super::edge_boot::{
+    EdgeBootResult, FleetRegistration, close_luks, unlock_luks, validate_edge_profile,
+};
+
+#[test]
+fn unlock_luks_generates_commands() {
+    let cmds = unlock_luks("/dev/sda3", "agnos-data").unwrap();
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0].binary, "cryptsetup");
+    assert!(cmds[0].args.contains(&"/dev/sda3".to_string()));
+    assert!(cmds[0].args.contains(&"agnos-data".to_string()));
+}
+
+#[test]
+fn unlock_luks_rejects_bad_device() {
+    assert!(unlock_luks("/tmp/fake", "data").is_err());
+    assert!(unlock_luks("/dev/../etc/shadow", "data").is_err());
+}
+
+#[test]
+fn unlock_luks_rejects_bad_mapped_name() {
+    assert!(unlock_luks("/dev/sda3", "").is_err());
+    assert!(unlock_luks("/dev/sda3", "name with spaces").is_err());
+    assert!(unlock_luks("/dev/sda3", "name;inject").is_err());
+}
+
+#[test]
+fn close_luks_generates_command() {
+    let cmds = close_luks("agnos-data");
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0].binary, "cryptsetup");
+    assert!(cmds[0].args.contains(&"close".to_string()));
+    assert!(cmds[0].args.contains(&"agnos-data".to_string()));
+}
+
+#[test]
+fn validate_edge_profile_passes_good_result() {
+    let result = EdgeBootResult {
+        rootfs_locked: true,
+        verity_verified: true,
+        luks_unlocked: true,
+        boot_time_ms: 1500,
+        within_budget: true,
+        errors: vec![],
+    };
+    // Use a very high memory limit so the test passes on any host
+    let violations = validate_edge_profile(&result, 1_000_000);
+    assert!(violations.is_empty());
+}
+
+#[test]
+fn validate_edge_profile_detects_budget_exceeded() {
+    let result = EdgeBootResult {
+        rootfs_locked: true,
+        verity_verified: true,
+        luks_unlocked: true,
+        boot_time_ms: 5000,
+        within_budget: false,
+        errors: vec![],
+    };
+    let violations = validate_edge_profile(&result, 256);
+    assert!(violations.iter().any(|v| v.contains("boot time")));
+}
+
+#[test]
+fn validate_edge_profile_detects_rootfs_unlocked() {
+    let result = EdgeBootResult {
+        rootfs_locked: false,
+        verity_verified: true,
+        luks_unlocked: true,
+        boot_time_ms: 1000,
+        within_budget: true,
+        errors: vec![],
+    };
+    let violations = validate_edge_profile(&result, 256);
+    assert!(violations.iter().any(|v| v.contains("rootfs")));
+}
+
+#[test]
+fn validate_edge_profile_detects_errors() {
+    let result = EdgeBootResult {
+        rootfs_locked: true,
+        verity_verified: false,
+        luks_unlocked: true,
+        boot_time_ms: 1000,
+        within_budget: true,
+        errors: vec!["dm-verity failed".into()],
+    };
+    let violations = validate_edge_profile(&result, 256);
+    assert!(violations.iter().any(|v| v.contains("error")));
+}
+
+#[test]
+fn fleet_registration_to_json() {
+    let result = EdgeBootResult {
+        rootfs_locked: true,
+        verity_verified: true,
+        luks_unlocked: true,
+        boot_time_ms: 800,
+        within_budget: true,
+        errors: vec![],
+    };
+    let reg = FleetRegistration {
+        machine_id: "abc123".into(),
+        hostname: "edge-node-1".into(),
+        boot_mode: "edge".into(),
+        verity_active: result.verity_verified,
+        luks_active: result.luks_unlocked,
+        kernel_version: "6.18.0".into(),
+        total_memory_mb: 128,
+    };
+    let json = reg.to_json().unwrap();
+    assert!(json.contains("edge-node-1"));
+    assert!(json.contains("abc123"));
+    serde_roundtrip(&reg);
+}
+
+#[test]
+fn edge_config_in_argonaut_config() {
+    let config = ArgonautConfig {
+        boot_mode: BootMode::Edge,
+        edge_boot: EdgeBootConfig {
+            readonly_rootfs: true,
+            luks_enabled: true,
+            tpm_attestation: true,
+            max_boot_time_ms: 2000,
+        },
+        ..Default::default()
+    };
+    assert!(config.edge_boot.tpm_attestation);
+    assert_eq!(config.edge_boot.max_boot_time_ms, 2000);
+}
