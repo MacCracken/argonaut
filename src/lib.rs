@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Argonaut — Init System for AGNOS
 //!
 //! Minimal init system that boots AGNOS in under 3 seconds. Manages
@@ -33,10 +34,10 @@ pub use edge_boot::{configure_readonly_rootfs, verify_rootfs_integrity};
 pub use types::{
     ArgonautConfig, ArgonautStats, BootMode, BootStage, BootStep, BootStepStatus, CrashAction,
     EdgeBootConfig, EmergencyShellConfig, ExitStatus, HealthCheck, HealthCheckResult,
-    HealthCheckType, HealthTracker, ManagedService, ProcessSpec, ReadyCheck, RestartPolicy,
-    Runlevel, RunlevelSwitchPlan, SafeCommand, ServiceDefinition, ServiceEvent, ServiceEventType,
-    ServiceState, ServiceTarget, ShutdownAction, ShutdownPlan, ShutdownStep, ShutdownStepStatus,
-    ShutdownType,
+    HealthCheckType, HealthTracker, ManagedService, ProcessSpec, ReadyCheck, RestartConfig,
+    RestartPolicy, Runlevel, RunlevelSwitchPlan, SafeCommand, ServiceDefinition, ServiceEvent,
+    ServiceEventType, ServiceState, ServiceTarget, ShutdownAction, ShutdownPlan, ShutdownStep,
+    ShutdownStepStatus, ShutdownType,
 };
 
 use std::collections::HashMap;

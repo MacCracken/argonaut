@@ -10,17 +10,9 @@ use tracing::{debug, info, warn};
 
 use super::types::{
     BootMode, CrashAction, ExitStatus, HealthCheck, HealthCheckType, ManagedService, ProcessSpec,
-    ReadyCheck, RestartPolicy, ServiceDefinition, ServiceEvent, ServiceEventType, ServiceState,
+    ReadyCheck, RestartConfig, RestartPolicy, ServiceDefinition, ServiceEvent, ServiceEventType,
+    ServiceState,
 };
-
-/// Exponential backoff delay for service restarts.
-/// 1s, 2s, 4s, 8s, 16s (capped at 30s).
-#[must_use]
-pub(crate) fn backoff_delay(restart_count: u32) -> u64 {
-    let base: u64 = 1000;
-    let delay = base * 2u64.saturating_pow(restart_count);
-    delay.min(30_000)
-}
 
 impl super::ArgonautInit {
     /// Return the PostgreSQL and Redis database service definitions.
@@ -45,6 +37,7 @@ impl super::ArgonautInit {
                 depends_on: vec![],
                 required_for_modes: vec![BootMode::Server, BootMode::Desktop],
                 restart_policy: RestartPolicy::OnFailure,
+                restart_config: RestartConfig::default(),
                 health_check: Some(HealthCheck {
                     check_type: HealthCheckType::TcpConnect("127.0.0.1".into(), 5432),
                     interval_ms: 15_000,
@@ -67,6 +60,7 @@ impl super::ArgonautInit {
                 depends_on: vec![],
                 required_for_modes: vec![BootMode::Server, BootMode::Desktop],
                 restart_policy: RestartPolicy::Always,
+                restart_config: RestartConfig::default(),
                 health_check: Some(HealthCheck {
                     check_type: HealthCheckType::TcpConnect("127.0.0.1".into(), 6379),
                     interval_ms: 10_000,
@@ -101,9 +95,10 @@ impl super::ArgonautInit {
                 env.insert("SYNAPSE_MODEL_DIR".into(), "/var/lib/synapse/models".into());
                 env
             },
-            depends_on: vec!["agent-runtime".into(), "llm-gateway".into()],
+            depends_on: vec!["daimon".into(), "llm-gateway".into()],
             required_for_modes: vec![BootMode::Server, BootMode::Desktop],
             restart_policy: RestartPolicy::OnFailure,
+            restart_config: RestartConfig::default(),
             health_check: Some(HealthCheck {
                 check_type: HealthCheckType::HttpGet("http://127.0.0.1:8080/health".into()),
                 interval_ms: 15_000,
@@ -139,9 +134,10 @@ impl super::ArgonautInit {
                 env.insert("PIPEWIRE_RUNTIME_DIR".into(), "/run/user/1000".into());
                 env
             },
-            depends_on: vec!["agent-runtime".into(), "aethersafha".into()],
+            depends_on: vec!["daimon".into(), "aethersafha".into()],
             required_for_modes: vec![], // never auto-started
             restart_policy: RestartPolicy::OnFailure,
+            restart_config: RestartConfig::default(),
             health_check: Some(HealthCheck {
                 check_type: HealthCheckType::ProcessAlive,
                 interval_ms: 10_000,
@@ -197,10 +193,15 @@ impl super::ArgonautInit {
     pub fn default_services(mode: BootMode) -> Vec<ServiceDefinition> {
         let mut services = Vec::new();
 
+        // Recovery mode: no services at all — emergency shell only.
+        if mode == BootMode::Recovery {
+            return services;
+        }
+
         // Edge mode: agent-runtime only, no database dependencies.
         if mode == BootMode::Edge {
             services.push(ServiceDefinition {
-                name: "agent-runtime".into(),
+                name: "daimon".into(),
                 description: "Daimon agent orchestrator (edge mode)".into(),
                 binary_path: PathBuf::from("/usr/lib/agnos/agent_runtime"),
                 args: vec![
@@ -219,6 +220,7 @@ impl super::ArgonautInit {
                 depends_on: vec![],
                 required_for_modes: vec![BootMode::Edge],
                 restart_policy: RestartPolicy::Always,
+                restart_config: RestartConfig::default(),
                 health_check: Some(HealthCheck {
                     check_type: HealthCheckType::HttpGet("http://127.0.0.1:8090/v1/health".into()),
                     interval_ms: 10_000,
@@ -248,7 +250,7 @@ impl super::ArgonautInit {
             vec![]
         };
         services.push(ServiceDefinition {
-            name: "agent-runtime".into(),
+            name: "daimon".into(),
             description: "Daimon agent orchestrator".into(),
             binary_path: PathBuf::from("/usr/lib/agnos/agent_runtime"),
             args: vec!["--port".into(), "8090".into()],
@@ -256,6 +258,7 @@ impl super::ArgonautInit {
             depends_on: db_deps,
             required_for_modes: vec![BootMode::Minimal, BootMode::Server, BootMode::Desktop],
             restart_policy: RestartPolicy::Always,
+            restart_config: RestartConfig::default(),
             health_check: Some(HealthCheck {
                 check_type: HealthCheckType::HttpGet("http://127.0.0.1:8090/v1/health".into()),
                 interval_ms: 10_000,
@@ -277,9 +280,10 @@ impl super::ArgonautInit {
                 binary_path: PathBuf::from("/usr/lib/agnos/llm_gateway"),
                 args: vec!["--port".into(), "8088".into()],
                 environment: HashMap::new(),
-                depends_on: vec!["agent-runtime".into()],
+                depends_on: vec!["daimon".into()],
                 required_for_modes: vec![BootMode::Server, BootMode::Desktop],
                 restart_policy: RestartPolicy::OnFailure,
+                restart_config: RestartConfig::default(),
                 health_check: Some(HealthCheck {
                     check_type: HealthCheckType::HttpGet("http://127.0.0.1:8088/health".into()),
                     interval_ms: 15_000,
@@ -307,9 +311,10 @@ impl super::ArgonautInit {
                     env.insert("XDG_SESSION_TYPE".into(), "wayland".into());
                     env
                 },
-                depends_on: vec!["agent-runtime".into()],
+                depends_on: vec!["daimon".into()],
                 required_for_modes: vec![BootMode::Desktop],
                 restart_policy: RestartPolicy::Always,
+                restart_config: RestartConfig::default(),
                 health_check: Some(HealthCheck {
                     check_type: HealthCheckType::ProcessAlive,
                     interval_ms: 5000,
@@ -325,9 +330,10 @@ impl super::ArgonautInit {
                 binary_path: PathBuf::from("/usr/lib/agnos/agnoshi"),
                 args: vec![],
                 environment: HashMap::new(),
-                depends_on: vec!["agent-runtime".into(), "aethersafha".into()],
+                depends_on: vec!["daimon".into(), "aethersafha".into()],
                 required_for_modes: vec![BootMode::Desktop],
                 restart_policy: RestartPolicy::OnFailure,
+                restart_config: RestartConfig::default(),
                 health_check: Some(HealthCheck {
                     check_type: HealthCheckType::ProcessAlive,
                     interval_ms: 10_000,
@@ -575,19 +581,25 @@ impl super::ArgonautInit {
             }
         };
 
+        let rcfg = &svc.definition.restart_config;
+
         match svc.definition.restart_policy {
             RestartPolicy::Always => {
-                if svc.restart_count >= 5 {
+                if rcfg.limit_exceeded(svc.restart_count) {
                     warn!(
                         service = service_name,
                         restarts = svc.restart_count,
+                        max_restarts = rcfg.max_restarts,
                         "service exceeded restart limit"
                     );
                     CrashAction::GiveUp {
-                        reason: format!("exceeded restart limit ({} restarts)", svc.restart_count),
+                        reason: format!(
+                            "exceeded restart limit ({}/{} restarts)",
+                            svc.restart_count, rcfg.max_restarts
+                        ),
                     }
                 } else {
-                    let delay = backoff_delay(svc.restart_count);
+                    let delay = rcfg.backoff_delay(svc.restart_count);
                     info!(
                         service = service_name,
                         exit_status = %exit_status,
@@ -605,21 +617,22 @@ impl super::ArgonautInit {
                         "service exited cleanly, no restart (policy=on-failure)"
                     );
                     CrashAction::Ignore
-                } else if svc.restart_count >= 5 {
+                } else if rcfg.limit_exceeded(svc.restart_count) {
                     warn!(
                         service = service_name,
                         restarts = svc.restart_count,
+                        max_restarts = rcfg.max_restarts,
                         exit_status = %exit_status,
                         "service exceeded restart limit after failures"
                     );
                     CrashAction::GiveUp {
                         reason: format!(
-                            "exceeded restart limit after failures ({} restarts)",
-                            svc.restart_count
+                            "exceeded restart limit after failures ({}/{} restarts)",
+                            svc.restart_count, rcfg.max_restarts
                         ),
                     }
                 } else {
-                    let delay = backoff_delay(svc.restart_count);
+                    let delay = rcfg.backoff_delay(svc.restart_count);
                     info!(
                         service = service_name,
                         exit_status = %exit_status,

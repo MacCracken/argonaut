@@ -4,15 +4,15 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v0.2.0 — Hardening (current)
+## v0.2.0 — Hardening (complete)
 
-- [ ] Serde roundtrip tests for all public types
-- [ ] CI workflows (ci.yml, release.yml)
-- [ ] Rename "agent-runtime" references in service definitions to "daimon"
-- [ ] Add `BootMode::Recovery` (README documents it, enum doesn't have it)
-- [ ] `#![forbid(unsafe_code)]` (no unsafe exists — just add the annotation)
-- [ ] Make backoff delay curve configurable via `RestartPolicy` (currently hardcoded 1s/2s/4s/8s/16s cap 30s)
-- [ ] Make restart limit configurable per-service (currently hardcoded to 5)
+- [x] Serde roundtrip tests for all public types (24 tests)
+- [x] CI workflows (ci.yml, release.yml)
+- [x] Rename "agent-runtime" to "daimon" in all service definitions
+- [x] Add `BootMode::Recovery` with boot sequence, tests, runlevel mapping
+- [x] `#![forbid(unsafe_code)]`
+- [x] `RestartConfig` struct — configurable backoff curve and restart limit per-service
+- [x] Minimum 100ms floor on backoff delay to prevent busy-retry loops
 
 ---
 

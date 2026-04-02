@@ -27,6 +27,9 @@ pub enum BootMode {
     /// dm-verity enforced, LUKS enabled, minimal seccomp profile.
     /// Target: <256 MB disk, <128 MB RAM, <3s boot.
     Edge,
+    /// Recovery: emergency shell only. No services started. Used for
+    /// broken system repair when the normal boot path is unusable.
+    Recovery,
 }
 
 impl fmt::Display for BootMode {
@@ -36,6 +39,7 @@ impl fmt::Display for BootMode {
             Self::Desktop => write!(f, "desktop"),
             Self::Minimal => write!(f, "minimal"),
             Self::Edge => write!(f, "edge"),
+            Self::Recovery => write!(f, "recovery"),
         }
     }
 }
@@ -221,6 +225,46 @@ impl fmt::Display for RestartPolicy {
     }
 }
 
+/// Configuration for restart backoff and limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestartConfig {
+    /// Maximum number of restarts before giving up. 0 = never give up.
+    pub max_restarts: u32,
+    /// Base delay in milliseconds for the first restart.
+    pub base_delay_ms: u64,
+    /// Maximum delay in milliseconds (cap for exponential backoff).
+    pub max_delay_ms: u64,
+}
+
+impl Default for RestartConfig {
+    fn default() -> Self {
+        Self {
+            max_restarts: 5,
+            base_delay_ms: 1000,
+            max_delay_ms: 30_000,
+        }
+    }
+}
+
+impl RestartConfig {
+    /// Compute exponential backoff delay for the given restart count.
+    /// Returns at least 100ms to prevent busy-retry loops even if
+    /// `base_delay_ms` or `max_delay_ms` are misconfigured to 0.
+    #[must_use]
+    pub fn backoff_delay(&self, restart_count: u32) -> u64 {
+        let base = self.base_delay_ms.max(100);
+        let cap = self.max_delay_ms.max(100);
+        let delay = base.saturating_mul(2u64.saturating_pow(restart_count));
+        delay.min(cap)
+    }
+
+    /// Whether the restart limit has been exceeded.
+    #[must_use]
+    pub fn limit_exceeded(&self, restart_count: u32) -> bool {
+        self.max_restarts > 0 && restart_count >= self.max_restarts
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Health / ready checks
 // ---------------------------------------------------------------------------
@@ -271,7 +315,7 @@ pub struct ReadyCheck {
 /// Static definition of a service managed by argonaut.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceDefinition {
-    /// Unique service name (e.g. "agent-runtime").
+    /// Unique service name (e.g. "daimon").
     pub name: String,
     /// Human-readable description.
     pub description: String,
@@ -287,6 +331,8 @@ pub struct ServiceDefinition {
     pub required_for_modes: Vec<BootMode>,
     /// What to do when the service exits.
     pub restart_policy: RestartPolicy,
+    /// Backoff and restart limit configuration.
+    pub restart_config: RestartConfig,
     /// Optional periodic health check.
     pub health_check: Option<HealthCheck>,
     /// Optional one-shot startup readiness check.
@@ -449,6 +495,7 @@ impl Runlevel {
             BootMode::Desktop => Self::Graphical,
             BootMode::Minimal => Self::Container,
             BootMode::Edge => Self::Edge,
+            BootMode::Recovery => Self::Emergency,
         }
     }
 

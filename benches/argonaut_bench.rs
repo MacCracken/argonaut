@@ -9,8 +9,8 @@ use std::hint::black_box;
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use argonaut::{
-    ArgonautConfig, BootMode, BootStage, BootStepStatus, HealthTracker, RestartPolicy, SafeCommand,
-    ServiceDefinition, ServiceState, ServiceTarget, ShutdownType,
+    ArgonautConfig, BootMode, BootStage, BootStepStatus, HealthTracker, RestartConfig,
+    RestartPolicy, SafeCommand, ServiceDefinition, ServiceState, ServiceTarget, ShutdownType,
 };
 
 fn make_chain(n: usize) -> Vec<ServiceDefinition> {
@@ -28,6 +28,7 @@ fn make_chain(n: usize) -> Vec<ServiceDefinition> {
             },
             required_for_modes: vec![BootMode::Minimal],
             restart_policy: RestartPolicy::Never,
+            restart_config: RestartConfig::default(),
             health_check: None,
             ready_check: None,
         })
@@ -155,10 +156,10 @@ fn state_transitions(c: &mut Criterion) {
                 boot_mode: BootMode::Minimal,
                 ..Default::default()
             });
-            init.set_service_state("agent-runtime", ServiceState::Starting);
-            init.set_service_state("agent-runtime", ServiceState::Running);
-            init.set_service_state("agent-runtime", ServiceState::Stopping);
-            init.set_service_state("agent-runtime", ServiceState::Stopped);
+            init.set_service_state("daimon", ServiceState::Starting);
+            init.set_service_state("daimon", ServiceState::Running);
+            init.set_service_state("daimon", ServiceState::Stopping);
+            init.set_service_state("daimon", ServiceState::Stopped);
         });
     });
 }

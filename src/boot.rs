@@ -52,6 +52,23 @@ impl super::ArgonautInit {
             completed_at: None,
             error: None,
         });
+        // Recovery mode: early stages only, then straight to emergency shell.
+        // No services started at all.
+        if mode == BootMode::Recovery {
+            steps.push(BootStep {
+                stage: BootStage::BootComplete,
+                description: "Recovery boot complete — dropping to emergency shell".into(),
+                required: true,
+                timeout_ms: 500,
+                status: BootStepStatus::Pending,
+                started_at: None,
+                completed_at: None,
+                error: None,
+            });
+            debug!(mode = %mode, steps = steps.len(), "built boot sequence");
+            return steps;
+        }
+
         // Edge mode: enforce dm-verity, TPM attestation, then straight to
         // agent-runtime. No databases, no LLM gateway, no compositor/shell.
         if mode == BootMode::Edge {

@@ -9,9 +9,9 @@ use super::ArgonautInit;
 use super::edge_boot::{configure_readonly_rootfs, verify_rootfs_integrity};
 use super::types::{
     ArgonautConfig, BootMode, BootStage, BootStepStatus, CrashAction, EdgeBootConfig,
-    EmergencyShellConfig, ExitStatus, HealthCheckType, ManagedService, RestartPolicy, Runlevel,
-    SafeCommand, ServiceDefinition, ServiceEventType, ServiceState, ServiceTarget, ShutdownAction,
-    ShutdownStepStatus, ShutdownType,
+    EmergencyShellConfig, ExitStatus, HealthCheckType, ManagedService, RestartConfig,
+    RestartPolicy, Runlevel, SafeCommand, ServiceDefinition, ServiceEventType, ServiceState,
+    ServiceTarget, ShutdownAction, ShutdownStepStatus, ShutdownType,
 };
 
 // --- helpers ---
@@ -47,6 +47,7 @@ fn dummy_service(name: &str, deps: Vec<&str>) -> ServiceDefinition {
         depends_on: deps.into_iter().map(String::from).collect(),
         required_for_modes: vec![BootMode::Minimal],
         restart_policy: RestartPolicy::Never,
+        restart_config: RestartConfig::default(),
         health_check: None,
         ready_check: None,
     }
@@ -192,7 +193,7 @@ fn boot_sequence_step_count_desktop() {
 fn default_services_minimal() {
     let svcs = ArgonautInit::default_services(BootMode::Minimal);
     assert_eq!(svcs.len(), 1);
-    assert_eq!(svcs[0].name, "agent-runtime");
+    assert_eq!(svcs[0].name, "daimon");
 }
 
 #[test]
@@ -200,7 +201,7 @@ fn default_services_server() {
     let svcs = ArgonautInit::default_services(BootMode::Server);
     assert_eq!(svcs.len(), 5);
     let names: Vec<&str> = svcs.iter().map(|s| s.name.as_str()).collect();
-    assert!(names.contains(&"agent-runtime"));
+    assert!(names.contains(&"daimon"));
     assert!(names.contains(&"llm-gateway"));
 }
 
@@ -209,7 +210,7 @@ fn default_services_desktop() {
     let svcs = ArgonautInit::default_services(BootMode::Desktop);
     assert_eq!(svcs.len(), 7);
     let names: Vec<&str> = svcs.iter().map(|s| s.name.as_str()).collect();
-    assert!(names.contains(&"agent-runtime"));
+    assert!(names.contains(&"daimon"));
     assert!(names.contains(&"llm-gateway"));
     assert!(names.contains(&"synapse"));
     assert!(names.contains(&"aethersafha"));
@@ -278,15 +279,15 @@ fn get_service_not_found() {
 fn set_service_state_valid_transitions() {
     let mut init = ArgonautInit::new(minimal_config());
     // Stopped → Starting (agent-runtime has no deps)
-    assert!(init.set_service_state("agent-runtime", ServiceState::Starting));
+    assert!(init.set_service_state("daimon", ServiceState::Starting));
     assert_eq!(
-        init.get_service_state("agent-runtime"),
+        init.get_service_state("daimon"),
         Some(&ServiceState::Starting)
     );
     // Starting → Running
-    assert!(init.set_service_state("agent-runtime", ServiceState::Running));
+    assert!(init.set_service_state("daimon", ServiceState::Running));
     assert_eq!(
-        init.get_service_state("agent-runtime"),
+        init.get_service_state("daimon"),
         Some(&ServiceState::Running)
     );
 }
@@ -478,7 +479,7 @@ fn service_definition_with_ready_check() {
 #[test]
 fn managed_service_initial_state() {
     let init = ArgonautInit::new(minimal_config());
-    let svc = init.get_service("agent-runtime").unwrap();
+    let svc = init.get_service("daimon").unwrap();
     assert_eq!(svc.state, ServiceState::Stopped);
     assert!(svc.pid.is_none());
     assert!(svc.started_at.is_none());
@@ -494,7 +495,7 @@ fn services_for_mode_filtering() {
     let minimal_svcs = init.services_for_mode(&BootMode::Minimal);
     // Only agent-runtime is required for Minimal.
     assert_eq!(minimal_svcs.len(), 1);
-    assert_eq!(minimal_svcs[0].name, "agent-runtime");
+    assert_eq!(minimal_svcs[0].name, "daimon");
 }
 
 #[test]
@@ -515,12 +516,12 @@ fn stats_accuracy() {
     assert!(init.set_service_state("redis", ServiceState::Starting));
     assert!(init.set_service_state("redis", ServiceState::Running));
     // Valid transition path: Stopped → Starting → Running
-    assert!(init.set_service_state("agent-runtime", ServiceState::Starting));
-    assert!(init.set_service_state("agent-runtime", ServiceState::Running));
+    assert!(init.set_service_state("daimon", ServiceState::Starting));
+    assert!(init.set_service_state("daimon", ServiceState::Running));
     // llm-gateway depends on agent-runtime which is now Running
     assert!(init.set_service_state("llm-gateway", ServiceState::Starting));
     assert!(init.set_service_state("llm-gateway", ServiceState::Failed("crash".into()),));
-    if let Some(svc) = init.services.get_mut("agent-runtime") {
+    if let Some(svc) = init.services.get_mut("daimon") {
         svc.restart_count = 3;
     }
     let s = init.stats();
@@ -571,7 +572,7 @@ fn boot_step_timeout_values() {
 fn service_depends_on_resolution_desktop() {
     let svcs = ArgonautInit::default_services(BootMode::Desktop);
     let order = ArgonautInit::resolve_service_order(&svcs).unwrap();
-    let rt_pos = order.iter().position(|n| n == "agent-runtime").unwrap();
+    let rt_pos = order.iter().position(|n| n == "daimon").unwrap();
     let gw_pos = order.iter().position(|n| n == "llm-gateway").unwrap();
     let comp_pos = order.iter().position(|n| n == "aethersafha").unwrap();
     let shell_pos = order.iter().position(|n| n == "agnoshi").unwrap();
@@ -589,10 +590,10 @@ fn service_depends_on_resolution_desktop() {
 fn invalid_state_transition_stopped_to_running() {
     let mut init = ArgonautInit::new(minimal_config());
     // Stopped → Running is not valid (must go through Starting)
-    assert!(!init.set_service_state("agent-runtime", ServiceState::Running));
+    assert!(!init.set_service_state("daimon", ServiceState::Running));
     // State should remain Stopped
     assert_eq!(
-        init.get_service_state("agent-runtime"),
+        init.get_service_state("daimon"),
         Some(&ServiceState::Stopped)
     );
 }
@@ -601,16 +602,16 @@ fn invalid_state_transition_stopped_to_running() {
 fn valid_state_transition_full_lifecycle() {
     let mut init = ArgonautInit::new(minimal_config());
     // Stopped → Starting → Running → Stopping → Stopped
-    assert!(init.set_service_state("agent-runtime", ServiceState::Starting));
-    assert!(init.set_service_state("agent-runtime", ServiceState::Running));
-    assert!(init.set_service_state("agent-runtime", ServiceState::Stopping));
-    assert!(init.set_service_state("agent-runtime", ServiceState::Stopped));
+    assert!(init.set_service_state("daimon", ServiceState::Starting));
+    assert!(init.set_service_state("daimon", ServiceState::Running));
+    assert!(init.set_service_state("daimon", ServiceState::Stopping));
+    assert!(init.set_service_state("daimon", ServiceState::Stopped));
     // Failed → Starting (restart), Failed → Stopped
-    assert!(init.set_service_state("agent-runtime", ServiceState::Starting));
-    assert!(init.set_service_state("agent-runtime", ServiceState::Failed("err".into())));
-    assert!(init.set_service_state("agent-runtime", ServiceState::Starting));
-    assert!(init.set_service_state("agent-runtime", ServiceState::Failed("err2".into())));
-    assert!(init.set_service_state("agent-runtime", ServiceState::Stopped));
+    assert!(init.set_service_state("daimon", ServiceState::Starting));
+    assert!(init.set_service_state("daimon", ServiceState::Failed("err".into())));
+    assert!(init.set_service_state("daimon", ServiceState::Starting));
+    assert!(init.set_service_state("daimon", ServiceState::Failed("err2".into())));
+    assert!(init.set_service_state("daimon", ServiceState::Stopped));
 }
 
 #[test]
@@ -624,10 +625,10 @@ fn starting_blocked_when_dependency_not_running() {
     assert!(init.set_service_state("redis", ServiceState::Starting));
     assert!(init.set_service_state("redis", ServiceState::Running));
     // Start agent-runtime but leave it in Starting (not Running).
-    assert!(init.set_service_state("agent-runtime", ServiceState::Starting));
+    assert!(init.set_service_state("daimon", ServiceState::Starting));
     assert!(!init.set_service_state("llm-gateway", ServiceState::Starting));
     // Now make agent-runtime Running.
-    assert!(init.set_service_state("agent-runtime", ServiceState::Running));
+    assert!(init.set_service_state("daimon", ServiceState::Running));
     assert!(init.set_service_state("llm-gateway", ServiceState::Starting));
 }
 
@@ -801,7 +802,7 @@ fn default_services_minimal_excludes_databases() {
 #[test]
 fn agent_runtime_depends_on_databases_in_server_mode() {
     let svcs = ArgonautInit::default_services(BootMode::Server);
-    let rt = svcs.iter().find(|s| s.name == "agent-runtime").unwrap();
+    let rt = svcs.iter().find(|s| s.name == "daimon").unwrap();
     assert!(rt.depends_on.contains(&"postgres".to_string()));
     assert!(rt.depends_on.contains(&"redis".to_string()));
 }
@@ -809,7 +810,7 @@ fn agent_runtime_depends_on_databases_in_server_mode() {
 #[test]
 fn agent_runtime_no_db_deps_in_minimal_mode() {
     let svcs = ArgonautInit::default_services(BootMode::Minimal);
-    let rt = svcs.iter().find(|s| s.name == "agent-runtime").unwrap();
+    let rt = svcs.iter().find(|s| s.name == "daimon").unwrap();
     assert!(rt.depends_on.is_empty());
 }
 
@@ -847,7 +848,7 @@ fn boot_sequence_minimal_excludes_database_stage() {
 fn synapse_service_definition() {
     let svc = ArgonautInit::synapse_service();
     assert_eq!(svc.name, "synapse");
-    assert!(svc.depends_on.contains(&"agent-runtime".to_string()));
+    assert!(svc.depends_on.contains(&"daimon".to_string()));
     assert!(svc.depends_on.contains(&"llm-gateway".to_string()));
     assert!(svc.health_check.is_some());
     assert!(svc.ready_check.is_some());
@@ -1080,8 +1081,8 @@ fn shutdown_plan_stops_running_services() {
     };
     let mut init = ArgonautInit::new(config);
     // Minimal has only agent-runtime with no deps
-    init.set_service_state("agent-runtime", ServiceState::Starting);
-    init.set_service_state("agent-runtime", ServiceState::Running);
+    init.set_service_state("daimon", ServiceState::Starting);
+    init.set_service_state("daimon", ServiceState::Running);
 
     let plan = init.plan_shutdown(ShutdownType::Poweroff).unwrap();
     let stop_steps: Vec<_> = plan
@@ -1149,15 +1150,15 @@ fn runlevel_switch_to_emergency_stops_all() {
     };
     let mut init = ArgonautInit::new(config);
     // Minimal has agent-runtime with no deps, so state transition works
-    init.set_service_state("agent-runtime", ServiceState::Starting);
-    init.set_service_state("agent-runtime", ServiceState::Running);
+    init.set_service_state("daimon", ServiceState::Starting);
+    init.set_service_state("daimon", ServiceState::Running);
 
     let targets = ServiceTarget::defaults();
     let plan = init.plan_runlevel_switch(Runlevel::Emergency, &targets);
     assert!(plan.drop_to_shell);
     assert!(plan.services_to_start.is_empty());
     // Should stop running services
-    assert!(plan.services_to_stop.contains(&"agent-runtime".to_string()));
+    assert!(plan.services_to_stop.contains(&"daimon".to_string()));
 }
 
 #[test]
@@ -1294,6 +1295,7 @@ fn process_spec_from_service() {
         depends_on: vec![],
         required_for_modes: vec![BootMode::Server],
         restart_policy: RestartPolicy::Always,
+        restart_config: RestartConfig::default(),
         health_check: None,
         ready_check: None,
     };
@@ -1362,7 +1364,7 @@ fn boot_execution_plan_ordered() {
     let plan = init.boot_execution_plan().unwrap();
     assert!(!plan.is_empty());
     // First service should be agent-runtime (only service in minimal)
-    assert_eq!(plan[0].0, "agent-runtime");
+    assert_eq!(plan[0].0, "daimon");
 }
 
 #[test]
@@ -1374,11 +1376,11 @@ fn boot_execution_plan_server() {
     let init = ArgonautInit::new(config);
     let plan = init.boot_execution_plan().unwrap();
     let names: Vec<&str> = plan.iter().map(|(n, _)| n.as_str()).collect();
-    assert!(names.contains(&"agent-runtime"));
+    assert!(names.contains(&"daimon"));
     assert!(names.contains(&"llm-gateway"));
     // agent-runtime should come after postgres/redis (dependencies)
     let pg_idx = names.iter().position(|n| *n == "postgres");
-    let ar_idx = names.iter().position(|n| *n == "agent-runtime");
+    let ar_idx = names.iter().position(|n| *n == "daimon");
     if let (Some(pg), Some(ar)) = (pg_idx, ar_idx) {
         assert!(pg < ar, "postgres should start before agent-runtime");
     }
@@ -1395,7 +1397,7 @@ fn crash_action_always_restarts() {
         ..ArgonautConfig::default()
     };
     let init = ArgonautInit::new(config);
-    let action = init.on_service_crash("agent-runtime", &ExitStatus::Code(1));
+    let action = init.on_service_crash("daimon", &ExitStatus::Code(1));
     assert!(matches!(action, CrashAction::Restart { .. }));
 }
 
@@ -1438,24 +1440,60 @@ fn crash_action_gives_up_after_limit() {
     };
     let mut init = ArgonautInit::new(config);
     // Simulate 5 restarts
-    if let Some(svc) = init.services.get_mut("agent-runtime") {
+    if let Some(svc) = init.services.get_mut("daimon") {
         svc.restart_count = 5;
     }
-    let action = init.on_service_crash("agent-runtime", &ExitStatus::Signal(11));
+    let action = init.on_service_crash("daimon", &ExitStatus::Signal(11));
     assert!(matches!(action, CrashAction::GiveUp { .. }));
 }
 
 #[test]
 fn backoff_delay_exponential() {
-    use super::services::backoff_delay;
-    assert_eq!(backoff_delay(0), 1000);
-    assert_eq!(backoff_delay(1), 2000);
-    assert_eq!(backoff_delay(2), 4000);
-    assert_eq!(backoff_delay(3), 8000);
-    assert_eq!(backoff_delay(4), 16000);
+    let cfg = RestartConfig::default();
+    assert_eq!(cfg.backoff_delay(0), 1000);
+    assert_eq!(cfg.backoff_delay(1), 2000);
+    assert_eq!(cfg.backoff_delay(2), 4000);
+    assert_eq!(cfg.backoff_delay(3), 8000);
+    assert_eq!(cfg.backoff_delay(4), 16000);
     // Capped at 30s
-    assert_eq!(backoff_delay(5), 30000);
-    assert_eq!(backoff_delay(10), 30000);
+    assert_eq!(cfg.backoff_delay(5), 30000);
+    assert_eq!(cfg.backoff_delay(10), 30000);
+}
+
+#[test]
+fn backoff_delay_custom_config() {
+    let cfg = RestartConfig {
+        max_restarts: 3,
+        base_delay_ms: 500,
+        max_delay_ms: 10_000,
+    };
+    assert_eq!(cfg.backoff_delay(0), 500);
+    assert_eq!(cfg.backoff_delay(1), 1000);
+    assert_eq!(cfg.backoff_delay(2), 2000);
+    assert_eq!(cfg.backoff_delay(3), 4000);
+    assert_eq!(cfg.backoff_delay(4), 8000);
+    assert_eq!(cfg.backoff_delay(5), 10000); // capped
+}
+
+#[test]
+fn restart_config_limit_exceeded() {
+    let cfg = RestartConfig::default(); // max_restarts = 5
+    assert!(!cfg.limit_exceeded(0));
+    assert!(!cfg.limit_exceeded(4));
+    assert!(cfg.limit_exceeded(5));
+    assert!(cfg.limit_exceeded(10));
+}
+
+#[test]
+fn restart_config_zero_means_unlimited() {
+    let cfg = RestartConfig {
+        max_restarts: 0,
+        base_delay_ms: 1000,
+        max_delay_ms: 30_000,
+    };
+    assert!(!cfg.limit_exceeded(0));
+    assert!(!cfg.limit_exceeded(100));
+    assert!(!cfg.limit_exceeded(u32::MAX));
 }
 
 // -----------------------------------------------------------------------
@@ -1507,7 +1545,7 @@ fn boot_sequence_edge_fast_timeouts() {
 fn default_services_edge() {
     let svcs = ArgonautInit::default_services(BootMode::Edge);
     assert_eq!(svcs.len(), 1);
-    assert_eq!(svcs[0].name, "agent-runtime");
+    assert_eq!(svcs[0].name, "daimon");
     assert!(svcs[0].depends_on.is_empty());
     assert!(svcs[0].required_for_modes.contains(&BootMode::Edge));
     // Edge mode env vars
@@ -1534,7 +1572,7 @@ fn edge_services_no_databases() {
 fn edge_init_creates_single_service() {
     let init = ArgonautInit::new(edge_config());
     assert_eq!(init.services.len(), 1);
-    assert!(init.services.contains_key("agent-runtime"));
+    assert!(init.services.contains_key("daimon"));
 }
 
 #[test]
@@ -1580,8 +1618,8 @@ fn edge_target_active_in_edge_runlevel() {
 #[test]
 fn edge_service_state_lifecycle() {
     let mut init = ArgonautInit::new(edge_config());
-    assert!(init.set_service_state("agent-runtime", ServiceState::Starting));
-    assert!(init.set_service_state("agent-runtime", ServiceState::Running));
+    assert!(init.set_service_state("daimon", ServiceState::Starting));
+    assert!(init.set_service_state("daimon", ServiceState::Running));
     let stats = init.stats();
     assert_eq!(stats.boot_mode, BootMode::Edge);
     assert_eq!(stats.services_running, 1);
@@ -1755,7 +1793,7 @@ fn shruti_service_definition() {
     let svc = ArgonautInit::shruti_service();
     assert_eq!(svc.name, "shruti");
     assert_eq!(svc.binary_path, PathBuf::from("/usr/local/bin/shruti"));
-    assert!(svc.depends_on.contains(&"agent-runtime".into()));
+    assert!(svc.depends_on.contains(&"daimon".into()));
     assert!(svc.depends_on.contains(&"aethersafha".into()));
     assert!(
         svc.required_for_modes.is_empty(),
@@ -1773,6 +1811,7 @@ fn shruti_not_in_default_services() {
         BootMode::Server,
         BootMode::Minimal,
         BootMode::Edge,
+        BootMode::Recovery,
     ] {
         let svcs = ArgonautInit::default_services(mode);
         assert!(
@@ -1817,4 +1856,378 @@ fn shruti_user_config_service() {
     };
     let init = ArgonautInit::new(config);
     assert!(init.services.contains_key("shruti"));
+}
+
+// -----------------------------------------------------------------------
+// Recovery boot mode tests
+// -----------------------------------------------------------------------
+
+fn recovery_config() -> ArgonautConfig {
+    ArgonautConfig {
+        boot_mode: BootMode::Recovery,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn boot_mode_display_recovery() {
+    assert_eq!(BootMode::Recovery.to_string(), "recovery");
+}
+
+#[test]
+fn boot_sequence_recovery_minimal_stages() {
+    let steps = ArgonautInit::build_boot_sequence(BootMode::Recovery);
+    let stages: Vec<BootStage> = steps.iter().map(|s| s.stage).collect();
+    // Recovery: MountFS, DevMgr, Verify, Security, BootComplete = 5
+    assert_eq!(steps.len(), 5);
+    assert!(stages.contains(&BootStage::MountFilesystems));
+    assert!(stages.contains(&BootStage::VerifyRootfs));
+    assert!(stages.contains(&BootStage::BootComplete));
+    // Must NOT have any service stages
+    assert!(!stages.contains(&BootStage::StartAgentRuntime));
+    assert!(!stages.contains(&BootStage::StartDatabaseServices));
+    assert!(!stages.contains(&BootStage::StartLlmGateway));
+    assert!(!stages.contains(&BootStage::StartCompositor));
+    assert!(!stages.contains(&BootStage::StartShell));
+}
+
+#[test]
+fn default_services_recovery_is_empty() {
+    let svcs = ArgonautInit::default_services(BootMode::Recovery);
+    assert!(svcs.is_empty());
+}
+
+#[test]
+fn recovery_init_has_no_services() {
+    let init = ArgonautInit::new(recovery_config());
+    assert!(init.services.is_empty());
+}
+
+#[test]
+fn recovery_boot_can_complete() {
+    let mut init = ArgonautInit::new(recovery_config());
+    for step in &mut init.boot_sequence {
+        step.status = BootStepStatus::Complete;
+    }
+    assert!(init.is_boot_complete());
+}
+
+#[test]
+fn recovery_maps_to_emergency_runlevel() {
+    assert_eq!(
+        Runlevel::from_boot_mode(BootMode::Recovery),
+        Runlevel::Emergency
+    );
+}
+
+#[test]
+fn recovery_shutdown_plan_has_no_service_stops() {
+    let init = ArgonautInit::new(recovery_config());
+    let plan = init.plan_shutdown(ShutdownType::Reboot).unwrap();
+    let stop_steps: Vec<_> = plan
+        .steps
+        .iter()
+        .filter(|s| matches!(s.action, ShutdownAction::StopService { .. }))
+        .collect();
+    assert!(stop_steps.is_empty());
+}
+
+#[test]
+fn shruti_not_in_recovery_default_services() {
+    let svcs = ArgonautInit::default_services(BootMode::Recovery);
+    assert!(!svcs.iter().any(|s| s.name == "shruti"));
+}
+
+// -----------------------------------------------------------------------
+// Serde roundtrip tests
+// -----------------------------------------------------------------------
+
+/// Helper: serialize to JSON and back, assert the JSON values are equal.
+/// Uses serde_json::Value comparison to avoid HashMap ordering issues.
+fn serde_roundtrip<T>(val: &T)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let json = serde_json::to_string(val).expect("serialize");
+    let _back: T = serde_json::from_str(&json).expect("deserialize");
+    let original: serde_json::Value = serde_json::to_value(val).expect("to_value original");
+    let roundtrip: serde_json::Value = serde_json::to_value(&_back).expect("to_value roundtrip");
+    assert_eq!(original, roundtrip);
+}
+
+#[test]
+fn serde_boot_mode() {
+    for mode in [
+        BootMode::Server,
+        BootMode::Desktop,
+        BootMode::Minimal,
+        BootMode::Edge,
+        BootMode::Recovery,
+    ] {
+        serde_roundtrip(&mode);
+    }
+}
+
+#[test]
+fn serde_boot_stage() {
+    for stage in [
+        BootStage::MountFilesystems,
+        BootStage::StartDeviceManager,
+        BootStage::VerifyRootfs,
+        BootStage::StartSecurity,
+        BootStage::StartDatabaseServices,
+        BootStage::StartAgentRuntime,
+        BootStage::StartLlmGateway,
+        BootStage::StartModelServices,
+        BootStage::StartCompositor,
+        BootStage::StartShell,
+        BootStage::BootComplete,
+    ] {
+        serde_roundtrip(&stage);
+    }
+}
+
+#[test]
+fn serde_boot_step_status() {
+    for status in [
+        BootStepStatus::Pending,
+        BootStepStatus::Running,
+        BootStepStatus::Complete,
+        BootStepStatus::Failed,
+        BootStepStatus::Skipped,
+    ] {
+        serde_roundtrip(&status);
+    }
+}
+
+#[test]
+fn serde_restart_policy() {
+    for policy in [
+        RestartPolicy::Always,
+        RestartPolicy::OnFailure,
+        RestartPolicy::Never,
+    ] {
+        serde_roundtrip(&policy);
+    }
+}
+
+#[test]
+fn serde_restart_config() {
+    serde_roundtrip(&RestartConfig::default());
+    serde_roundtrip(&RestartConfig {
+        max_restarts: 0,
+        base_delay_ms: 500,
+        max_delay_ms: 10_000,
+    });
+}
+
+#[test]
+fn serde_service_state() {
+    use super::types::ServiceState;
+    for state in [
+        ServiceState::Stopped,
+        ServiceState::Starting,
+        ServiceState::Running,
+        ServiceState::Stopping,
+        ServiceState::Failed("crash".into()),
+        ServiceState::Restarting,
+    ] {
+        serde_roundtrip(&state);
+    }
+}
+
+#[test]
+fn serde_exit_status() {
+    for status in [
+        ExitStatus::Code(0),
+        ExitStatus::Code(1),
+        ExitStatus::Signal(9),
+        ExitStatus::Running,
+        ExitStatus::NotStarted,
+    ] {
+        serde_roundtrip(&status);
+    }
+}
+
+#[test]
+fn serde_shutdown_type() {
+    for st in [
+        ShutdownType::Poweroff,
+        ShutdownType::Reboot,
+        ShutdownType::Halt,
+        ShutdownType::Kexec,
+    ] {
+        serde_roundtrip(&st);
+    }
+}
+
+#[test]
+fn serde_runlevel() {
+    for rl in [
+        Runlevel::Emergency,
+        Runlevel::Rescue,
+        Runlevel::Console,
+        Runlevel::Graphical,
+        Runlevel::Container,
+        Runlevel::Edge,
+    ] {
+        serde_roundtrip(&rl);
+    }
+}
+
+#[test]
+fn serde_crash_action() {
+    for action in [
+        CrashAction::Restart { delay_ms: 1000 },
+        CrashAction::Ignore,
+        CrashAction::GiveUp {
+            reason: "too many".into(),
+        },
+    ] {
+        serde_roundtrip(&action);
+    }
+}
+
+#[test]
+fn serde_health_check_type() {
+    for hct in [
+        HealthCheckType::HttpGet("http://localhost/health".into()),
+        HealthCheckType::TcpConnect("127.0.0.1".into(), 8080),
+        HealthCheckType::Command("true".into()),
+        HealthCheckType::ProcessAlive,
+    ] {
+        serde_roundtrip(&hct);
+    }
+}
+
+#[test]
+fn serde_shutdown_step_status() {
+    for status in [
+        ShutdownStepStatus::Pending,
+        ShutdownStepStatus::InProgress,
+        ShutdownStepStatus::Complete,
+        ShutdownStepStatus::Failed("err".into()),
+        ShutdownStepStatus::Skipped,
+    ] {
+        serde_roundtrip(&status);
+    }
+}
+
+#[test]
+fn serde_shutdown_action() {
+    for action in [
+        ShutdownAction::WallMessage("shutting down".into()),
+        ShutdownAction::NotifyAgents,
+        ShutdownAction::StopService {
+            name: "daimon".into(),
+            signal: 15,
+        },
+        ShutdownAction::ForceKillService {
+            name: "daimon".into(),
+        },
+        ShutdownAction::SyncFilesystems,
+        ShutdownAction::UnmountFilesystems,
+        ShutdownAction::SwapOff,
+        ShutdownAction::CloseLuks,
+        ShutdownAction::KernelAction(ShutdownType::Reboot),
+    ] {
+        serde_roundtrip(&action);
+    }
+}
+
+#[test]
+fn serde_service_event_type() {
+    for evt in [
+        ServiceEventType::Starting,
+        ServiceEventType::Started { pid: 42 },
+        ServiceEventType::HealthCheckPassed,
+        ServiceEventType::HealthCheckFailed { consecutive: 3 },
+        ServiceEventType::ReadyCheckPassed,
+        ServiceEventType::ReadyCheckFailed,
+        ServiceEventType::Stopping,
+        ServiceEventType::Stopped {
+            exit_status: ExitStatus::Code(0),
+        },
+        ServiceEventType::Restarting { restart_count: 2 },
+        ServiceEventType::DependencyWaiting {
+            dependency: "pg".into(),
+        },
+        ServiceEventType::DependencyMet {
+            dependency: "pg".into(),
+        },
+        ServiceEventType::TimeoutKilled,
+        ServiceEventType::CrashDetected {
+            exit_status: ExitStatus::Signal(11),
+        },
+    ] {
+        serde_roundtrip(&evt);
+    }
+}
+
+#[test]
+fn serde_argonaut_config() {
+    serde_roundtrip(&ArgonautConfig::default());
+}
+
+#[test]
+fn serde_argonaut_stats() {
+    let init = ArgonautInit::new(ArgonautConfig::default());
+    serde_roundtrip(&init.stats());
+}
+
+#[test]
+fn serde_edge_boot_config() {
+    serde_roundtrip(&EdgeBootConfig::default());
+}
+
+#[test]
+fn serde_emergency_shell_config() {
+    serde_roundtrip(&EmergencyShellConfig::default());
+}
+
+#[test]
+fn serde_service_definition() {
+    let svcs = ArgonautInit::default_services(BootMode::Desktop);
+    for svc in &svcs {
+        serde_roundtrip(svc);
+    }
+}
+
+#[test]
+fn serde_managed_service() {
+    let init = ArgonautInit::new(ArgonautConfig::default());
+    for svc in init.services.values() {
+        serde_roundtrip(svc);
+    }
+}
+
+#[test]
+fn serde_boot_step() {
+    let steps = ArgonautInit::build_boot_sequence(BootMode::Desktop);
+    for step in &steps {
+        serde_roundtrip(step);
+    }
+}
+
+#[test]
+fn serde_shutdown_plan() {
+    let init = ArgonautInit::new(ArgonautConfig::default());
+    let plan = init.plan_shutdown(ShutdownType::Poweroff).unwrap();
+    serde_roundtrip(&plan);
+}
+
+#[test]
+fn serde_runlevel_switch_plan() {
+    let init = ArgonautInit::new(ArgonautConfig::default());
+    let targets = ServiceTarget::defaults();
+    let plan = init.plan_runlevel_switch(Runlevel::Console, &targets);
+    serde_roundtrip(&plan);
+}
+
+#[test]
+fn serde_service_target() {
+    let targets = ServiceTarget::defaults();
+    for target in &targets {
+        serde_roundtrip(target);
+    }
 }
