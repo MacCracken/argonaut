@@ -22,6 +22,8 @@ pub struct NotifyMessage {
     pub status: Option<String>,
     /// MAINPID=<pid> if present.
     pub main_pid: Option<u32>,
+    /// Whether WATCHDOG=1 was present (service keepalive ping).
+    pub watchdog: bool,
     /// All key=value pairs from the message.
     pub fields: HashMap<String, String>,
 }
@@ -41,6 +43,7 @@ impl NotifyMessage {
                     "READY" => msg.ready = value == "1",
                     "STATUS" => msg.status = Some(value.to_string()),
                     "MAINPID" => msg.main_pid = value.parse().ok(),
+                    "WATCHDOG" => msg.watchdog = value == "1",
                     _ => {}
                 }
             }
@@ -112,10 +115,21 @@ impl NotifyListener {
         }
     }
 
-    /// Drain all pending notifications. Returns all parsed messages.
-    pub fn drain(&self) -> Vec<NotifyMessage> {
+    /// Enable credential passing on the socket (`SO_PASSCRED`).
+    ///
+    /// When enabled, the kernel attaches sender credentials (`ucred`) to each
+    /// message. Reading the credentials requires `recvmsg` with ancillary data,
+    /// which is not yet implemented — but enabling the option itself is an
+    /// important security step because the kernel validates the credentials.
+    pub fn enable_credentials(&self) -> io::Result<()> {
+        use nix::sys::socket::{setsockopt, sockopt};
+        setsockopt(&self.socket, sockopt::PassCred, &true).map_err(io::Error::other)
+    }
+
+    /// Drain pending notifications, up to `limit` messages.
+    pub fn drain(&self, limit: usize) -> Vec<NotifyMessage> {
         let mut messages = Vec::new();
-        loop {
+        for _ in 0..limit {
             match self.try_recv() {
                 Ok(Some(msg)) => messages.push(msg),
                 Ok(None) => break,
@@ -159,7 +173,15 @@ mod tests {
     fn parse_ready_message() {
         let msg = NotifyMessage::parse(b"READY=1\nSTATUS=running\n");
         assert!(msg.ready);
+        assert!(!msg.watchdog);
         assert_eq!(msg.status.as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn parse_watchdog_message() {
+        let msg = NotifyMessage::parse(b"WATCHDOG=1\n");
+        assert!(msg.watchdog);
+        assert!(!msg.ready);
     }
 
     #[test]
@@ -223,10 +245,22 @@ mod tests {
         send_notify(&sock_path, "STATUS=starting\n").unwrap();
         send_notify(&sock_path, "READY=1\n").unwrap();
 
-        let msgs = listener.drain();
+        let msgs = listener.drain(100);
         assert_eq!(msgs.len(), 2);
         assert!(!msgs[0].ready);
         assert!(msgs[1].ready);
+    }
+
+    #[test]
+    fn drain_respects_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("notify.sock");
+        let listener = NotifyListener::bind(&sock_path).unwrap();
+        for _ in 0..5 {
+            send_notify(&sock_path, "STATUS=ping\n").unwrap();
+        }
+        let msgs = listener.drain(3);
+        assert_eq!(msgs.len(), 3);
     }
 
     #[test]

@@ -62,6 +62,9 @@ pub struct EdgeBootConfig {
     pub tpm_attestation: bool,
     /// Maximum boot time in milliseconds before the watchdog triggers.
     pub max_boot_time_ms: u64,
+    /// TPM2 PCR bindings for LUKS unlock (e.g., "7+14" for Secure Boot policy + MOK).
+    /// Empty string means use default token without PCR policy.
+    pub pcr_bindings: String,
 }
 
 impl Default for EdgeBootConfig {
@@ -69,8 +72,9 @@ impl Default for EdgeBootConfig {
         Self {
             readonly_rootfs: true,
             luks_enabled: true,
-            tpm_attestation: false,
+            tpm_attestation: true,
             max_boot_time_ms: 3000,
+            pcr_bindings: "7+14".to_string(),
         }
     }
 }

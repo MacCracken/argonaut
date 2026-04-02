@@ -106,7 +106,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
-## [0.1.0] — 2026-04-02
+## [0.90.0] — 2026-04-02
 
 ### Added
 - Initial scaffold: types, boot sequences, service definitions, dependency resolution

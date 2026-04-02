@@ -1659,14 +1659,17 @@ fn verify_rootfs_integrity_success() {
     let result = verify_rootfs_integrity("/dev/sda1", "/dev/sda2", &hash);
     assert!(result.is_ok());
     let cmds = result.unwrap();
-    assert_eq!(cmds.len(), 3);
+    assert_eq!(cmds.len(), 2);
     assert_eq!(cmds[0].binary, "veritysetup");
-    assert_eq!(cmds[0].args[0], "verify");
-    assert_eq!(cmds[1].binary, "veritysetup");
-    assert_eq!(cmds[1].args[0], "open");
-    assert_eq!(cmds[2].binary, "mount");
+    assert_eq!(cmds[0].args[0], "open");
     assert!(
-        cmds[2]
+        cmds[0]
+            .args
+            .contains(&"--restart-on-corruption".to_string())
+    );
+    assert_eq!(cmds[1].binary, "mount");
+    assert!(
+        cmds[1]
             .args
             .contains(&"/dev/mapper/verified-root".to_string())
     );
@@ -1721,15 +1724,14 @@ fn verify_rootfs_integrity_commands_contain_devices() {
     assert!(cmds[0].args.contains(&"/dev/vda1".to_string()));
     assert!(cmds[0].args.contains(&"/dev/vda2".to_string()));
     assert!(cmds[0].args.contains(&hash));
-    assert!(cmds[1].args.contains(&"/dev/vda1".to_string()));
-    assert!(cmds[1].args.contains(&"verified-root".to_string()));
+    assert!(cmds[0].args.contains(&"verified-root".to_string()));
 }
 
 #[test]
 fn verify_rootfs_integrity_mount_is_readonly() {
     let hash = "c".repeat(64);
     let cmds = verify_rootfs_integrity("/dev/sda1", "/dev/sda2", &hash).unwrap();
-    assert!(cmds[2].args.contains(&"ro".to_string()));
+    assert!(cmds[1].args.contains(&"ro".to_string()));
 }
 
 #[test]
@@ -1751,8 +1753,9 @@ fn edge_boot_config_defaults() {
     let cfg = EdgeBootConfig::default();
     assert!(cfg.readonly_rootfs);
     assert!(cfg.luks_enabled);
-    assert!(!cfg.tpm_attestation);
+    assert!(cfg.tpm_attestation);
     assert_eq!(cfg.max_boot_time_ms, 3000);
+    assert_eq!(cfg.pcr_bindings, "7+14");
 }
 
 #[test]
@@ -1762,11 +1765,13 @@ fn edge_boot_config_custom() {
         luks_enabled: false,
         tpm_attestation: true,
         max_boot_time_ms: 5000,
+        pcr_bindings: "7".to_string(),
     };
     assert!(!cfg.readonly_rootfs);
     assert!(!cfg.luks_enabled);
     assert!(cfg.tpm_attestation);
     assert_eq!(cfg.max_boot_time_ms, 5000);
+    assert_eq!(cfg.pcr_bindings, "7");
 }
 
 #[test]
@@ -1778,6 +1783,7 @@ fn edge_boot_config_serde_roundtrip() {
     assert_eq!(deserialized.readonly_rootfs, cfg.readonly_rootfs);
     assert_eq!(deserialized.tpm_attestation, cfg.tpm_attestation);
     assert_eq!(deserialized.max_boot_time_ms, cfg.max_boot_time_ms);
+    assert_eq!(deserialized.pcr_bindings, cfg.pcr_bindings);
 }
 
 #[test]
@@ -2548,6 +2554,10 @@ fn unlock_luks_generates_commands() {
     assert_eq!(cmds[0].binary, "cryptsetup");
     assert!(cmds[0].args.contains(&"/dev/sda3".to_string()));
     assert!(cmds[0].args.contains(&"agnos-data".to_string()));
+    assert!(cmds[0].args.contains(&"--token-id".to_string()));
+    assert!(cmds[0].args.contains(&"0".to_string()));
+    assert!(cmds[0].args.contains(&"--tries".to_string()));
+    assert!(cmds[0].args.contains(&"1".to_string()));
 }
 
 #[test]
@@ -2663,6 +2673,7 @@ fn edge_config_in_argonaut_config() {
             luks_enabled: true,
             tpm_attestation: true,
             max_boot_time_ms: 2000,
+            pcr_bindings: "7+14".to_string(),
         },
         ..Default::default()
     };

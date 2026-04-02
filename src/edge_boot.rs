@@ -110,11 +110,11 @@ fn validate_device_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Generate dm-verity verification and activation commands for a root device.
+/// Generate dm-verity activation commands for a root device.
 ///
-/// Validates the integrity of a root filesystem partition using dm-verity by
-/// checking the provided SHA-256 root hash against the hash device, then
-/// activating a read-only verified mapping at `/dev/mapper/verified-root`.
+/// Activates a dm-verity device-mapper target that verifies each block
+/// on read against the provided SHA-256 root hash. Corruption detected
+/// during I/O triggers an automatic restart (`--restart-on-corruption`).
 ///
 /// # Errors
 ///
@@ -153,16 +153,8 @@ pub fn verify_rootfs_integrity(
         SafeCommand {
             binary: "veritysetup".to_string(),
             args: vec![
-                "verify".to_string(),
-                root_device.to_string(),
-                hash_device.to_string(),
-                root_hash.to_string(),
-            ],
-        },
-        SafeCommand {
-            binary: "veritysetup".to_string(),
-            args: vec![
                 "open".to_string(),
+                "--restart-on-corruption".to_string(),
                 root_device.to_string(),
                 "verified-root".to_string(),
                 hash_device.to_string(),
@@ -214,6 +206,10 @@ pub fn unlock_luks(encrypted_device: &str, mapped_name: &str) -> Result<Vec<Safe
                 "--type".to_string(),
                 "luks2".to_string(),
                 "--token-only".to_string(),
+                "--token-id".to_string(),
+                "0".to_string(),
+                "--tries".to_string(),
+                "1".to_string(),
                 encrypted_device.to_string(),
                 mapped_name.to_string(),
             ],
@@ -304,13 +300,20 @@ pub fn execute_edge_boot(
                     debug!("edge boot: dm-verity verification passed");
                 }
                 Err(e) => {
-                    error!(error = %e, "edge boot: dm-verity commands failed");
+                    error!(error = %e, "edge boot: dm-verity commands failed — FATAL");
                     result.errors.push(format!("dm-verity exec: {e}"));
+                    // dm-verity failure is fatal — do not continue boot
+                    result.boot_time_ms = start.elapsed().as_millis() as u64;
+                    result.within_budget = result.boot_time_ms <= config.max_boot_time_ms;
+                    return result;
                 }
             },
             Err(e) => {
-                error!(error = %e, "edge boot: dm-verity validation failed");
+                error!(error = %e, "edge boot: dm-verity validation failed — FATAL");
                 result.errors.push(format!("dm-verity validation: {e}"));
+                result.boot_time_ms = start.elapsed().as_millis() as u64;
+                result.within_budget = result.boot_time_ms <= config.max_boot_time_ms;
+                return result;
             }
         }
     } else {
