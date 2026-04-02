@@ -1,6 +1,8 @@
 //! Boot sequence construction — builds the ordered list of [`BootStep`]s
 //! for each [`BootMode`].
 
+use tracing::debug;
+
 use super::types::{BootMode, BootStage, BootStep, BootStepStatus};
 
 impl super::ArgonautInit {
@@ -73,6 +75,7 @@ impl super::ArgonautInit {
                 completed_at: None,
                 error: None,
             });
+            debug!(mode = %mode, steps = steps.len(), "built boot sequence");
             return steps;
         }
 
@@ -161,6 +164,7 @@ impl super::ArgonautInit {
             error: None,
         });
 
+        debug!(mode = %mode, steps = steps.len(), "built boot sequence");
         steps
     }
 }

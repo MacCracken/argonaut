@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 
+use super::ArgonautInit;
 use super::edge_boot::{configure_readonly_rootfs, verify_rootfs_integrity};
 use super::types::{
     ArgonautConfig, BootMode, BootStage, BootStepStatus, CrashAction, EdgeBootConfig,
@@ -12,7 +13,6 @@ use super::types::{
     SafeCommand, ServiceDefinition, ServiceEventType, ServiceState, ServiceTarget, ShutdownAction,
     ShutdownStepStatus, ShutdownType,
 };
-use super::ArgonautInit;
 
 // --- helpers ---
 
@@ -883,17 +883,21 @@ fn synapse_starts_after_llm_gateway() {
 #[test]
 fn boot_sequence_includes_model_services_for_server() {
     let steps = ArgonautInit::build_boot_sequence(BootMode::Server);
-    assert!(steps
-        .iter()
-        .any(|s| s.stage == BootStage::StartModelServices));
+    assert!(
+        steps
+            .iter()
+            .any(|s| s.stage == BootStage::StartModelServices)
+    );
 }
 
 #[test]
 fn boot_sequence_excludes_model_services_for_minimal() {
     let steps = ArgonautInit::build_boot_sequence(BootMode::Minimal);
-    assert!(!steps
-        .iter()
-        .any(|s| s.stage == BootStage::StartModelServices));
+    assert!(
+        !steps
+            .iter()
+            .any(|s| s.stage == BootStage::StartModelServices)
+    );
 }
 
 #[test]
@@ -1040,10 +1044,11 @@ fn shutdown_plan_includes_sync() {
     let config = ArgonautConfig::default();
     let init = ArgonautInit::new(config);
     let plan = init.plan_shutdown(ShutdownType::Poweroff).unwrap();
-    assert!(plan
-        .steps
-        .iter()
-        .any(|s| s.action == ShutdownAction::SyncFilesystems));
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| s.action == ShutdownAction::SyncFilesystems)
+    );
 }
 
 #[test]
@@ -1051,10 +1056,11 @@ fn shutdown_plan_includes_unmount() {
     let config = ArgonautConfig::default();
     let init = ArgonautInit::new(config);
     let plan = init.plan_shutdown(ShutdownType::Halt).unwrap();
-    assert!(plan
-        .steps
-        .iter()
-        .any(|s| s.action == ShutdownAction::UnmountFilesystems));
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| s.action == ShutdownAction::UnmountFilesystems)
+    );
 }
 
 #[test]
@@ -1091,10 +1097,11 @@ fn shutdown_plan_includes_luks_close() {
     let config = ArgonautConfig::default();
     let init = ArgonautInit::new(config);
     let plan = init.plan_shutdown(ShutdownType::Poweroff).unwrap();
-    assert!(plan
-        .steps
-        .iter()
-        .any(|s| s.action == ShutdownAction::CloseLuks));
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| s.action == ShutdownAction::CloseLuks)
+    );
 }
 
 #[test]
@@ -1192,10 +1199,10 @@ fn health_tracker_records_failures() {
 fn health_tracker_resets_on_pass() {
     use super::types::HealthTracker;
     let mut tracker = HealthTracker::new();
-    tracker.record("svc1", false, 3);
-    tracker.record("svc1", false, 3);
+    let _ = tracker.record("svc1", false, 3);
+    let _ = tracker.record("svc1", false, 3);
     // Pass resets counter
-    tracker.record("svc1", true, 3);
+    let _ = tracker.record("svc1", true, 3);
     assert_eq!(tracker.failure_count("svc1"), 0);
 }
 
@@ -1203,8 +1210,8 @@ fn health_tracker_resets_on_pass() {
 fn health_tracker_reset_manual() {
     use super::types::HealthTracker;
     let mut tracker = HealthTracker::new();
-    tracker.record("svc1", false, 3);
-    tracker.record("svc1", false, 3);
+    let _ = tracker.record("svc1", false, 3);
+    let _ = tracker.record("svc1", false, 3);
     tracker.reset("svc1");
     assert_eq!(tracker.failure_count("svc1"), 0);
 }
@@ -1213,8 +1220,8 @@ fn health_tracker_reset_manual() {
 fn health_tracker_independent_services() {
     use super::types::HealthTracker;
     let mut tracker = HealthTracker::new();
-    tracker.record("svc1", false, 2);
-    tracker.record("svc2", false, 2);
+    let _ = tracker.record("svc1", false, 2);
+    let _ = tracker.record("svc2", false, 2);
     assert_eq!(tracker.failure_count("svc1"), 1);
     assert_eq!(tracker.failure_count("svc2"), 1);
     // Only svc1 reaches threshold
@@ -1293,18 +1300,20 @@ fn process_spec_from_service() {
     let spec = ProcessSpec::from_service(&def);
     assert_eq!(spec.binary, PathBuf::from("/usr/bin/test"));
     assert_eq!(spec.args, vec!["--flag"]);
-    assert!(spec
-        .stdout_log
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .contains("test-svc"));
-    assert!(spec
-        .stderr_log
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .contains("test-svc"));
+    assert!(
+        spec.stdout_log
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("test-svc")
+    );
+    assert!(
+        spec.stderr_log
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("test-svc")
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -1542,10 +1551,11 @@ fn edge_shutdown_plan() {
     let init = ArgonautInit::new(edge_config());
     let plan = init.plan_shutdown(ShutdownType::Reboot).unwrap();
     assert_eq!(plan.shutdown_type, ShutdownType::Reboot);
-    assert!(plan
-        .steps
-        .iter()
-        .any(|s| s.action == ShutdownAction::CloseLuks));
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| s.action == ShutdownAction::CloseLuks)
+    );
 }
 
 #[test]
@@ -1588,18 +1598,18 @@ fn readonly_rootfs_returns_five_commands() {
 #[test]
 fn readonly_rootfs_remounts_root_ro() {
     let cmds = configure_readonly_rootfs();
-    assert_eq!(cmds[0], "mount -o remount,ro /");
+    assert_eq!(cmds[0].display(), "mount -o remount,ro /");
 }
 
 #[test]
 fn readonly_rootfs_tmpfs_noexec() {
     let cmds = configure_readonly_rootfs();
     // /tmp and /var/tmp should have noexec
-    assert!(cmds[1].contains("noexec"));
-    assert!(cmds[4].contains("noexec"));
+    assert!(cmds[1].display().contains("noexec"));
+    assert!(cmds[4].display().contains("noexec"));
     // /var/run and /var/log should NOT have noexec
-    assert!(!cmds[2].contains("noexec"));
-    assert!(!cmds[3].contains("noexec"));
+    assert!(!cmds[2].display().contains("noexec"));
+    assert!(!cmds[3].display().contains("noexec"));
 }
 
 #[test]
@@ -1614,9 +1624,11 @@ fn verify_rootfs_integrity_success() {
     assert_eq!(cmds[1].binary, "veritysetup");
     assert_eq!(cmds[1].args[0], "open");
     assert_eq!(cmds[2].binary, "mount");
-    assert!(cmds[2]
-        .args
-        .contains(&"/dev/mapper/verified-root".to_string()));
+    assert!(
+        cmds[2]
+            .args
+            .contains(&"/dev/mapper/verified-root".to_string())
+    );
 }
 
 #[test]
@@ -1686,6 +1698,7 @@ fn safe_command_display() {
         args: vec!["-o".to_string(), "ro".to_string(), "/dev/sda1".to_string()],
     };
     assert_eq!(cmd.display(), "mount -o ro /dev/sda1");
+    assert_eq!(cmd.to_string(), "mount -o ro /dev/sda1");
 }
 
 // -----------------------------------------------------------------------

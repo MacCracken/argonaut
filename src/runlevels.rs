@@ -1,6 +1,7 @@
 //! Runlevel management — shutdown planning and runlevel switching.
 
 use anyhow::Result;
+use tracing::{debug, info};
 
 use super::types::{
     BootMode, Runlevel, RunlevelSwitchPlan, ServiceState, ServiceTarget, ShutdownAction,
@@ -37,18 +38,18 @@ impl super::ArgonautInit {
 
         // Step 3: Stop services in reverse dependency order
         for svc_name in &service_order {
-            if let Some(svc) = self.services.get(svc_name) {
-                if svc.state == ServiceState::Running || svc.state == ServiceState::Starting {
-                    steps.push(ShutdownStep {
-                        description: format!("Stop service: {}", svc_name),
-                        action: ShutdownAction::StopService {
-                            name: svc_name.clone(),
-                            signal: 15, // SIGTERM
-                        },
-                        timeout_ms: 5000,
-                        status: ShutdownStepStatus::Pending,
-                    });
-                }
+            if let Some(svc) = self.services.get(svc_name)
+                && (svc.state == ServiceState::Running || svc.state == ServiceState::Starting)
+            {
+                steps.push(ShutdownStep {
+                    description: format!("Stop service: {}", svc_name),
+                    action: ShutdownAction::StopService {
+                        name: svc_name.clone(),
+                        signal: 15, // SIGTERM
+                    },
+                    timeout_ms: 5000,
+                    status: ShutdownStepStatus::Pending,
+                });
             }
         }
 
@@ -92,15 +93,23 @@ impl super::ArgonautInit {
             status: ShutdownStepStatus::Pending,
         });
 
-        Ok(ShutdownPlan {
+        let plan = ShutdownPlan {
             shutdown_type,
             steps,
             timeout_ms: self.config.shutdown_timeout_ms,
             wall_message: Some(wall_msg),
-        })
+        };
+        info!(
+            shutdown_type = %shutdown_type,
+            step_count = plan.steps.len(),
+            timeout_ms = plan.timeout_ms,
+            "shutdown plan created"
+        );
+        Ok(plan)
     }
 
     /// Compute which services need to start/stop when switching runlevels.
+    #[must_use]
     pub fn plan_runlevel_switch(
         &self,
         target: Runlevel,
@@ -154,17 +163,29 @@ impl super::ArgonautInit {
             }
         }
 
-        RunlevelSwitchPlan {
+        let plan = RunlevelSwitchPlan {
             from: Runlevel::from_boot_mode(self.config.boot_mode),
             to: target,
             services_to_start,
             services_to_stop,
             drop_to_shell: target == Runlevel::Emergency || target == Runlevel::Rescue,
-        }
+        };
+        info!(
+            from = %plan.from,
+            to = %plan.to,
+            starting = plan.services_to_start.len(),
+            stopping = plan.services_to_stop.len(),
+            drop_to_shell = plan.drop_to_shell,
+            "runlevel switch plan created"
+        );
+        plan
     }
 
     /// Determine which boot mode to use for a given runlevel.
+    #[must_use]
     pub fn runlevel_boot_mode(runlevel: Runlevel) -> Option<BootMode> {
-        runlevel.to_boot_mode()
+        let mode = runlevel.to_boot_mode();
+        debug!(runlevel = %runlevel, boot_mode = ?mode, "resolved runlevel to boot mode");
+        mode
     }
 }

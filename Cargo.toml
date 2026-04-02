@@ -20,4 +20,9 @@ serde_json = "1"
 tracing = "0.1"
 
 [dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
+
+[[bench]]
+name = "argonaut_bench"
+harness = false

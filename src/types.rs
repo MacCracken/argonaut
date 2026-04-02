@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 /// Which mode to boot into. Determines which services and boot stages
 /// are executed.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BootMode {
     /// Headless server: agent-runtime + llm-gateway, no compositor.
@@ -76,6 +77,7 @@ impl Default for EdgeBootConfig {
 
 /// Ordered boot stages. The init system walks through these in order,
 /// skipping stages that are not relevant to the current [`BootMode`].
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BootStage {
     MountFilesystems,
@@ -93,6 +95,7 @@ pub enum BootStage {
 
 impl BootStage {
     /// Numeric order for sorting (lower = earlier).
+    #[must_use]
     pub(crate) fn order(self) -> u8 {
         match self {
             Self::MountFilesystems => 0,
@@ -145,6 +148,7 @@ impl Ord for BootStage {
 // ---------------------------------------------------------------------------
 
 /// Status of an individual boot step.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BootStepStatus {
     Pending,
@@ -196,6 +200,7 @@ pub struct BootStep {
 // ---------------------------------------------------------------------------
 
 /// How the init system should handle a service that exits.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RestartPolicy {
     /// Always restart, regardless of exit code.
@@ -221,6 +226,7 @@ impl fmt::Display for RestartPolicy {
 // ---------------------------------------------------------------------------
 
 /// Method used to check health or readiness.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HealthCheckType {
     /// HTTP GET against a URL — expects 2xx.
@@ -288,6 +294,7 @@ pub struct ServiceDefinition {
 }
 
 /// Runtime state of a service.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServiceState {
     Stopped,
@@ -300,6 +307,7 @@ pub enum ServiceState {
 
 impl ServiceState {
     /// Check whether a transition from `self` to `to` is valid.
+    #[must_use]
     pub fn valid_transition(&self, to: &ServiceState) -> bool {
         // Same state is always a no-op.
         if self == to {
@@ -403,6 +411,7 @@ pub struct ArgonautStats {
 
 /// Runlevel represents a system operational state, analogous to SysV runlevels
 /// but mapped to AGNOS boot modes. Supports runtime switching.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Runlevel {
     /// Emergency: single-user, no services, drop to agnoshi shell.
@@ -421,6 +430,7 @@ pub enum Runlevel {
 
 impl Runlevel {
     /// Map a runlevel to the services that should be running.
+    #[must_use]
     pub fn to_boot_mode(self) -> Option<BootMode> {
         match self {
             Self::Emergency | Self::Rescue => None,
@@ -432,6 +442,7 @@ impl Runlevel {
     }
 
     /// Map a boot mode to the corresponding runlevel.
+    #[must_use]
     pub fn from_boot_mode(mode: BootMode) -> Self {
         match mode {
             BootMode::Server => Self::Console,
@@ -442,6 +453,7 @@ impl Runlevel {
     }
 
     /// Numeric level for display (compatible with SysV conventions).
+    #[must_use]
     pub fn level(self) -> u8 {
         match self {
             Self::Emergency => 0,
@@ -487,6 +499,7 @@ pub struct ServiceTarget {
 
 impl ServiceTarget {
     /// Predefined targets for AGNOS.
+    #[must_use]
     pub fn defaults() -> Vec<Self> {
         vec![
             Self {
@@ -533,11 +546,13 @@ impl ServiceTarget {
     }
 
     /// Check if this target is active in the given runlevel.
+    #[must_use]
     pub fn is_active_in(&self, runlevel: Runlevel) -> bool {
         self.active_in.contains(&runlevel)
     }
 
     /// All services needed for this target (requires + wants).
+    #[must_use]
     pub fn all_services(&self) -> Vec<&str> {
         self.requires
             .iter()
@@ -552,6 +567,7 @@ impl ServiceTarget {
 // ---------------------------------------------------------------------------
 
 /// Describes how a service process exited.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExitStatus {
     /// Exited normally with the given code (0 = success).
@@ -585,6 +601,7 @@ pub struct ServiceEvent {
 }
 
 /// Types of service lifecycle events.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ServiceEventType {
     Starting,
@@ -629,6 +646,7 @@ impl fmt::Display for ServiceEventType {
 // ---------------------------------------------------------------------------
 
 /// Shutdown type selection.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShutdownType {
     /// Clean shutdown and power off.
@@ -671,6 +689,7 @@ pub struct ShutdownStep {
 }
 
 /// Actions performed during shutdown.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ShutdownAction {
     /// Broadcast wall message to all terminals.
@@ -694,6 +713,7 @@ pub enum ShutdownAction {
 }
 
 /// Status of a shutdown step.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ShutdownStepStatus {
     Pending,
@@ -748,12 +768,14 @@ pub struct HealthTracker {
 }
 
 impl HealthTracker {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Record a health check result. Returns true if the service should
     /// be restarted (consecutive failures >= threshold).
+    #[must_use]
     pub fn record(&mut self, service: &str, passed: bool, threshold: u32) -> bool {
         if passed {
             self.failures.remove(service);
@@ -766,6 +788,7 @@ impl HealthTracker {
     }
 
     /// Get current consecutive failure count for a service.
+    #[must_use]
     pub fn failure_count(&self, service: &str) -> u32 {
         self.failures.get(service).copied().unwrap_or(0)
     }
@@ -795,6 +818,7 @@ pub struct ProcessSpec {
 
 impl ProcessSpec {
     /// Build a ProcessSpec from a ServiceDefinition.
+    #[must_use]
     pub fn from_service(def: &ServiceDefinition) -> Self {
         Self {
             binary: def.binary_path.clone(),
@@ -866,6 +890,7 @@ impl Default for EmergencyShellConfig {
 // ---------------------------------------------------------------------------
 
 /// Action to take when a service crashes.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CrashAction {
     /// Restart the service after the given delay.
@@ -887,11 +912,20 @@ pub struct SafeCommand {
     pub args: Vec<String>,
 }
 
+impl fmt::Display for SafeCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.binary)?;
+        for arg in &self.args {
+            write!(f, " {}", arg)?;
+        }
+        Ok(())
+    }
+}
+
 impl SafeCommand {
     /// Format as a display string (for logging only — NOT for shell execution).
+    #[must_use]
     pub fn display(&self) -> String {
-        let mut parts = vec![self.binary.clone()];
-        parts.extend(self.args.iter().cloned());
-        parts.join(" ")
+        self.to_string()
     }
 }

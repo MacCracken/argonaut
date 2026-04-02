@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use chrono::Utc;
 use tracing::{debug, info, warn};
 
@@ -15,6 +15,7 @@ use super::types::{
 
 /// Exponential backoff delay for service restarts.
 /// 1s, 2s, 4s, 8s, 16s (capped at 30s).
+#[must_use]
 pub(crate) fn backoff_delay(restart_count: u32) -> u64 {
     let base: u64 = 1000;
     let delay = base * 2u64.saturating_pow(restart_count);
@@ -23,6 +24,7 @@ pub(crate) fn backoff_delay(restart_count: u32) -> u64 {
 
 impl super::ArgonautInit {
     /// Return the PostgreSQL and Redis database service definitions.
+    #[must_use]
     pub fn database_services() -> Vec<ServiceDefinition> {
         vec![
             ServiceDefinition {
@@ -82,6 +84,7 @@ impl super::ArgonautInit {
     }
 
     /// Return the Synapse LLM management and training service definition.
+    #[must_use]
     pub fn synapse_service() -> ServiceDefinition {
         ServiceDefinition {
             name: "synapse".into(),
@@ -151,11 +154,13 @@ impl super::ArgonautInit {
 
     /// Return the optional service catalogue. These services are not
     /// started by default but can be enabled by the user.
+    #[must_use]
     pub fn optional_services() -> Vec<ServiceDefinition> {
         vec![Self::shruti_service()]
     }
 
     /// Look up an optional service by name.
+    #[must_use]
     pub fn optional_service(name: &str) -> Option<ServiceDefinition> {
         Self::optional_services()
             .into_iter()
@@ -188,6 +193,7 @@ impl super::ArgonautInit {
     }
 
     /// Return the default AGNOS services for a boot mode.
+    #[must_use]
     pub fn default_services(mode: BootMode) -> Vec<ServiceDefinition> {
         let mut services = Vec::new();
 
@@ -421,11 +427,13 @@ impl super::ArgonautInit {
     }
 
     /// Look up a managed service by name.
+    #[must_use]
     pub fn get_service(&self, name: &str) -> Option<&ManagedService> {
         self.services.get(name)
     }
 
     /// Get the current state of a service.
+    #[must_use]
     pub fn get_service_state(&self, name: &str) -> Option<&ServiceState> {
         self.services.get(name).map(|s| &s.state)
     }
@@ -480,16 +488,15 @@ impl super::ArgonautInit {
             }
         };
 
-        if validation {
-            if let Some(svc) = self.services.get_mut(name) {
-                debug!(service = %name, from = %svc.state, to = %state, "state transition");
-                svc.state = state;
-            }
+        if validation && let Some(svc) = self.services.get_mut(name) {
+            debug!(service = %name, from = %svc.state, to = %state, "state transition");
+            svc.state = state;
         }
         validation
     }
 
     /// Return service definitions that are required for the given mode.
+    #[must_use]
     pub fn services_for_mode(&self, mode: &BootMode) -> Vec<&ServiceDefinition> {
         self.services
             .values()
@@ -508,10 +515,12 @@ impl super::ArgonautInit {
             .collect();
         let mut order = Self::resolve_service_order(&definitions)?;
         order.reverse();
+        debug!(order = ?order, "resolved service shutdown order");
         Ok(order)
     }
 
     /// Record a service event in the audit log.
+    #[must_use]
     pub fn record_event(&self, service: &str, event_type: ServiceEventType) -> ServiceEvent {
         let event = ServiceEvent {
             timestamp: Utc::now(),
@@ -547,14 +556,23 @@ impl super::ArgonautInit {
             })
             .collect();
 
+        info!(
+            mode = %self.config.boot_mode,
+            service_count = plan.len(),
+            "boot execution plan created"
+        );
         Ok(plan)
     }
 
     /// Determine what action to take when a service crashes.
+    #[must_use]
     pub fn on_service_crash(&self, service_name: &str, exit_status: &ExitStatus) -> CrashAction {
         let svc = match self.services.get(service_name) {
             Some(s) => s,
-            None => return CrashAction::Ignore,
+            None => {
+                warn!(service = service_name, "crash reported for unknown service");
+                return CrashAction::Ignore;
+            }
         };
 
         match svc.definition.restart_policy {
@@ -569,15 +587,31 @@ impl super::ArgonautInit {
                         reason: format!("exceeded restart limit ({} restarts)", svc.restart_count),
                     }
                 } else {
-                    CrashAction::Restart {
-                        delay_ms: backoff_delay(svc.restart_count),
-                    }
+                    let delay = backoff_delay(svc.restart_count);
+                    info!(
+                        service = service_name,
+                        exit_status = %exit_status,
+                        restart_count = svc.restart_count,
+                        delay_ms = delay,
+                        "scheduling service restart (policy=always)"
+                    );
+                    CrashAction::Restart { delay_ms: delay }
                 }
             }
             RestartPolicy::OnFailure => {
                 if *exit_status == ExitStatus::Code(0) {
+                    debug!(
+                        service = service_name,
+                        "service exited cleanly, no restart (policy=on-failure)"
+                    );
                     CrashAction::Ignore
                 } else if svc.restart_count >= 5 {
+                    warn!(
+                        service = service_name,
+                        restarts = svc.restart_count,
+                        exit_status = %exit_status,
+                        "service exceeded restart limit after failures"
+                    );
                     CrashAction::GiveUp {
                         reason: format!(
                             "exceeded restart limit after failures ({} restarts)",
@@ -585,12 +619,25 @@ impl super::ArgonautInit {
                         ),
                     }
                 } else {
-                    CrashAction::Restart {
-                        delay_ms: backoff_delay(svc.restart_count),
-                    }
+                    let delay = backoff_delay(svc.restart_count);
+                    info!(
+                        service = service_name,
+                        exit_status = %exit_status,
+                        restart_count = svc.restart_count,
+                        delay_ms = delay,
+                        "scheduling service restart (policy=on-failure)"
+                    );
+                    CrashAction::Restart { delay_ms: delay }
                 }
             }
-            RestartPolicy::Never => CrashAction::Ignore,
+            RestartPolicy::Never => {
+                debug!(
+                    service = service_name,
+                    exit_status = %exit_status,
+                    "service exited, no restart (policy=never)"
+                );
+                CrashAction::Ignore
+            }
         }
     }
 }

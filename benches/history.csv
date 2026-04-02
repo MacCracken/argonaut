@@ -1,0 +1,11 @@
+timestamp,label,benchmark,ns_per_iter,low_ns,high_ns
+2026-04-02T19:15:25Z,p-1-baseline,init_new_desktop,5043.50,4751.70,5386.70
+2026-04-02T19:15:25Z,p-1-baseline,init_new_minimal,534.95,532.73,537.09
+2026-04-02T19:15:25Z,p-1-baseline,init_new_edge,947.56,944.58,950.50
+2026-04-02T19:15:25Z,p-1-baseline,plan_shutdown_desktop,5462.10,5183.30,5766.90
+2026-04-02T19:15:25Z,p-1-baseline,plan_shutdown_edge,978.66,907.52,1.05
+2026-04-02T19:15:25Z,p-1-baseline,plan_runlevel_switch,1404.20,1351.20,1467.80
+2026-04-02T19:15:25Z,p-1-baseline,mark_all_steps_complete,5830.30,5794.50,5870.90
+2026-04-02T19:15:25Z,p-1-baseline,safe_command_display,165.48,164.48,166.58
+2026-04-02T19:15:25Z,p-1-baseline,verify_rootfs_integrity,258.77,244.54,275.81
+2026-04-02T19:15:25Z,p-1-baseline,stats_desktop,30.43,29.05,31.93

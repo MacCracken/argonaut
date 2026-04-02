@@ -42,7 +42,7 @@ pub use types::{
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use tracing::info;
+use tracing::{info, warn};
 
 /// The main init-system orchestrator. Holds the boot sequence and
 /// all managed services.
@@ -147,6 +147,7 @@ impl ArgonautInit {
     }
 
     /// The first boot step that is not yet complete or failed.
+    #[must_use]
     pub fn current_stage(&self) -> Option<&BootStep> {
         self.boot_sequence.iter().find(|s| {
             s.status != BootStepStatus::Complete
@@ -156,6 +157,7 @@ impl ArgonautInit {
     }
 
     /// Whether every boot step has completed (or been skipped).
+    #[must_use]
     pub fn is_boot_complete(&self) -> bool {
         self.boot_sequence.iter().all(|s| {
             s.status == BootStepStatus::Complete
@@ -165,6 +167,7 @@ impl ArgonautInit {
     }
 
     /// Total boot duration in milliseconds, if boot has completed.
+    #[must_use]
     pub fn boot_duration_ms(&self) -> Option<u64> {
         match (self.boot_started, self.boot_completed) {
             (Some(start), Some(end)) => {
@@ -176,6 +179,7 @@ impl ArgonautInit {
     }
 
     /// All boot steps that have failed.
+    #[must_use]
     pub fn failed_steps(&self) -> Vec<&BootStep> {
         self.boot_sequence
             .iter()
@@ -184,6 +188,7 @@ impl ArgonautInit {
     }
 
     /// Collect current statistics.
+    #[must_use]
     pub fn stats(&self) -> ArgonautStats {
         let services_running = self
             .services
@@ -209,13 +214,29 @@ impl ArgonautInit {
 
     /// Determine whether the system should drop to an emergency shell.
     /// Called after a critical boot step failure.
+    #[must_use]
     pub fn should_drop_to_emergency(&self) -> bool {
-        self.failed_steps()
+        let should_drop = self
+            .failed_steps()
             .iter()
-            .any(|step| step.required && step.status == BootStepStatus::Failed)
+            .any(|step| step.required && step.status == BootStepStatus::Failed);
+        if should_drop {
+            let failed_stages: Vec<_> = self
+                .failed_steps()
+                .iter()
+                .filter(|s| s.required)
+                .map(|s| s.stage.to_string())
+                .collect();
+            warn!(
+                failed_stages = ?failed_stages,
+                "required boot stages failed — dropping to emergency shell"
+            );
+        }
+        should_drop
     }
 
     /// Get the emergency shell configuration.
+    #[must_use]
     pub fn emergency_shell_config(&self) -> EmergencyShellConfig {
         EmergencyShellConfig::default()
     }
