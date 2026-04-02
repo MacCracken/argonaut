@@ -61,8 +61,8 @@ impl SpawnedProcess {
     /// Check if the process has exited without blocking.
     /// Returns `Some(exit_code)` if exited, `None` if still running.
     pub fn try_wait(&mut self) -> Result<Option<i32>> {
-        match self.child.try_wait() {
-            Ok(Some(status)) => {
+        match self.child.try_wait().context("try_wait failed")? {
+            Some(status) => {
                 let code = status.code().unwrap_or(-1);
                 debug!(
                     service = %self.service_name,
@@ -72,16 +72,7 @@ impl SpawnedProcess {
                 );
                 Ok(Some(code))
             }
-            Ok(None) => Ok(None),
-            Err(e) => {
-                error!(
-                    service = %self.service_name,
-                    pid = self.pid,
-                    error = %e,
-                    "failed to check process status"
-                );
-                Err(e).context("try_wait failed")
-            }
+            None => Ok(None),
         }
     }
 
@@ -330,22 +321,37 @@ pub fn spawn_process(spec: &ProcessSpec, service_name: &str) -> Result<SpawnedPr
 pub fn run_command(cmd: &SafeCommand) -> Result<i32> {
     info!(command = %cmd, "executing command");
 
-    let output = Command::new(&cmd.binary)
+    let mut child = Command::new(&cmd.binary)
         .args(&cmd.args)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("failed to execute command: {}", cmd))?;
 
-    let code = output.status.code().unwrap_or(-1);
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for command: {}", cmd))?;
+    let code = status.code().unwrap_or(-1);
 
-    if output.status.success() {
+    if status.success() {
         debug!(command = %cmd, exit_code = code, "command completed successfully");
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Read stderr for diagnostic (bounded read)
+        let stderr_msg = child
+            .stderr
+            .take()
+            .and_then(|mut s| {
+                let mut buf = vec![0u8; 4096];
+                io::Read::read(&mut s, &mut buf)
+                    .ok()
+                    .map(|n| String::from_utf8_lossy(&buf[..n]).trim().to_string())
+            })
+            .unwrap_or_default();
         warn!(
             command = %cmd,
             exit_code = code,
-            stderr = %stderr.trim(),
+            stderr = %stderr_msg,
             "command failed"
         );
     }

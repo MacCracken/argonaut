@@ -460,7 +460,14 @@ impl ArgonautInit {
         for (name, code) in &results {
             if let Some(svc) = self.services.get_mut(name) {
                 svc.pid = None;
-                svc.state = ServiceState::Stopped;
+                if *code == 0 {
+                    svc.state = ServiceState::Stopped;
+                } else {
+                    svc.state = ServiceState::Failed(format!(
+                        "killed during shutdown (exit code {})",
+                        code
+                    ));
+                }
             }
             debug!(service = %name, exit_code = code, "service stopped during shutdown");
         }

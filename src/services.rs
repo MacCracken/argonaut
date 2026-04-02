@@ -348,15 +348,15 @@ impl super::ArgonautInit {
     /// Topological sort of service names by `depends_on`. Returns an
     /// ordered list of service names such that every service appears
     /// after its dependencies. Detects cycles and returns an error.
-    pub fn resolve_service_order(services: &[ServiceDefinition]) -> Result<Vec<String>> {
+    pub fn resolve_service_order(services: &[&ServiceDefinition]) -> Result<Vec<String>> {
         let name_set: HashMap<&str, &ServiceDefinition> =
-            services.iter().map(|s| (s.name.as_str(), s)).collect();
+            services.iter().map(|s| (s.name.as_str(), *s)).collect();
 
         // Kahn's algorithm.
         let mut in_degree: HashMap<&str, usize> = HashMap::new();
         let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
 
-        for svc in services {
+        for &svc in services {
             in_degree.entry(svc.name.as_str()).or_insert(0);
             let mut seen_deps = std::collections::HashSet::new();
             for dep in &svc.depends_on {
@@ -516,11 +516,8 @@ impl super::ArgonautInit {
     /// Return service names in shutdown order (reverse of startup order).
     /// Returns an error if dependency resolution fails (e.g. cycles).
     pub fn shutdown_order(&self) -> Result<Vec<String>> {
-        let definitions: Vec<ServiceDefinition> = self
-            .services
-            .values()
-            .map(|s| s.definition.clone())
-            .collect();
+        let definitions: Vec<&ServiceDefinition> =
+            self.services.values().map(|s| &s.definition).collect();
         let mut order = Self::resolve_service_order(&definitions)?;
         order.reverse();
         debug!(order = ?order, "resolved service shutdown order");
@@ -546,11 +543,8 @@ impl super::ArgonautInit {
     /// Build a complete boot execution plan: resolve service order,
     /// create ProcessSpecs, and return the ordered list.
     pub fn boot_execution_plan(&self) -> Result<Vec<(String, ProcessSpec)>> {
-        let definitions: Vec<ServiceDefinition> = self
-            .services
-            .values()
-            .map(|s| s.definition.clone())
-            .collect();
+        let definitions: Vec<&ServiceDefinition> =
+            self.services.values().map(|s| &s.definition).collect();
         let order = Self::resolve_service_order(&definitions)?;
 
         let plan: Vec<(String, ProcessSpec)> = order

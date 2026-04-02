@@ -221,23 +221,25 @@ fn default_services_desktop() {
 
 #[test]
 fn resolve_service_order_simple_chain() {
-    let services = vec![
+    let services = [
         dummy_service("c", vec!["b"]),
         dummy_service("b", vec!["a"]),
         dummy_service("a", vec![]),
     ];
-    let order = ArgonautInit::resolve_service_order(&services).unwrap();
+    let refs: Vec<&ServiceDefinition> = services.iter().collect();
+    let order = ArgonautInit::resolve_service_order(&refs).unwrap();
     assert_eq!(order, vec!["a", "b", "c"]);
 }
 
 #[test]
 fn resolve_service_order_independent() {
-    let services = vec![
+    let services = [
         dummy_service("alpha", vec![]),
         dummy_service("beta", vec![]),
         dummy_service("gamma", vec![]),
     ];
-    let order = ArgonautInit::resolve_service_order(&services).unwrap();
+    let refs: Vec<&ServiceDefinition> = services.iter().collect();
+    let order = ArgonautInit::resolve_service_order(&refs).unwrap();
     assert_eq!(order.len(), 3);
     // All independent — any valid topological order contains all three.
     assert!(order.contains(&"alpha".to_string()));
@@ -247,8 +249,9 @@ fn resolve_service_order_independent() {
 
 #[test]
 fn resolve_service_order_cycle_detection() {
-    let services = vec![dummy_service("a", vec!["b"]), dummy_service("b", vec!["a"])];
-    let result = ArgonautInit::resolve_service_order(&services);
+    let services = [dummy_service("a", vec!["b"]), dummy_service("b", vec!["a"])];
+    let refs: Vec<&ServiceDefinition> = services.iter().collect();
+    let result = ArgonautInit::resolve_service_order(&refs);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("cycle detected"));
@@ -425,11 +428,8 @@ fn failed_steps_list() {
 #[test]
 fn shutdown_order_is_reverse_of_startup() {
     let init = ArgonautInit::new(desktop_config());
-    let definitions: Vec<ServiceDefinition> = init
-        .services
-        .values()
-        .map(|s| s.definition.clone())
-        .collect();
+    let definitions: Vec<&ServiceDefinition> =
+        init.services.values().map(|s| &s.definition).collect();
     let startup = ArgonautInit::resolve_service_order(&definitions).unwrap();
     let shutdown = init.shutdown_order().unwrap();
     let reversed_startup: Vec<String> = startup.into_iter().rev().collect();
@@ -571,7 +571,8 @@ fn boot_step_timeout_values() {
 #[test]
 fn service_depends_on_resolution_desktop() {
     let svcs = ArgonautInit::default_services(BootMode::Desktop);
-    let order = ArgonautInit::resolve_service_order(&svcs).unwrap();
+    let refs: Vec<&ServiceDefinition> = svcs.iter().collect();
+    let order = ArgonautInit::resolve_service_order(&refs).unwrap();
     let rt_pos = order.iter().position(|n| n == "daimon").unwrap();
     let gw_pos = order.iter().position(|n| n == "llm-gateway").unwrap();
     let comp_pos = order.iter().position(|n| n == "aethersafha").unwrap();
@@ -700,8 +701,9 @@ fn started_at_populated_on_mark_step_failed() {
 
 #[test]
 fn missing_dependency_returns_error() {
-    let services = vec![dummy_service("a", vec!["nonexistent"])];
-    let result = ArgonautInit::resolve_service_order(&services);
+    let services = [dummy_service("a", vec!["nonexistent"])];
+    let refs: Vec<&ServiceDefinition> = services.iter().collect();
+    let result = ArgonautInit::resolve_service_order(&refs);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("depends on"));
@@ -875,7 +877,8 @@ fn minimal_mode_excludes_synapse() {
 #[test]
 fn synapse_starts_after_llm_gateway() {
     let services = ArgonautInit::default_services(BootMode::Server);
-    let order = ArgonautInit::resolve_service_order(&services).unwrap();
+    let refs: Vec<&ServiceDefinition> = services.iter().collect();
+    let order = ArgonautInit::resolve_service_order(&refs).unwrap();
     let gw_pos = order.iter().position(|s| s == "llm-gateway").unwrap();
     let syn_pos = order.iter().position(|s| s == "synapse").unwrap();
     assert!(syn_pos > gw_pos);
@@ -2177,6 +2180,26 @@ fn serde_argonaut_stats() {
 #[test]
 fn serde_edge_boot_config() {
     serde_roundtrip(&EdgeBootConfig::default());
+}
+
+// -----------------------------------------------------------------------
+// L-9: Path traversal rejection tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn verify_rootfs_rejects_path_traversal() {
+    let hash = "a".repeat(64);
+    let result = verify_rootfs_integrity("/dev/../etc/shadow", "/dev/sda2", &hash);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains(".."));
+}
+
+#[test]
+fn verify_rootfs_rejects_hash_device_traversal() {
+    let hash = "a".repeat(64);
+    let result = verify_rootfs_integrity("/dev/sda1", "/dev/../etc/crypttab", &hash);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains(".."));
 }
 
 #[test]

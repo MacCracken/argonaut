@@ -825,8 +825,8 @@ pub struct HealthCheckResult {
 /// Tracks consecutive health check failures for a service.
 #[derive(Debug, Clone, Default)]
 pub struct HealthTracker {
-    /// Per-service consecutive failure count.
-    pub(crate) failures: HashMap<String, u32>,
+    /// Internal consecutive failure counts — use `failure_count()` to query.
+    failures: HashMap<String, u32>,
 }
 
 impl HealthTracker {

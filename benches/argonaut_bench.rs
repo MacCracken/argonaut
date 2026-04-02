@@ -72,18 +72,21 @@ fn init_construction(c: &mut Criterion) {
 
 fn service_resolution(c: &mut Criterion) {
     let desktop_svcs = argonaut::ArgonautInit::default_services(BootMode::Desktop);
+    let desktop_refs: Vec<&ServiceDefinition> = desktop_svcs.iter().collect();
     c.bench_function("resolve_service_order_desktop", |b| {
-        b.iter(|| argonaut::ArgonautInit::resolve_service_order(black_box(&desktop_svcs)));
+        b.iter(|| argonaut::ArgonautInit::resolve_service_order(black_box(&desktop_refs)));
     });
 
     let chain_20 = make_chain(20);
+    let chain_20_refs: Vec<&ServiceDefinition> = chain_20.iter().collect();
     c.bench_function("resolve_service_order_chain_20", |b| {
-        b.iter(|| argonaut::ArgonautInit::resolve_service_order(black_box(&chain_20)));
+        b.iter(|| argonaut::ArgonautInit::resolve_service_order(black_box(&chain_20_refs)));
     });
 
     let chain_100 = make_chain(100);
+    let chain_100_refs: Vec<&ServiceDefinition> = chain_100.iter().collect();
     c.bench_function("resolve_service_order_chain_100", |b| {
-        b.iter(|| argonaut::ArgonautInit::resolve_service_order(black_box(&chain_100)));
+        b.iter(|| argonaut::ArgonautInit::resolve_service_order(black_box(&chain_100_refs)));
     });
 }
 

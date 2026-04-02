@@ -7,51 +7,49 @@ use super::types::{BootMode, BootStage, BootStep, BootStepStatus};
 
 impl super::ArgonautInit {
     /// Build the ordered boot sequence for a given mode.
-    #[allow(clippy::vec_init_then_push)]
     pub fn build_boot_sequence(mode: BootMode) -> Vec<BootStep> {
-        let mut steps = Vec::new();
-
-        // Common early stages (all modes).
-        steps.push(BootStep {
-            stage: BootStage::MountFilesystems,
-            description: "Mount essential filesystems (proc, sys, dev, tmp)".into(),
-            required: true,
-            timeout_ms: 2000,
-            status: BootStepStatus::Pending,
-            started_at: None,
-            completed_at: None,
-            error: None,
-        });
-        steps.push(BootStep {
-            stage: BootStage::StartDeviceManager,
-            description: "Start udev device manager".into(),
-            required: true,
-            timeout_ms: 3000,
-            status: BootStepStatus::Pending,
-            started_at: None,
-            completed_at: None,
-            error: None,
-        });
-        steps.push(BootStep {
-            stage: BootStage::VerifyRootfs,
-            description: "Verify rootfs integrity via dm-verity".into(),
-            required: true,
-            timeout_ms: 5000,
-            status: BootStepStatus::Pending,
-            started_at: None,
-            completed_at: None,
-            error: None,
-        });
-        steps.push(BootStep {
-            stage: BootStage::StartSecurity,
-            description: "Initialize Landlock, seccomp, and MAC policies".into(),
-            required: true,
-            timeout_ms: 2000,
-            status: BootStepStatus::Pending,
-            started_at: None,
-            completed_at: None,
-            error: None,
-        });
+        let mut steps = vec![
+            BootStep {
+                stage: BootStage::MountFilesystems,
+                description: "Mount essential filesystems (proc, sys, dev, tmp)".into(),
+                required: true,
+                timeout_ms: 2000,
+                status: BootStepStatus::Pending,
+                started_at: None,
+                completed_at: None,
+                error: None,
+            },
+            BootStep {
+                stage: BootStage::StartDeviceManager,
+                description: "Start udev device manager".into(),
+                required: true,
+                timeout_ms: 3000,
+                status: BootStepStatus::Pending,
+                started_at: None,
+                completed_at: None,
+                error: None,
+            },
+            BootStep {
+                stage: BootStage::VerifyRootfs,
+                description: "Verify rootfs integrity via dm-verity".into(),
+                required: true,
+                timeout_ms: 5000,
+                status: BootStepStatus::Pending,
+                started_at: None,
+                completed_at: None,
+                error: None,
+            },
+            BootStep {
+                stage: BootStage::StartSecurity,
+                description: "Initialize Landlock, seccomp, and MAC policies".into(),
+                required: true,
+                timeout_ms: 2000,
+                status: BootStepStatus::Pending,
+                started_at: None,
+                completed_at: None,
+                error: None,
+            },
+        ];
         // Recovery mode: early stages only, then straight to emergency shell.
         // No services started at all.
         if mode == BootMode::Recovery {
