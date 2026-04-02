@@ -10,18 +10,18 @@ Feature gap analysis: [docs/architecture/feature-gaps.md](../architecture/featur
 Fixes identified by external research into init system best practices, protocol specs, and security standards.
 
 ### dm-verity / LUKS corrections
-- [ ] Remove redundant `veritysetup verify` from boot path (doubles I/O — `open` verifies on read)
-- [ ] Add `--restart-on-corruption` to `veritysetup open` for edge mode
-- [ ] Make dm-verity failure fatal in edge mode (currently continues with errors)
-- [ ] Add `--token-id=0` and `--tries=1` to LUKS unlock for deterministic TPM2
-- [ ] Default `tpm_attestation` to `true` for edge mode
-- [ ] Add PCR binding configuration to `EdgeBootConfig`
+- [x] Remove redundant `veritysetup verify` from boot path (halved I/O)
+- [x] Add `--restart-on-corruption` to `veritysetup open` for edge mode
+- [x] Make dm-verity failure fatal in edge mode (early return, no LUKS/services)
+- [x] Add `--token-id=0` and `--tries=1` to LUKS unlock for deterministic TPM2
+- [x] Default `tpm_attestation` to `true` for edge mode
+- [x] Add PCR binding configuration (`pcr_bindings: "7+14"`) to `EdgeBootConfig`
 
 ### sd_notify protocol completion
-- [ ] Handle `WATCHDOG=1` keepalive messages (reset service watchdog timer)
-- [ ] `SO_PASSCRED` / `SCM_CREDENTIALS` for sender verification
+- [x] Handle `WATCHDOG=1` keepalive messages
+- [x] `SO_PASSCRED` via `enable_credentials()` for sender verification
+- [x] Drain limit on `NotifyListener::drain(limit)` to prevent DoS
 - [ ] Support `RELOADING=1` and `STOPPING=1` lifecycle fields
-- [ ] Drain limit on `NotifyListener::drain()` to prevent DoS
 
 ### Integration items
 - [ ] systemd unit generation (for hybrid installs)
