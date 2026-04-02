@@ -24,6 +24,7 @@ mod runlevels;
 mod services;
 
 pub mod edge_boot;
+pub mod health;
 pub mod notify;
 pub mod process;
 
@@ -33,6 +34,7 @@ mod tests;
 // Re-export all public types so external consumers see the same flat API
 // as they did when this was a single argonaut.rs file.
 pub use edge_boot::{configure_readonly_rootfs, verify_rootfs_integrity};
+pub use health::{HealthHistory, HealthState, execute_health_check, execute_ready_check};
 pub use notify::{NotifyListener, NotifyMessage, send_notify};
 pub use process::{ProcessTable, SpawnedProcess, run_command, run_command_sequence, spawn_process};
 pub use types::{
@@ -274,16 +276,56 @@ impl ArgonautInit {
             ProcessSpec::from_service(&svc.definition)
         };
 
+        // Grab the ready check config before spawning (avoids borrow issues)
+        let ready_check = self
+            .services
+            .get(name)
+            .and_then(|s| s.definition.ready_check.clone());
+
         match process::spawn_process(&spec, name) {
             Ok(spawned) => {
                 let pid = spawned.pid;
                 self.processes.insert(spawned);
 
-                // Update managed service state
+                // Update PID and started_at
                 if let Some(svc) = self.services.get_mut(name) {
                     svc.pid = Some(pid);
                     svc.started_at = Some(Utc::now());
+                }
+
+                // Run ready check if configured
+                if let Some(ref rc) = ready_check {
+                    let result = health::execute_ready_check(name, rc, Some(pid));
+                    if !result.passed {
+                        warn!(
+                            service = name,
+                            pid = pid,
+                            "ready check failed — marking service as failed"
+                        );
+                        if let Some(svc) = self.services.get_mut(name) {
+                            svc.state = ServiceState::Failed(
+                                result
+                                    .message
+                                    .unwrap_or_else(|| "ready check failed".into()),
+                            );
+                        }
+                        // Kill the process since it never became ready
+                        if let Some(mut proc) = self.processes.remove(name) {
+                            let _ = proc.kill();
+                            let _ = proc.wait();
+                        }
+                        bail!(
+                            "service '{}' failed ready check after {} retries",
+                            name,
+                            rc.retries
+                        );
+                    }
+                }
+
+                // Transition to Running
+                if let Some(svc) = self.services.get_mut(name) {
                     svc.state = ServiceState::Running;
+                    svc.last_health_check = Some(Utc::now());
                 }
 
                 info!(service = name, pid = pid, "service started");
@@ -291,7 +333,6 @@ impl ArgonautInit {
             }
             Err(e) => {
                 error!(service = name, error = %e, "failed to start service");
-                // Transition to Failed
                 if let Some(svc) = self.services.get_mut(name) {
                     svc.state = ServiceState::Failed(e.to_string());
                 }
@@ -485,5 +526,40 @@ impl ArgonautInit {
         }
 
         timed_out
+    }
+
+    /// Run health checks for all running services that have a health
+    /// check configured. Updates health history and returns results.
+    ///
+    /// This is meant to be called periodically by the main event loop.
+    /// It does NOT enforce timing — the caller decides when to poll.
+    pub fn poll_health(&mut self) -> Vec<HealthCheckResult> {
+        let mut results = Vec::new();
+
+        // Collect service names + check configs to avoid borrow conflict
+        let checks: Vec<(String, HealthCheck, Option<u32>)> = self
+            .services
+            .iter()
+            .filter(|(_, svc)| svc.state == ServiceState::Running)
+            .filter_map(|(name, svc)| {
+                svc.definition
+                    .health_check
+                    .as_ref()
+                    .map(|hc| (name.clone(), hc.clone(), svc.pid))
+            })
+            .collect();
+
+        for (name, hc, pid) in &checks {
+            let result = health::execute_health_check(name, hc, *pid);
+
+            // Update last_health_check timestamp
+            if let Some(svc) = self.services.get_mut(name.as_str()) {
+                svc.last_health_check = Some(Utc::now());
+            }
+
+            results.push(result);
+        }
+
+        results
     }
 }

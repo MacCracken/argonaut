@@ -34,17 +34,19 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v0.4.0 — Health Check Execution
+## v0.4.0 — Health Check Execution (complete)
 
-Types exist (`HealthCheck`, `HealthCheckType`, `HealthTracker`, `ReadyCheck`). This milestone wires them to real I/O.
-
-- [ ] HTTP health check execution (GET, check 2xx)
-- [ ] TCP health check (connect and close)
-- [ ] Command health check (run command, check exit code)
-- [ ] ProcessAlive health check (kill(pid, 0))
-- [ ] Health state machine (healthy → degraded → unhealthy)
-- [ ] Health history ring buffer per service
-- [ ] Ready check execution at startup (block until ready or timeout)
+- [x] `health.rs` — execute all `HealthCheckType` variants (zero external HTTP deps)
+- [x] HTTP GET via raw TCP + HTTP/1.1 status parsing
+- [x] TCP connect check with timeout
+- [x] Command check (exit code 0 = healthy)
+- [x] ProcessAlive check via `kill(pid, 0)`
+- [x] `HealthState` enum (Unknown → Healthy → Degraded → Unhealthy)
+- [x] `HealthHistory` ring buffer with configurable capacity
+- [x] Ready check execution in `start_service` (poll until ready or timeout, kill if failed)
+- [x] `poll_health` method for periodic health checking of all running services
+- [x] Removed `ureq` dependency — raw TCP keeps dep tree lean
+- [x] 240 tests, 0 benchmark regressions
 
 ---
 

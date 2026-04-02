@@ -29,3 +29,13 @@ timestamp,label,benchmark,ns_per_iter,low_ns,high_ns
 2026-04-02T20:15:28Z,v0.3.0-post,safe_command_display,336.58,330.64,341.40
 2026-04-02T20:15:28Z,v0.3.0-post,verify_rootfs_integrity,469.54,460.81,477.69
 2026-04-02T20:15:28Z,v0.3.0-post,stats_desktop,46.80,46.01,47.54
+2026-04-02T20:27:25Z,v0.4.0-post,init_new_desktop,4714.50,4696.00,4732.00
+2026-04-02T20:27:25Z,v0.4.0-post,init_new_minimal,607.29,602.67,612.57
+2026-04-02T20:27:25Z,v0.4.0-post,init_new_edge,1081.30,1012.70,1164.00
+2026-04-02T20:27:25Z,v0.4.0-post,plan_shutdown_desktop,4288.50,4190.00,4416.00
+2026-04-02T20:27:25Z,v0.4.0-post,plan_shutdown_edge,747.02,726.16,774.82
+2026-04-02T20:27:25Z,v0.4.0-post,plan_runlevel_switch,1488.60,1390.60,1601.30
+2026-04-02T20:27:25Z,v0.4.0-post,mark_all_steps_complete,5716.60,5695.60,5739.90
+2026-04-02T20:27:25Z,v0.4.0-post,safe_command_display,161.33,157.68,166.08
+2026-04-02T20:27:25Z,v0.4.0-post,verify_rootfs_integrity,255.34,243.82,269.12
+2026-04-02T20:27:25Z,v0.4.0-post,stats_desktop,26.62,25.51,28.04
