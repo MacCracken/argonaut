@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use super::types::{
     BootMode, CrashAction, ExitStatus, HealthCheck, HealthCheckType, ManagedService, ProcessSpec,
     ReadyCheck, RestartConfig, RestartPolicy, ServiceDefinition, ServiceEvent, ServiceEventType,
-    ServiceState,
+    ServiceState, ServiceType,
 };
 
 impl super::ArgonautInit {
@@ -51,6 +51,15 @@ impl super::ArgonautInit {
                     retry_delay_ms: 500,
                 }),
                 enabled: true,
+                service_type: ServiceType::Simple,
+                environment_files: vec![],
+                pid_file: None,
+                resource_limits: None,
+                log_config: None,
+                socket_activation: None,
+                seccomp: None,
+                landlock: None,
+                capabilities: None,
             },
             ServiceDefinition {
                 name: "redis".into(),
@@ -75,6 +84,15 @@ impl super::ArgonautInit {
                     retry_delay_ms: 200,
                 }),
                 enabled: true,
+                service_type: ServiceType::Simple,
+                environment_files: vec![],
+                pid_file: None,
+                resource_limits: None,
+                log_config: None,
+                socket_activation: None,
+                seccomp: None,
+                landlock: None,
+                capabilities: None,
             },
         ]
     }
@@ -114,6 +132,15 @@ impl super::ArgonautInit {
                 retry_delay_ms: 500,
             }),
             enabled: true,
+            service_type: ServiceType::Simple,
+            environment_files: vec![],
+            pid_file: None,
+            resource_limits: None,
+            log_config: None,
+            socket_activation: None,
+            seccomp: None,
+            landlock: None,
+            capabilities: None,
         }
     }
 
@@ -147,6 +174,15 @@ impl super::ArgonautInit {
             }),
             ready_check: None,
             enabled: true,
+            service_type: ServiceType::Simple,
+            environment_files: vec![],
+            pid_file: None,
+            resource_limits: None,
+            log_config: None,
+            socket_activation: None,
+            seccomp: None,
+            landlock: None,
+            capabilities: None,
         }
     }
 
@@ -236,6 +272,15 @@ impl super::ArgonautInit {
                     retry_delay_ms: 200,
                 }),
                 enabled: true,
+                service_type: ServiceType::Simple,
+                environment_files: vec![],
+                pid_file: None,
+                resource_limits: None,
+                log_config: None,
+                socket_activation: None,
+                seccomp: None,
+                landlock: None,
+                capabilities: None,
             });
             return services;
         }
@@ -275,6 +320,15 @@ impl super::ArgonautInit {
                 retry_delay_ms: 200,
             }),
             enabled: true,
+            service_type: ServiceType::Simple,
+            environment_files: vec![],
+            pid_file: None,
+            resource_limits: None,
+            log_config: None,
+            socket_activation: None,
+            seccomp: None,
+            landlock: None,
+            capabilities: None,
         });
 
         if mode == BootMode::Server || mode == BootMode::Desktop {
@@ -301,6 +355,15 @@ impl super::ArgonautInit {
                     retry_delay_ms: 200,
                 }),
                 enabled: true,
+                service_type: ServiceType::Simple,
+                environment_files: vec![],
+                pid_file: None,
+                resource_limits: None,
+                log_config: None,
+                socket_activation: None,
+                seccomp: None,
+                landlock: None,
+                capabilities: None,
             });
             services.push(Self::synapse_service());
         }
@@ -328,6 +391,15 @@ impl super::ArgonautInit {
                 }),
                 ready_check: None,
                 enabled: true,
+                service_type: ServiceType::Simple,
+                environment_files: vec![],
+                pid_file: None,
+                resource_limits: None,
+                log_config: None,
+                socket_activation: None,
+                seccomp: None,
+                landlock: None,
+                capabilities: None,
             });
 
             services.push(ServiceDefinition {
@@ -348,6 +420,15 @@ impl super::ArgonautInit {
                 }),
                 ready_check: None,
                 enabled: true,
+                service_type: ServiceType::Simple,
+                environment_files: vec![],
+                pid_file: None,
+                resource_limits: None,
+                log_config: None,
+                socket_activation: None,
+                seccomp: None,
+                landlock: None,
+                capabilities: None,
             });
         }
 
@@ -419,6 +500,135 @@ impl super::ArgonautInit {
 
         debug!(order = ?ordered, "resolved service start order");
         Ok(ordered)
+    }
+
+    /// Group services into parallel startup waves by dependency depth.
+    ///
+    /// Wave 0 contains all services with no dependencies. Wave 1
+    /// contains services depending only on Wave 0 services, etc.
+    /// Services within each wave are sorted alphabetically for
+    /// deterministic ordering.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there are missing dependencies or cycles.
+    pub fn resolve_service_waves(services: &[&ServiceDefinition]) -> Result<Vec<Vec<String>>> {
+        let name_set: HashMap<&str, &ServiceDefinition> =
+            services.iter().map(|s| (s.name.as_str(), *s)).collect();
+
+        // Build in-degree and dependency maps
+        let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+
+        for &svc in services {
+            in_degree.entry(svc.name.as_str()).or_insert(0);
+            let mut seen_deps = std::collections::HashSet::new();
+            for dep in &svc.depends_on {
+                if !seen_deps.insert(dep.as_str()) {
+                    continue;
+                }
+                if !name_set.contains_key(dep.as_str()) {
+                    bail!(
+                        "service '{}' depends on '{}' which is not defined",
+                        svc.name,
+                        dep
+                    );
+                }
+                *in_degree.entry(svc.name.as_str()).or_insert(0) += 1;
+                dependents
+                    .entry(dep.as_str())
+                    .or_default()
+                    .push(svc.name.as_str());
+            }
+        }
+
+        let mut waves: Vec<Vec<String>> = Vec::new();
+        let mut resolved = 0usize;
+
+        loop {
+            // Collect all services with in-degree 0
+            let mut wave: Vec<&str> = in_degree
+                .iter()
+                .filter(|(_, deg)| **deg == 0)
+                .map(|(name, _)| *name)
+                .collect();
+
+            if wave.is_empty() {
+                break;
+            }
+
+            // Sort for determinism
+            wave.sort();
+
+            // Process the wave: remove from in-degree, decrement dependents
+            for &name in &wave {
+                in_degree.remove(name);
+                if let Some(deps) = dependents.get(name) {
+                    for &dep in deps {
+                        if let Some(deg) = in_degree.get_mut(dep) {
+                            *deg = deg.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+
+            resolved += wave.len();
+            waves.push(wave.into_iter().map(String::from).collect());
+        }
+
+        if resolved != services.len() {
+            bail!(
+                "cycle detected in service dependencies — resolved {} of {} services",
+                resolved,
+                services.len()
+            );
+        }
+
+        debug!(
+            waves = waves.len(),
+            services = resolved,
+            "resolved service startup waves"
+        );
+        Ok(waves)
+    }
+
+    /// Build a wave-based boot execution plan.
+    ///
+    /// Returns services grouped into parallel waves. All services in
+    /// a wave can be started concurrently; the consumer must wait for
+    /// a wave to complete before starting the next one.
+    ///
+    /// Disabled services are excluded.
+    pub fn boot_execution_plan_waves(&self) -> Result<Vec<Vec<(String, ProcessSpec)>>> {
+        let definitions: Vec<&ServiceDefinition> = self
+            .services
+            .values()
+            .filter(|s| s.definition.enabled)
+            .map(|s| &s.definition)
+            .collect();
+        let waves = Self::resolve_service_waves(&definitions)?;
+
+        let plan: Vec<Vec<(String, ProcessSpec)>> = waves
+            .into_iter()
+            .map(|wave| {
+                wave.into_iter()
+                    .filter_map(|name| {
+                        self.services.get(&name).map(|svc| {
+                            let spec = ProcessSpec::from_service(&svc.definition);
+                            (name, spec)
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+
+        info!(
+            mode = %self.config.boot_mode,
+            waves = plan.len(),
+            services = plan.iter().map(|w| w.len()).sum::<usize>(),
+            "wave-based boot execution plan created"
+        );
+        Ok(plan)
     }
 
     /// Register a new service definition. If a service with the same

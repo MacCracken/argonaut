@@ -24,6 +24,15 @@
 //! #     health_check: None,
 //! #     ready_check: None,
 //! #     enabled: true,
+//! #     service_type: ServiceType::Simple,
+//! #     environment_files: vec![],
+//! #     pid_file: None,
+//! #     resource_limits: None,
+//! #     log_config: None,
+//! #     socket_activation: None,
+//! #     seccomp: None,
+//! #     landlock: None,
+//! #     capabilities: None,
 //! # };
 //! let unit = generate_unit(&svc);
 //! assert!(unit.contains("[Service]"));
@@ -171,6 +180,7 @@ mod tests {
 
     use crate::types::{
         BootMode, HealthCheck, HealthCheckType, RestartConfig, RestartPolicy, ServiceDefinition,
+        ServiceType,
     };
 
     use super::*;
@@ -189,6 +199,15 @@ mod tests {
             health_check: None,
             ready_check: None,
             enabled: true,
+            service_type: ServiceType::Simple,
+            environment_files: vec![],
+            pid_file: None,
+            resource_limits: None,
+            log_config: None,
+            socket_activation: None,
+            seccomp: None,
+            landlock: None,
+            capabilities: None,
         }
     }
 

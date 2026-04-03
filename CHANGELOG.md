@@ -82,6 +82,36 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 - Security: systemd unit file injection prevention (newline sanitization, `$` escaping, sorted env vars)
 - Security: `create_service_from_request` rejects `..` traversal names and relative `binary_path`
 
+#### v0.8.0 scope — Production Init Features
+- `ServiceType` enum — `Simple`, `Forking`, `Oneshot` with dispatch in `start_service`
+- `start_forking_service` — spawns parent, waits for exit, reads child PID from PID file
+- `start_oneshot_service` — spawns, waits for completion, transitions to Stopped/Failed
+- `resolve_service_waves` — wave-based parallel startup grouping via modified Kahn's algorithm
+- `boot_execution_plan_waves` — returns `Vec<Vec<(String, ProcessSpec)>>` for parallel boot
+- `ResourceLimits` struct — `RLIMIT_NOFILE`, `RLIMIT_AS`, `RLIMIT_NPROC` via `prlimit(1)` CLI
+- `LogConfig` struct — size-based log rotation with configurable max files
+- `rotate_log_if_needed` — rotates `.log` → `.log.1` → `.log.N` before spawn
+- `load_environment_file` / `load_environment_files` — `KEY=VALUE` file parsing with quotes, comments
+- Implicit `/etc/argonaut/env.d/{service}` environment file loading
+- `read_pid_file` — PID file reading with validation and liveness check
+- `SpawnedProcess.child` changed to `Option<Child>` for forked process tracking
+- `pid_file`, `service_type`, `environment_files`, `resource_limits`, `log_config` fields on `ServiceDefinition`
+
+#### v0.9.0 scope — Security Enforcement
+- `security.rs` module — seccomp, Landlock, capabilities, socket activation, emergency auth
+- `tmpfiles.rs` module — boot-time filesystem setup (directories, symlinks, device nodes)
+- `SocketActivationConfig` / `SocketSpec` / `SocketType` — LISTEN_FDS/LISTEN_PID protocol
+- `SeccompConfig` — `Basic` (agnosys 20-syscall filter) or `Custom { allow, deny }` with named syscalls
+- `LandlockConfig` / `LandlockRule` / `LandlockAccess` — per-service filesystem restrictions
+- `CapabilityConfig` / `LinuxCapability` — capability bounding set with `capsh` command generation
+- `TmpfileEntry` — `Directory`, `Symlink`, `Device` with validation and SafeCommand generation
+- `verify_emergency_auth` — SHA-256 password verification for emergency shell access
+- `ResourceLimits.core` — RLIMIT_CORE field + `secure_defaults()` constructor (core dumps disabled)
+- `EmergencyShellConfig.auth_password_hash` — stored hash for authentication
+- Feature-gated `agnosys` integration (`security` feature): `apply_seccomp`, `apply_landlock`
+- `socket_activation`, `seccomp`, `landlock`, `capabilities` fields on `ServiceDefinition`
+- `tmpfiles` field on `ArgonautConfig`
+
 ### Changed
 - `configure_readonly_rootfs()` returns `Vec<SafeCommand>` (was `Vec<String>` — injection risk)
 - `resolve_service_order` accepts `&[&ServiceDefinition]` (was `&[ServiceDefinition]` — avoids deep clone)

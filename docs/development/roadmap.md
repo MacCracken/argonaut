@@ -37,24 +37,24 @@ Fixes identified by external research into init system best practices, protocol 
 
 Items required before argonaut can be trusted as PID 1. These are implemented in the binary crate but the library must provide the primitives.
 
-- [ ] Parallel service startup (wave-based executor from toposort)
-- [ ] Forking service type support (track child PID via sd_notify MAINPID or PID file)
-- [ ] Resource limits per service (RLIMIT_NOFILE, RLIMIT_AS, RLIMIT_NPROC fields on ProcessSpec)
-- [ ] Environment file loading (`/etc/argonaut/env.d/<service>`)
-- [ ] Log rotation (size-capped or time-rotated service logs)
-- [ ] Oneshot service type (run-to-completion, no supervision)
+- [x] Parallel service startup (wave-based executor from toposort)
+- [x] Forking service type support (track child PID via sd_notify MAINPID or PID file)
+- [x] Resource limits per service (RLIMIT_NOFILE, RLIMIT_AS, RLIMIT_NPROC fields on ProcessSpec)
+- [x] Environment file loading (`/etc/argonaut/env.d/<service>`)
+- [x] Log rotation (size-capped or time-rotated service logs)
+- [x] Oneshot service type (run-to-completion, no supervision)
 
 ---
 
 ## v0.9.0 — Security Enforcement (P1 gaps)
 
-- [ ] Socket activation (LISTEN_FDS / LISTEN_PID protocol)
-- [ ] Seccomp filter generation and application per service
-- [ ] Landlock filesystem restrictions per service
-- [ ] Capability bounding set management
-- [ ] tmpfiles.d equivalent (directory/symlink/device creation at boot)
-- [ ] Emergency shell authentication (`require_auth` enforcement)
-- [ ] Core dump restriction (RLIMIT_CORE = 0 by default)
+- [x] Socket activation (LISTEN_FDS / LISTEN_PID protocol)
+- [x] Seccomp filter generation and application per service
+- [x] Landlock filesystem restrictions per service
+- [x] Capability bounding set management
+- [x] tmpfiles.d equivalent (directory/symlink/device creation at boot)
+- [x] Emergency shell authentication (`require_auth` enforcement)
+- [x] Core dump restriction (RLIMIT_CORE = 0 by default)
 
 ---
 

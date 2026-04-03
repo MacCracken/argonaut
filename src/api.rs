@@ -35,8 +35,8 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::types::{
-    ArgonautStats, BootMode, BootStep, HealthCheck, ManagedService, ReadyCheck, RestartConfig,
-    RestartPolicy, ServiceDefinition, ServiceState,
+    ArgonautStats, BootMode, BootStep, HealthCheck, LogConfig, ManagedService, ReadyCheck,
+    ResourceLimits, RestartConfig, RestartPolicy, ServiceDefinition, ServiceState, ServiceType,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,6 +72,7 @@ pub struct ServiceStatus {
     pub last_health_check: Option<DateTime<Utc>>,
     pub depends_on: Vec<String>,
     pub restart_policy: RestartPolicy,
+    pub service_type: ServiceType,
 }
 
 /// Response for listing all managed services.
@@ -157,6 +158,8 @@ pub struct BootLogResponse {
 ///     health_check: None,
 ///     ready_check: None,
 ///     enabled: true,
+///     resource_limits: None,
+///     log_config: None,
 /// };
 /// let status = init.create_service_from_request(req).unwrap();
 /// ```
@@ -178,6 +181,8 @@ pub struct ServiceCreateRequest {
     pub ready_check: Option<ReadyCheck>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    pub resource_limits: Option<ResourceLimits>,
+    pub log_config: Option<LogConfig>,
 }
 
 fn default_true() -> bool {
@@ -205,6 +210,7 @@ fn default_true() -> bool {
 pub struct ServiceMetrics {
     pub name: String,
     pub state: ServiceState,
+    pub service_type: ServiceType,
     pub uptime_ms: Option<u64>,
     pub restart_count: u32,
     pub last_health_check: Option<DateTime<Utc>>,
@@ -260,6 +266,7 @@ fn service_to_status(svc: &ManagedService) -> ServiceStatus {
         last_health_check: svc.last_health_check,
         depends_on: svc.definition.depends_on.clone(),
         restart_policy: svc.definition.restart_policy,
+        service_type: svc.definition.service_type,
     }
 }
 
@@ -358,6 +365,7 @@ impl crate::ArgonautInit {
             .map(|svc| ServiceMetrics {
                 name: svc.definition.name.clone(),
                 state: svc.state.clone(),
+                service_type: svc.definition.service_type,
                 uptime_ms: if svc.state == ServiceState::Running
                     || svc.state == ServiceState::Starting
                 {
@@ -455,6 +463,15 @@ impl crate::ArgonautInit {
             health_check: req.health_check,
             ready_check: req.ready_check,
             enabled: req.enabled,
+            service_type: ServiceType::Simple,
+            environment_files: vec![],
+            pid_file: None,
+            resource_limits: req.resource_limits,
+            log_config: req.log_config,
+            socket_activation: None,
+            seccomp: None,
+            landlock: None,
+            capabilities: None,
         };
 
         info!(service = %req.name, "creating service from API request");

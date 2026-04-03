@@ -10,7 +10,8 @@ use criterion::{Criterion, criterion_group, criterion_main};
 
 use argonaut::{
     ArgonautConfig, BootMode, BootStage, BootStepStatus, HealthTracker, RestartConfig,
-    RestartPolicy, SafeCommand, ServiceDefinition, ServiceState, ServiceTarget, ShutdownType,
+    RestartPolicy, SafeCommand, ServiceDefinition, ServiceState, ServiceTarget, ServiceType,
+    ShutdownType,
 };
 
 fn make_chain(n: usize) -> Vec<ServiceDefinition> {
@@ -32,6 +33,15 @@ fn make_chain(n: usize) -> Vec<ServiceDefinition> {
             health_check: None,
             ready_check: None,
             enabled: true,
+            service_type: ServiceType::Simple,
+            environment_files: vec![],
+            pid_file: None,
+            resource_limits: None,
+            log_config: None,
+            socket_activation: None,
+            seccomp: None,
+            landlock: None,
+            capabilities: None,
         })
         .collect()
 }
@@ -88,6 +98,46 @@ fn service_resolution(c: &mut Criterion) {
     let chain_100_refs: Vec<&ServiceDefinition> = chain_100.iter().collect();
     c.bench_function("resolve_service_order_chain_100", |b| {
         b.iter(|| argonaut::ArgonautInit::resolve_service_order(black_box(&chain_100_refs)));
+    });
+
+    // Wave-based resolution benchmarks
+    c.bench_function("resolve_service_waves_desktop", |b| {
+        b.iter(|| argonaut::ArgonautInit::resolve_service_waves(black_box(&desktop_refs)));
+    });
+
+    c.bench_function("resolve_service_waves_chain_20", |b| {
+        b.iter(|| argonaut::ArgonautInit::resolve_service_waves(black_box(&chain_20_refs)));
+    });
+
+    // Wide topology: all independent (single wave)
+    let wide: Vec<ServiceDefinition> = (0..20)
+        .map(|i| ServiceDefinition {
+            name: format!("ind-{i}"),
+            description: format!("independent {i}"),
+            binary_path: PathBuf::from(format!("/usr/bin/ind-{i}")),
+            args: vec![],
+            environment: HashMap::new(),
+            depends_on: vec![],
+            required_for_modes: vec![BootMode::Minimal],
+            restart_policy: RestartPolicy::Never,
+            restart_config: RestartConfig::default(),
+            health_check: None,
+            ready_check: None,
+            enabled: true,
+            service_type: ServiceType::Simple,
+            environment_files: vec![],
+            pid_file: None,
+            resource_limits: None,
+            log_config: None,
+            socket_activation: None,
+            seccomp: None,
+            landlock: None,
+            capabilities: None,
+        })
+        .collect();
+    let wide_refs: Vec<&ServiceDefinition> = wide.iter().collect();
+    c.bench_function("resolve_service_waves_wide_20", |b| {
+        b.iter(|| argonaut::ArgonautInit::resolve_service_waves(black_box(&wide_refs)));
     });
 }
 

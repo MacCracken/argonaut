@@ -18,7 +18,9 @@
 //! - **edge_boot**: Read-only rootfs and dm-verity helpers
 
 pub mod api;
+pub mod security;
 pub mod systemd;
+pub mod tmpfiles;
 pub mod types;
 
 mod boot;
@@ -48,15 +50,25 @@ pub use edge_boot::{
 };
 pub use health::{HealthHistory, HealthState, execute_health_check, execute_ready_check};
 pub use notify::{NotifyListener, NotifyMessage, send_notify};
-pub use process::{ProcessTable, SpawnedProcess, run_command, run_command_sequence, spawn_process};
+pub use process::{
+    ProcessTable, SpawnedProcess, load_environment_file, load_environment_files, read_pid_file,
+    run_command, run_command_sequence, spawn_process,
+};
+pub use security::{
+    generate_socket_env, landlock_description, seccomp_description, to_capability_commands,
+    verify_emergency_auth,
+};
 pub use systemd::{generate_unit, generate_unit_filename};
+pub use tmpfiles::{generate_tmpfile_commands, validate_tmpfile_entries};
 pub use types::{
-    ArgonautConfig, ArgonautStats, BootMode, BootStage, BootStep, BootStepStatus, CrashAction,
-    EdgeBootConfig, EmergencyShellConfig, ExitStatus, HealthCheck, HealthCheckResult,
-    HealthCheckType, HealthTracker, ManagedService, ProcessSpec, ReadyCheck, RestartConfig,
-    RestartPolicy, Runlevel, RunlevelSwitchPlan, RunlevelSwitchResult, SafeCommand,
-    ServiceDefinition, ServiceEvent, ServiceEventType, ServiceState, ServiceTarget, ShutdownAction,
-    ShutdownPlan, ShutdownStep, ShutdownStepStatus, ShutdownType,
+    ArgonautConfig, ArgonautStats, BootMode, BootStage, BootStep, BootStepStatus, CapabilityConfig,
+    CrashAction, EdgeBootConfig, EmergencyShellConfig, ExitStatus, HealthCheck, HealthCheckResult,
+    HealthCheckType, HealthTracker, LandlockAccess, LandlockConfig, LandlockRule, LinuxCapability,
+    LogConfig, ManagedService, ProcessSpec, ReadyCheck, ResourceLimits, RestartConfig,
+    RestartPolicy, Runlevel, RunlevelSwitchPlan, RunlevelSwitchResult, SafeCommand, SeccompAction,
+    SeccompConfig, ServiceDefinition, ServiceEvent, ServiceEventType, ServiceState, ServiceTarget,
+    ServiceType, ShutdownAction, ShutdownPlan, ShutdownStep, ShutdownStepStatus, ShutdownType,
+    SocketActivationConfig, SocketSpec, SocketType, TmpfileEntry,
 };
 
 #[cfg(feature = "audit")]
@@ -270,11 +282,10 @@ impl ArgonautInit {
     // Process execution
     // -------------------------------------------------------------------
 
-    /// Start a service by name. Spawns the process, transitions state
-    /// to Starting → Running, and tracks the PID.
+    /// Start a service by name. Dispatches to the appropriate start
+    /// method based on the service type (Simple, Forking, or Oneshot).
     ///
-    /// Returns an error if the service is unknown, dependencies aren't
-    /// met, or the process fails to spawn.
+    /// Returns the PID of the running process (or 0 for completed oneshot).
     pub fn start_service(&mut self, name: &str) -> Result<u32> {
         // Check if service is enabled
         if let Some(svc) = self.services.get(name)
@@ -283,6 +294,98 @@ impl ArgonautInit {
             bail!("cannot start service '{}': service is disabled", name);
         }
 
+        // Dispatch by service type
+        let service_type = self
+            .services
+            .get(name)
+            .map(|s| s.definition.service_type)
+            .unwrap_or(types::ServiceType::Simple);
+
+        match service_type {
+            types::ServiceType::Simple => self.start_simple_service(name),
+            types::ServiceType::Forking => self.start_forking_service(name),
+            types::ServiceType::Oneshot => self.start_oneshot_service(name),
+        }
+    }
+
+    /// Build a ProcessSpec for a service, loading environment files.
+    fn build_process_spec(&self, name: &str) -> Result<ProcessSpec> {
+        let Some(svc) = self.services.get(name) else {
+            bail!("service '{}' not found", name);
+        };
+        let mut spec = ProcessSpec::from_service(&svc.definition);
+
+        // Load environment files and merge into spec
+        if !svc.definition.environment_files.is_empty() {
+            let file_env = process::load_environment_files(&svc.definition.environment_files);
+            spec.environment.extend(file_env);
+        }
+        // Also check implicit env.d file
+        let implicit_env_path = std::path::PathBuf::from(format!("/etc/argonaut/env.d/{name}"));
+        if implicit_env_path.exists()
+            && let Ok(env) = process::load_environment_file(&implicit_env_path)
+        {
+            spec.environment.extend(env);
+        }
+
+        // Inject LISTEN_FDS for socket activation.
+        // LISTEN_PID is NOT set here — the binary crate must set it
+        // after fork when the actual child PID is known.
+        if let Some(ref sa) = svc.definition.socket_activation {
+            let (key, value) = sa.listen_fds_env();
+            spec.environment.insert(key, value);
+            debug!(
+                service = name,
+                sockets = sa.sockets.len(),
+                "injected LISTEN_FDS env var"
+            );
+        }
+
+        // Log security configuration summaries
+        if let Some(ref seccomp) = svc.definition.seccomp {
+            info!(service = name, config = %security::seccomp_description(seccomp), "seccomp configured");
+        }
+        if let Some(ref landlock) = svc.definition.landlock {
+            info!(
+                service = name,
+                rules = landlock.rules.len(),
+                "landlock configured"
+            );
+        }
+        if let Some(ref caps) = svc.definition.capabilities {
+            info!(
+                service = name,
+                drop_count = caps.drop.len(),
+                "capability restrictions configured"
+            );
+        }
+
+        Ok(spec)
+    }
+
+    /// Apply resource limits to a running process (best-effort).
+    fn apply_resource_limits(&self, name: &str, pid: u32, limits: &types::ResourceLimits) {
+        let cmds = limits.to_prlimit_commands(pid);
+        if cmds.is_empty() {
+            return;
+        }
+        info!(
+            service = name,
+            pid = pid,
+            "applying resource limits via prlimit"
+        );
+        if let Err(e) = process::run_command_sequence(&cmds) {
+            warn!(
+                service = name,
+                pid = pid,
+                error = %e,
+                "failed to apply resource limits (best-effort, service continues)"
+            );
+        }
+    }
+
+    /// Start a simple (long-running daemon) service.
+    fn start_simple_service(&mut self, name: &str) -> Result<u32> {
         // Validate the service exists and transition to Starting
         if !self.set_service_state(name, ServiceState::Starting) {
             bail!(
@@ -291,12 +394,8 @@ impl ArgonautInit {
             );
         }
 
-        let spec = {
-            let Some(svc) = self.services.get(name) else {
-                bail!("service '{}' not found", name);
-            };
-            ProcessSpec::from_service(&svc.definition)
-        };
+        let spec = self.build_process_spec(name)?;
+        let resource_limits = spec.resource_limits.clone();
 
         // Grab the ready check config before spawning (avoids borrow issues)
         let ready_check = self
@@ -313,6 +412,11 @@ impl ArgonautInit {
                 if let Some(svc) = self.services.get_mut(name) {
                     svc.pid = Some(pid);
                     svc.started_at = Some(Utc::now());
+                }
+
+                // Apply resource limits (best-effort)
+                if let Some(ref limits) = resource_limits {
+                    self.apply_resource_limits(name, pid, limits);
                 }
 
                 // Run ready check if configured
@@ -359,6 +463,185 @@ impl ArgonautInit {
             }
             Err(e) => {
                 error!(service = name, error = %e, "failed to start service");
+                if let Some(svc) = self.services.get_mut(name) {
+                    svc.state = ServiceState::Failed(e.to_string());
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Start a forking service. Spawns the parent, waits for it to
+    /// exit, then reads the child PID from a PID file or sd_notify.
+    fn start_forking_service(&mut self, name: &str) -> Result<u32> {
+        if !self.set_service_state(name, ServiceState::Starting) {
+            bail!(
+                "cannot start service '{}': invalid state transition or unmet dependencies",
+                name
+            );
+        }
+
+        let spec = self.build_process_spec(name)?;
+        let resource_limits = spec.resource_limits.clone();
+
+        // Get PID file path
+        let pid_file = self
+            .services
+            .get(name)
+            .and_then(|s| s.definition.pid_file.clone());
+
+        match process::spawn_process(&spec, name) {
+            Ok(mut spawned) => {
+                info!(
+                    service = name,
+                    parent_pid = spawned.pid,
+                    "forking service spawned, waiting for parent to exit"
+                );
+
+                // Wait for the parent process to exit (with timeout)
+                let timeout = self
+                    .services
+                    .get(name)
+                    .and_then(|s| s.definition.ready_check.as_ref())
+                    .map(|rc| Duration::from_millis(rc.timeout_ms))
+                    .unwrap_or(Duration::from_secs(30));
+
+                let deadline = std::time::Instant::now() + timeout;
+                let parent_code = loop {
+                    match spawned.try_wait()? {
+                        Some(code) => break code,
+                        None => {
+                            if std::time::Instant::now() >= deadline {
+                                // Kill parent and fail
+                                let _ = spawned.kill();
+                                let _ = spawned.wait();
+                                if let Some(svc) = self.services.get_mut(name) {
+                                    svc.state = ServiceState::Failed(
+                                        "forking parent did not exit in time".into(),
+                                    );
+                                }
+                                bail!(
+                                    "forking service '{}': parent did not exit within {}ms",
+                                    name,
+                                    timeout.as_millis()
+                                );
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                    }
+                };
+
+                if parent_code != 0 {
+                    if let Some(svc) = self.services.get_mut(name) {
+                        svc.state = ServiceState::Failed(format!(
+                            "forking parent exited with code {}",
+                            parent_code
+                        ));
+                    }
+                    bail!(
+                        "forking service '{}': parent exited with code {}",
+                        name,
+                        parent_code
+                    );
+                }
+
+                // Read child PID from PID file
+                let child_pid = if let Some(ref path) = pid_file {
+                    process::read_pid_file(path)?
+                } else {
+                    bail!(
+                        "forking service '{}' has no pid_file configured — \
+                         cannot determine child PID",
+                        name
+                    );
+                };
+
+                // Create a forked SpawnedProcess and insert into table
+                let forked = process::SpawnedProcess::from_forked_pid(name, child_pid);
+                self.processes.insert(forked);
+
+                if let Some(svc) = self.services.get_mut(name) {
+                    svc.pid = Some(child_pid);
+                    svc.started_at = Some(Utc::now());
+                    svc.state = ServiceState::Running;
+                    svc.last_health_check = Some(Utc::now());
+                }
+
+                // Apply resource limits to the child
+                if let Some(ref limits) = resource_limits {
+                    self.apply_resource_limits(name, child_pid, limits);
+                }
+
+                info!(
+                    service = name,
+                    child_pid = child_pid,
+                    "forking service started"
+                );
+                Ok(child_pid)
+            }
+            Err(e) => {
+                error!(service = name, error = %e, "failed to spawn forking service");
+                if let Some(svc) = self.services.get_mut(name) {
+                    svc.state = ServiceState::Failed(e.to_string());
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Start a oneshot service. Spawns the process, waits for
+    /// completion, and transitions to Stopped or Failed. Does not
+    /// insert into the process table (no supervision).
+    ///
+    /// Returns 0 on success (as a PID placeholder for the unified
+    /// `start_service` API).
+    fn start_oneshot_service(&mut self, name: &str) -> Result<u32> {
+        if !self.set_service_state(name, ServiceState::Starting) {
+            bail!(
+                "cannot start service '{}': invalid state transition or unmet dependencies",
+                name
+            );
+        }
+
+        let spec = self.build_process_spec(name)?;
+
+        match process::spawn_process(&spec, name) {
+            Ok(mut spawned) => {
+                let pid = spawned.pid;
+                if let Some(svc) = self.services.get_mut(name) {
+                    svc.pid = Some(pid);
+                    svc.started_at = Some(Utc::now());
+                }
+
+                info!(
+                    service = name,
+                    pid = pid,
+                    "oneshot service spawned, waiting for completion"
+                );
+
+                // Wait for completion (with boot timeout as ceiling)
+                let code = spawned.wait()?;
+
+                // Update state based on exit code
+                if let Some(svc) = self.services.get_mut(name) {
+                    svc.pid = None;
+                    if code == 0 {
+                        svc.state = ServiceState::Stopped;
+                        info!(service = name, "oneshot service completed successfully");
+                    } else {
+                        svc.state = ServiceState::Failed(format!("oneshot exit code {}", code));
+                        warn!(service = name, exit_code = code, "oneshot service failed");
+                    }
+                }
+
+                if code == 0 {
+                    Ok(0)
+                } else {
+                    bail!("oneshot service '{}' failed with exit code {}", name, code)
+                }
+            }
+            Err(e) => {
+                error!(service = name, error = %e, "failed to spawn oneshot service");
                 if let Some(svc) = self.services.get_mut(name) {
                     svc.state = ServiceState::Failed(e.to_string());
                 }

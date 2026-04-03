@@ -335,6 +335,8 @@ impl super::ArgonautInit {
             stderr_log: None,
             uid: None,
             gid: None,
+            resource_limits: None,
+            log_config: None,
         };
 
         let mut proc = super::process::spawn_process(&spec, "emergency-shell")?;

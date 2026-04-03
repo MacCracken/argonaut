@@ -1,7 +1,7 @@
 //! Argonaut unit tests.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
@@ -9,9 +9,9 @@ use super::ArgonautInit;
 use super::edge_boot::{configure_readonly_rootfs, verify_rootfs_integrity};
 use super::types::{
     ArgonautConfig, BootMode, BootStage, BootStepStatus, CrashAction, EdgeBootConfig,
-    EmergencyShellConfig, ExitStatus, HealthCheckType, ManagedService, RestartConfig,
+    EmergencyShellConfig, ExitStatus, HealthCheckType, ManagedService, ProcessSpec, RestartConfig,
     RestartPolicy, Runlevel, SafeCommand, ServiceDefinition, ServiceEventType, ServiceState,
-    ServiceTarget, ShutdownAction, ShutdownStepStatus, ShutdownType,
+    ServiceTarget, ServiceType, ShutdownAction, ShutdownStepStatus, ShutdownType,
 };
 
 // --- helpers ---
@@ -51,6 +51,15 @@ fn dummy_service(name: &str, deps: Vec<&str>) -> ServiceDefinition {
         health_check: None,
         ready_check: None,
         enabled: true,
+        service_type: ServiceType::Simple,
+        environment_files: vec![],
+        pid_file: None,
+        resource_limits: None,
+        log_config: None,
+        socket_activation: None,
+        seccomp: None,
+        landlock: None,
+        capabilities: None,
     }
 }
 
@@ -1303,6 +1312,15 @@ fn process_spec_from_service() {
         health_check: None,
         ready_check: None,
         enabled: true,
+        service_type: ServiceType::Simple,
+        environment_files: vec![],
+        pid_file: None,
+        resource_limits: None,
+        log_config: None,
+        socket_activation: None,
+        seccomp: None,
+        landlock: None,
+        capabilities: None,
     };
     let spec = ProcessSpec::from_service(&def);
     assert_eq!(spec.binary, PathBuf::from("/usr/bin/test"));
@@ -2285,6 +2303,15 @@ fn config_with_service(name: &str, binary: &str, args: Vec<&str>) -> ArgonautCon
             health_check: None,
             ready_check: None,
             enabled: true,
+            service_type: ServiceType::Simple,
+            environment_files: vec![],
+            pid_file: None,
+            resource_limits: None,
+            log_config: None,
+            socket_activation: None,
+            seccomp: None,
+            landlock: None,
+            capabilities: None,
         }],
         ..Default::default()
     }
@@ -2420,6 +2447,15 @@ fn stop_all_services_stops_everything() {
             health_check: None,
             ready_check: None,
             enabled: true,
+            service_type: ServiceType::Simple,
+            environment_files: vec![],
+            pid_file: None,
+            resource_limits: None,
+            log_config: None,
+            socket_activation: None,
+            seccomp: None,
+            landlock: None,
+            capabilities: None,
         });
     }
 
@@ -2778,6 +2814,8 @@ fn create_service_from_request_valid() {
         health_check: None,
         ready_check: None,
         enabled: true,
+        resource_limits: None,
+        log_config: None,
     };
     let status = init.create_service_from_request(req).unwrap();
     assert_eq!(status.name, "test-svc");
@@ -2801,6 +2839,8 @@ fn create_service_from_request_duplicate_fails() {
         health_check: None,
         ready_check: None,
         enabled: true,
+        resource_limits: None,
+        log_config: None,
     };
     assert!(init.create_service_from_request(req).is_err());
 }
@@ -2881,6 +2921,8 @@ fn create_service_path_traversal_name_rejected() {
         health_check: None,
         ready_check: None,
         enabled: true,
+        resource_limits: None,
+        log_config: None,
     };
     let err = init.create_service_from_request(req).unwrap_err();
     assert!(err.to_string().contains("traversal"));
@@ -2902,6 +2944,8 @@ fn create_service_relative_binary_path_rejected() {
         health_check: None,
         ready_check: None,
         enabled: true,
+        resource_limits: None,
+        log_config: None,
     };
     let err = init.create_service_from_request(req).unwrap_err();
     assert!(err.to_string().contains("absolute"));
@@ -2923,6 +2967,8 @@ fn create_service_empty_name_rejected() {
         health_check: None,
         ready_check: None,
         enabled: true,
+        resource_limits: None,
+        log_config: None,
     };
     assert!(init.create_service_from_request(req).is_err());
 }
@@ -2988,4 +3034,433 @@ fn enable_disable_records_events() {
     assert_eq!(event.event_type, ServiceEventType::Enabled);
     let event = init.record_event("daimon", ServiceEventType::Disabled);
     assert_eq!(event.event_type, ServiceEventType::Disabled);
+}
+
+// --- v0.8.0: ServiceType ---
+
+#[test]
+fn service_type_display() {
+    assert_eq!(ServiceType::Simple.to_string(), "simple");
+    assert_eq!(ServiceType::Forking.to_string(), "forking");
+    assert_eq!(ServiceType::Oneshot.to_string(), "oneshot");
+}
+
+#[test]
+fn service_type_default_is_simple() {
+    assert_eq!(ServiceType::default(), ServiceType::Simple);
+}
+
+#[test]
+fn service_type_serde_roundtrip() {
+    let types = [
+        ServiceType::Simple,
+        ServiceType::Forking,
+        ServiceType::Oneshot,
+    ];
+    for st in types {
+        let json = serde_json::to_string(&st).unwrap();
+        let back: ServiceType = serde_json::from_str(&json).unwrap();
+        assert_eq!(st, back);
+    }
+}
+
+// --- v0.8.0: ResourceLimits ---
+
+#[test]
+fn resource_limits_prlimit_commands_all() {
+    use super::types::ResourceLimits;
+    let limits = ResourceLimits {
+        nofile: Some(65536),
+        address_space: Some(4_294_967_296),
+        nproc: Some(1024),
+        core: None,
+    };
+    let cmds = limits.to_prlimit_commands(42);
+    assert_eq!(cmds.len(), 3);
+    assert_eq!(cmds[0].binary, "prlimit");
+    assert!(cmds[0].args.iter().any(|a| a.contains("--nofile=")));
+    assert!(cmds[1].args.iter().any(|a| a.contains("--as=")));
+    assert!(cmds[2].args.iter().any(|a| a.contains("--nproc=")));
+}
+
+#[test]
+fn resource_limits_prlimit_commands_partial() {
+    use super::types::ResourceLimits;
+    let limits = ResourceLimits {
+        nofile: Some(1024),
+        address_space: None,
+        nproc: None,
+        core: None,
+    };
+    let cmds = limits.to_prlimit_commands(1);
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn resource_limits_empty() {
+    use super::types::ResourceLimits;
+    let limits = ResourceLimits {
+        nofile: None,
+        address_space: None,
+        nproc: None,
+        core: None,
+    };
+    assert!(limits.is_empty());
+    assert!(limits.to_prlimit_commands(1).is_empty());
+}
+
+// --- v0.8.0: LogConfig ---
+
+#[test]
+fn log_config_default() {
+    use super::types::LogConfig;
+    let cfg = LogConfig::default();
+    assert_eq!(cfg.max_size_bytes, 10 * 1024 * 1024);
+    assert_eq!(cfg.max_files, 5);
+}
+
+// --- v0.8.0: Environment file loading ---
+
+#[test]
+fn load_env_file_basic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("env");
+    std::fs::write(&path, "KEY1=value1\nKEY2=value2\n").unwrap();
+    let env = super::process::load_environment_file(&path).unwrap();
+    assert_eq!(env.get("KEY1").unwrap(), "value1");
+    assert_eq!(env.get("KEY2").unwrap(), "value2");
+}
+
+#[test]
+fn load_env_file_comments_and_blanks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("env");
+    std::fs::write(&path, "# comment\n\nKEY=val\n  # indented comment\n").unwrap();
+    let env = super::process::load_environment_file(&path).unwrap();
+    assert_eq!(env.len(), 1);
+    assert_eq!(env.get("KEY").unwrap(), "val");
+}
+
+#[test]
+fn load_env_file_quoted_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("env");
+    std::fs::write(&path, "A=\"hello world\"\nB='single quoted'\n").unwrap();
+    let env = super::process::load_environment_file(&path).unwrap();
+    assert_eq!(env.get("A").unwrap(), "hello world");
+    assert_eq!(env.get("B").unwrap(), "single quoted");
+}
+
+#[test]
+fn load_env_file_value_with_equals() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("env");
+    std::fs::write(&path, "CONN=host=localhost port=5432\n").unwrap();
+    let env = super::process::load_environment_file(&path).unwrap();
+    assert_eq!(env.get("CONN").unwrap(), "host=localhost port=5432");
+}
+
+#[test]
+fn load_env_file_missing_returns_error() {
+    let result = super::process::load_environment_file(Path::new("/nonexistent/env"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn load_env_files_merge_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let p1 = dir.path().join("env1");
+    let p2 = dir.path().join("env2");
+    std::fs::write(&p1, "A=first\nB=only1\n").unwrap();
+    std::fs::write(&p2, "A=second\nC=only2\n").unwrap();
+    let env = super::process::load_environment_files(&[p1, p2]);
+    assert_eq!(env.get("A").unwrap(), "second"); // p2 overrides p1
+    assert_eq!(env.get("B").unwrap(), "only1");
+    assert_eq!(env.get("C").unwrap(), "only2");
+}
+
+// --- v0.8.0: Log rotation ---
+
+#[test]
+fn log_config_in_process_spec() {
+    use super::types::LogConfig;
+    // Default service has no log config
+    let svc = dummy_service("test", vec![]);
+    let spec = ProcessSpec::from_service(&svc);
+    assert!(spec.log_config.is_none());
+
+    // With log config set
+    let mut svc = dummy_service("test", vec![]);
+    svc.log_config = Some(LogConfig {
+        max_size_bytes: 5_000_000,
+        max_files: 3,
+    });
+    let spec = ProcessSpec::from_service(&svc);
+    let lc = spec.log_config.unwrap();
+    assert_eq!(lc.max_size_bytes, 5_000_000);
+    assert_eq!(lc.max_files, 3);
+}
+
+// --- v0.8.0: Wave-based startup ---
+
+#[test]
+fn resolve_waves_no_deps() {
+    let services = [
+        dummy_service("a", vec![]),
+        dummy_service("b", vec![]),
+        dummy_service("c", vec![]),
+    ];
+    let refs: Vec<&ServiceDefinition> = services.iter().collect();
+    let waves = ArgonautInit::resolve_service_waves(&refs).unwrap();
+    assert_eq!(waves.len(), 1); // All in one wave
+    assert_eq!(waves[0].len(), 3);
+    // Sorted alphabetically
+    assert_eq!(waves[0], vec!["a", "b", "c"]);
+}
+
+#[test]
+fn resolve_waves_linear_chain() {
+    let services = [
+        dummy_service("c", vec!["b"]),
+        dummy_service("b", vec!["a"]),
+        dummy_service("a", vec![]),
+    ];
+    let refs: Vec<&ServiceDefinition> = services.iter().collect();
+    let waves = ArgonautInit::resolve_service_waves(&refs).unwrap();
+    assert_eq!(waves.len(), 3); // One per level
+    assert_eq!(waves[0], vec!["a"]);
+    assert_eq!(waves[1], vec!["b"]);
+    assert_eq!(waves[2], vec!["c"]);
+}
+
+#[test]
+fn resolve_waves_diamond() {
+    // a → b, a → c, b → d, c → d
+    let services = [
+        dummy_service("a", vec![]),
+        dummy_service("b", vec!["a"]),
+        dummy_service("c", vec!["a"]),
+        dummy_service("d", vec!["b", "c"]),
+    ];
+    let refs: Vec<&ServiceDefinition> = services.iter().collect();
+    let waves = ArgonautInit::resolve_service_waves(&refs).unwrap();
+    assert_eq!(waves.len(), 3);
+    assert_eq!(waves[0], vec!["a"]);
+    assert_eq!(waves[1], vec!["b", "c"]); // parallel
+    assert_eq!(waves[2], vec!["d"]);
+}
+
+#[test]
+fn resolve_waves_cycle_detected() {
+    let services = [dummy_service("a", vec!["b"]), dummy_service("b", vec!["a"])];
+    let refs: Vec<&ServiceDefinition> = services.iter().collect();
+    let result = ArgonautInit::resolve_service_waves(&refs);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("cycle"));
+}
+
+#[test]
+fn boot_execution_plan_waves_desktop() {
+    let init = ArgonautInit::new(ArgonautConfig {
+        boot_mode: BootMode::Desktop,
+        ..Default::default()
+    });
+    let waves = init.boot_execution_plan_waves().unwrap();
+    assert!(waves.len() > 1); // Desktop should have multiple waves
+    // First wave should be services with no deps (postgres, redis)
+    let first_wave_names: Vec<&str> = waves[0].iter().map(|(n, _)| n.as_str()).collect();
+    assert!(first_wave_names.contains(&"postgres"));
+    assert!(first_wave_names.contains(&"redis"));
+}
+
+// --- v0.8.0: PID file reading ---
+
+#[test]
+fn read_pid_file_valid() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.pid");
+    // Use PID 1 (init, always alive)
+    std::fs::write(&path, "1\n").unwrap();
+    let pid = super::process::read_pid_file(&path).unwrap();
+    assert_eq!(pid, 1);
+}
+
+#[test]
+fn read_pid_file_invalid_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.pid");
+    std::fs::write(&path, "not-a-number\n").unwrap();
+    assert!(super::process::read_pid_file(&path).is_err());
+}
+
+#[test]
+fn read_pid_file_zero_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.pid");
+    std::fs::write(&path, "0\n").unwrap();
+    assert!(super::process::read_pid_file(&path).is_err());
+}
+
+#[test]
+fn read_pid_file_missing() {
+    assert!(super::process::read_pid_file(Path::new("/nonexistent/pid")).is_err());
+}
+
+// --- v0.8.0: service_status includes service_type ---
+
+#[test]
+fn service_status_includes_service_type() {
+    let init = ArgonautInit::new(minimal_config());
+    let status = init.service_status("daimon").unwrap();
+    assert_eq!(status.service_type, ServiceType::Simple);
+}
+
+#[test]
+fn system_metrics_includes_service_type() {
+    let init = ArgonautInit::new(minimal_config());
+    let metrics = init.system_metrics();
+    for svc in &metrics.service_metrics {
+        assert_eq!(svc.service_type, ServiceType::Simple);
+    }
+}
+
+// --- Audit-driven edge case tests ---
+
+#[test]
+fn env_file_single_quote_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("env");
+    // Single character that looks like a quote but isn't paired
+    std::fs::write(&path, "A=\"\n").unwrap();
+    let env = super::process::load_environment_file(&path).unwrap();
+    // Single " is not a pair — value should be the raw quote
+    assert_eq!(env.get("A").unwrap(), "\"");
+}
+
+#[test]
+fn env_file_empty_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("env");
+    std::fs::write(&path, "EMPTY=\n").unwrap();
+    let env = super::process::load_environment_file(&path).unwrap();
+    assert_eq!(env.get("EMPTY").unwrap(), "");
+}
+
+#[test]
+fn env_file_empty_key_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("env");
+    std::fs::write(&path, "=value\nGOOD=ok\n").unwrap();
+    let env = super::process::load_environment_file(&path).unwrap();
+    assert_eq!(env.len(), 1);
+    assert_eq!(env.get("GOOD").unwrap(), "ok");
+}
+
+#[test]
+fn log_config_new_enforces_min_files() {
+    use super::types::LogConfig;
+    let cfg = LogConfig::new(1024, 0);
+    assert_eq!(cfg.max_files, 1); // 0 clamped to 1
+}
+
+#[test]
+fn resource_limits_prlimit_pid_in_args() {
+    use super::types::ResourceLimits;
+    let limits = ResourceLimits {
+        nofile: Some(1024),
+        address_space: None,
+        nproc: None,
+        core: None,
+    };
+    let cmds = limits.to_prlimit_commands(12345);
+    assert_eq!(cmds.len(), 1);
+    assert!(cmds[0].args[0].contains("12345"));
+}
+
+#[test]
+fn resolve_waves_single_service() {
+    let services = [dummy_service("solo", vec![])];
+    let refs: Vec<&ServiceDefinition> = services.iter().collect();
+    let waves = ArgonautInit::resolve_service_waves(&refs).unwrap();
+    assert_eq!(waves.len(), 1);
+    assert_eq!(waves[0], vec!["solo"]);
+}
+
+#[test]
+fn resolve_waves_missing_dependency() {
+    let services = [dummy_service("a", vec!["missing"])];
+    let refs: Vec<&ServiceDefinition> = services.iter().collect();
+    let result = ArgonautInit::resolve_service_waves(&refs);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("not defined"));
+}
+
+// --- v0.9.0 audit-driven tests ---
+
+#[test]
+fn resource_limits_secure_defaults() {
+    use super::types::ResourceLimits;
+    let limits = ResourceLimits::secure_defaults();
+    assert_eq!(limits.core, Some(0));
+    assert!(limits.nofile.is_none());
+    let cmds = limits.to_prlimit_commands(1);
+    assert_eq!(cmds.len(), 1);
+    assert!(cmds[0].args.iter().any(|a| a.contains("--core=")));
+}
+
+#[test]
+fn resource_limits_core_in_prlimit() {
+    use super::types::ResourceLimits;
+    let limits = ResourceLimits {
+        nofile: None,
+        address_space: None,
+        nproc: None,
+        core: Some(0),
+    };
+    let cmds = limits.to_prlimit_commands(42);
+    assert_eq!(cmds.len(), 1);
+    assert!(cmds[0].args.iter().any(|a| a.contains("--core=0:0")));
+}
+
+#[test]
+fn capability_setpriv_no_shell_injection() {
+    use super::types::{CapabilityConfig, LinuxCapability};
+    let config = CapabilityConfig {
+        drop: vec![LinuxCapability::SysAdmin],
+    };
+    // Binary with spaces — should be a separate arg, not shell-interpreted
+    let cmd = config.to_setpriv_command(
+        "/usr/bin/my app",
+        &["--flag".into(), "arg with space".into()],
+    );
+    assert_eq!(cmd.binary, "setpriv");
+    // Binary and args are separate elements, not concatenated into a shell string
+    assert!(cmd.args.contains(&"/usr/bin/my app".to_string()));
+    assert!(cmd.args.contains(&"arg with space".to_string()));
+}
+
+#[test]
+fn socket_activation_listen_fds_only() {
+    use super::types::{SocketActivationConfig, SocketSpec, SocketType};
+    let config = SocketActivationConfig {
+        sockets: vec![SocketSpec {
+            address: "127.0.0.1".into(),
+            port: 80,
+            socket_type: SocketType::Stream,
+        }],
+    };
+    let (key, value) = config.listen_fds_env();
+    assert_eq!(key, "LISTEN_FDS");
+    assert_eq!(value, "1");
+}
+
+#[test]
+fn tmpfile_validate_symlink_target_traversal() {
+    use super::types::TmpfileEntry;
+    let entries = vec![TmpfileEntry::Symlink {
+        path: PathBuf::from("/run/link"),
+        target: PathBuf::from("/var/../etc/shadow"),
+    }];
+    let err = super::tmpfiles::validate_tmpfile_entries(&entries).unwrap_err();
+    assert!(err.to_string().contains("traversal"));
 }

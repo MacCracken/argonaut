@@ -16,7 +16,203 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use tracing::{debug, error, info, warn};
 
-use crate::types::{ProcessSpec, SafeCommand};
+use crate::types::{LogConfig, ProcessSpec, SafeCommand};
+
+// ---------------------------------------------------------------------------
+// Environment file loading
+// ---------------------------------------------------------------------------
+
+/// Load environment variables from a file.
+///
+/// Format: one `KEY=VALUE` per line. Lines starting with `#` are comments.
+/// Empty lines are ignored. Values may be optionally quoted with `"` or `'`.
+/// The first `=` splits the key from the value.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read.
+pub fn load_environment_file(path: &Path) -> Result<HashMap<String, String>> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read environment file: {}", path.display()))?;
+
+    let mut env = HashMap::new();
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            warn!(
+                file = %path.display(),
+                line = line_num + 1,
+                content = trimmed,
+                "skipping malformed environment line (no '=')"
+            );
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            warn!(
+                file = %path.display(),
+                line = line_num + 1,
+                "skipping environment line with empty key"
+            );
+            continue;
+        }
+        // Strip optional quotes from value (must be at least 2 chars for paired quotes)
+        let value = value.trim();
+        let value = if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+        env.insert(key.to_string(), value.to_string());
+    }
+
+    info!(
+        file = %path.display(),
+        vars = env.len(),
+        "loaded environment file"
+    );
+    Ok(env)
+}
+
+/// Load and merge environment variables from multiple files.
+///
+/// Files are loaded in order — later files override earlier ones.
+/// Missing files are skipped with a warning (not an error).
+#[must_use]
+pub fn load_environment_files(paths: &[PathBuf]) -> HashMap<String, String> {
+    let mut merged = HashMap::new();
+    for path in paths {
+        match load_environment_file(path) {
+            Ok(env) => merged.extend(env),
+            Err(e) => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping missing or unreadable environment file"
+                );
+            }
+        }
+    }
+    merged
+}
+
+// ---------------------------------------------------------------------------
+// Log rotation
+// ---------------------------------------------------------------------------
+
+/// Rotate a log file if it exceeds the configured maximum size.
+///
+/// Renames `.log` → `.log.1`, `.log.1` → `.log.2`, etc., up to
+/// `config.max_files`. The oldest file beyond the limit is deleted.
+///
+/// Does nothing if the file doesn't exist or is under the size limit.
+fn rotate_log_if_needed(path: &Path, config: &LogConfig) -> Result<()> {
+    let size = match fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "failed to stat log file {}: {}",
+                path.display(),
+                e
+            ));
+        }
+    };
+
+    if size < config.max_size_bytes {
+        return Ok(());
+    }
+
+    let path_str = path.display().to_string();
+    info!(
+        path = %path_str,
+        size_bytes = size,
+        max_bytes = config.max_size_bytes,
+        "rotating log file"
+    );
+
+    // Delete oldest rotated file if it exists
+    let oldest = format!("{path_str}.{}", config.max_files);
+    let _ = fs::remove_file(&oldest);
+
+    // Shift existing rotated files: .log.N → .log.N+1 (backwards)
+    for i in (1..config.max_files).rev() {
+        let from = format!("{path_str}.{i}");
+        let to = format!("{path_str}.{}", i + 1);
+        if Path::new(&from).exists()
+            && let Err(e) = fs::rename(&from, &to)
+        {
+            warn!(from = %from, to = %to, error = %e, "failed to rotate log file");
+        }
+    }
+
+    // Rename current log to .log.1
+    let rotated = format!("{path_str}.1");
+    if let Err(e) = fs::rename(path, &rotated) {
+        warn!(
+            from = %path_str,
+            to = %rotated,
+            error = %e,
+            "failed to rotate current log file"
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PID file reading
+// ---------------------------------------------------------------------------
+
+/// Read a PID from a PID file.
+///
+/// The file should contain a single integer (the PID), optionally
+/// followed by whitespace. Validates that the PID is positive and
+/// that the process is alive.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read, the content is not
+/// a valid PID, or the process is not alive.
+pub fn read_pid_file(path: &Path) -> Result<u32> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read PID file: {}", path.display()))?;
+    let pid_str = content.trim();
+    let pid: u32 = pid_str
+        .parse()
+        .with_context(|| format!("invalid PID in {}: '{}'", path.display(), pid_str))?;
+    if pid == 0 {
+        bail!("PID file {} contains PID 0", path.display());
+    }
+    // Check the process is alive
+    let nix_pid =
+        Pid::from_raw(i32::try_from(pid).with_context(|| format!("PID {} exceeds i32::MAX", pid))?);
+    match signal::kill(nix_pid, None) {
+        Ok(()) => {}
+        Err(nix::errno::Errno::ESRCH) => {
+            bail!("PID {} from {} is not alive (ESRCH)", pid, path.display());
+        }
+        Err(e) => {
+            warn!(
+                pid = pid,
+                error = %e,
+                "kill(0) check returned unexpected error, assuming alive"
+            );
+        }
+    }
+    info!(path = %path.display(), pid = pid, "read PID from file");
+    Ok(pid)
+}
+
+// ---------------------------------------------------------------------------
+// Log file management
+// ---------------------------------------------------------------------------
 
 /// Ensure the log directory exists for a given service.
 fn ensure_log_dir(log_path: &Path) -> io::Result<()> {
@@ -41,56 +237,116 @@ fn open_log_file(path: &Path) -> Result<File> {
 // ---------------------------------------------------------------------------
 
 /// A running service process with its metadata.
+///
+/// For simple services, `child` holds the `Child` handle from spawn.
+/// For forking services, `child` is `None` — the original parent
+/// has exited and we track the forked child by PID only (signaling
+/// via `nix::sys::signal::kill`).
 #[derive(Debug)]
 pub struct SpawnedProcess {
-    /// The OS child process handle.
-    child: Child,
+    /// The OS child process handle (`None` for forked services where
+    /// the parent has exited and we're tracking the child by PID).
+    child: Option<Child>,
     /// Service name this process belongs to.
     pub service_name: String,
-    /// PID of the spawned process.
+    /// PID of the tracked process.
     pub pid: u32,
-    /// When the process was spawned.
+    /// When the process was spawned (or adopted).
     pub started_at: Instant,
     /// Path to stdout log file.
     pub stdout_log: Option<PathBuf>,
     /// Path to stderr log file.
     pub stderr_log: Option<PathBuf>,
+    /// Whether this is a forked process (parent exited, tracking child).
+    pub forked: bool,
+}
+
+impl SpawnedProcess {
+    /// Create a `SpawnedProcess` for a forked daemon where we only
+    /// know the child PID (read from a PID file or sd_notify MAINPID).
+    #[must_use]
+    pub fn from_forked_pid(service_name: &str, pid: u32) -> Self {
+        Self {
+            child: None,
+            service_name: service_name.to_string(),
+            pid,
+            started_at: Instant::now(),
+            stdout_log: None,
+            stderr_log: None,
+            forked: true,
+        }
+    }
 }
 
 impl SpawnedProcess {
     /// Check if the process has exited without blocking.
     /// Returns `Some(exit_code)` if exited, `None` if still running.
     pub fn try_wait(&mut self) -> Result<Option<i32>> {
-        match self.child.try_wait().context("try_wait failed")? {
-            Some(status) => {
-                let code = status.code().unwrap_or(-1);
+        if let Some(ref mut child) = self.child {
+            match child.try_wait().context("try_wait failed")? {
+                Some(status) => {
+                    let code = status.code().unwrap_or(-1);
+                    debug!(
+                        service = %self.service_name,
+                        pid = self.pid,
+                        exit_code = code,
+                        "process exited"
+                    );
+                    Ok(Some(code))
+                }
+                None => Ok(None),
+            }
+        } else {
+            // Forked process — check liveness via kill(pid, 0)
+            if self.is_alive() {
+                Ok(None)
+            } else {
                 debug!(
                     service = %self.service_name,
                     pid = self.pid,
-                    exit_code = code,
-                    "process exited"
+                    "forked process is no longer alive"
                 );
-                Ok(Some(code))
+                Ok(Some(-1))
             }
-            None => Ok(None),
         }
     }
 
     /// Block until the process exits. Returns the exit code.
     pub fn wait(&mut self) -> Result<i32> {
-        let status = self
-            .child
-            .wait()
-            .with_context(|| format!("wait failed for service '{}'", self.service_name))?;
-        let code = status.code().unwrap_or(-1);
-        info!(
-            service = %self.service_name,
-            pid = self.pid,
-            exit_code = code,
-            elapsed_ms = self.started_at.elapsed().as_millis() as u64,
-            "process exited"
-        );
-        Ok(code)
+        if let Some(ref mut child) = self.child {
+            let status = child
+                .wait()
+                .with_context(|| format!("wait failed for service '{}'", self.service_name))?;
+            let code = status.code().unwrap_or(-1);
+            info!(
+                service = %self.service_name,
+                pid = self.pid,
+                exit_code = code,
+                elapsed_ms = self.started_at.elapsed().as_millis() as u64,
+                "process exited"
+            );
+            Ok(code)
+        } else {
+            // Forked process — poll liveness until dead
+            let start = Instant::now();
+            while self.is_alive() {
+                std::thread::sleep(Duration::from_millis(50));
+                if start.elapsed() > Duration::from_secs(30) {
+                    bail!(
+                        "timed out waiting for forked process '{}' (pid {})",
+                        self.service_name,
+                        self.pid
+                    );
+                }
+            }
+            info!(
+                service = %self.service_name,
+                pid = self.pid,
+                elapsed_ms = self.started_at.elapsed().as_millis() as u64,
+                "forked process exited"
+            );
+            Ok(-1) // No exit code available for forked processes
+        }
     }
 
     /// Convert the stored PID to a nix `Pid`, failing if it exceeds `i32::MAX`.
@@ -230,6 +486,20 @@ pub fn spawn_process(spec: &ProcessSpec, service_name: &str) -> Result<SpawnedPr
         cmd.current_dir(wd);
     }
 
+    // Log rotation — rotate before opening if configured
+    if let Some(ref log_config) = spec.log_config {
+        if let Some(ref path) = spec.stdout_log
+            && let Err(e) = rotate_log_if_needed(path, log_config)
+        {
+            warn!(service = service_name, path = %path.display(), error = %e, "stdout log rotation failed");
+        }
+        if let Some(ref path) = spec.stderr_log
+            && let Err(e) = rotate_log_if_needed(path, log_config)
+        {
+            warn!(service = service_name, path = %path.display(), error = %e, "stderr log rotation failed");
+        }
+    }
+
     // Stdout — fall back to /dev/null if log file can't be opened
     let stdout_log = if let Some(ref path) = spec.stdout_log {
         match open_log_file(path) {
@@ -305,12 +575,13 @@ pub fn spawn_process(spec: &ProcessSpec, service_name: &str) -> Result<SpawnedPr
     );
 
     Ok(SpawnedProcess {
-        child,
+        child: Some(child),
         service_name: service_name.to_string(),
         pid,
         started_at: Instant::now(),
         stdout_log,
         stderr_log,
+        forked: false,
     })
 }
 
@@ -582,6 +853,8 @@ mod tests {
             stderr_log: None,
             uid: None,
             gid: None,
+            resource_limits: None,
+            log_config: None,
         }
     }
 
@@ -595,6 +868,8 @@ mod tests {
             stderr_log: None,
             uid: None,
             gid: None,
+            resource_limits: None,
+            log_config: None,
         }
     }
 
@@ -608,6 +883,8 @@ mod tests {
             stderr_log: None,
             uid: None,
             gid: None,
+            resource_limits: None,
+            log_config: None,
         }
     }
 
@@ -638,6 +915,8 @@ mod tests {
             stderr_log: None,
             uid: None,
             gid: None,
+            resource_limits: None,
+            log_config: None,
         };
         let result = spawn_process(&spec, "bad-binary");
         assert!(result.is_err());
@@ -856,6 +1135,8 @@ mod tests {
             stderr_log: None,
             uid: None,
             gid: None,
+            resource_limits: None,
+            log_config: None,
         };
 
         let mut proc = spawn_process(&spec, "echo-test").unwrap();
@@ -880,6 +1161,8 @@ mod tests {
             stderr_log: Some(stderr_path.clone()),
             uid: None,
             gid: None,
+            resource_limits: None,
+            log_config: None,
         };
 
         let mut proc = spawn_process(&spec, "stderr-test").unwrap();

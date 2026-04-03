@@ -328,8 +328,406 @@ pub struct ReadyCheck {
 }
 
 // ---------------------------------------------------------------------------
-// Service types
+// Service types and configuration
 // ---------------------------------------------------------------------------
+
+/// How a service process behaves after being spawned.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ServiceType {
+    /// Long-running daemon. Argonaut supervises the process, restarts
+    /// on crash, and runs periodic health checks.
+    #[default]
+    Simple,
+    /// Forking daemon (e.g. PostgreSQL). The spawned parent exits and
+    /// the real service runs as a child. Argonaut reads the child PID
+    /// from a PID file or sd_notify `MAINPID`.
+    Forking,
+    /// Run-to-completion task. Argonaut spawns the process, waits for
+    /// it to exit, and marks the service as Stopped (exit 0) or Failed.
+    /// No health checks, no supervision, no restart by default.
+    Oneshot,
+}
+
+impl fmt::Display for ServiceType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Simple => write!(f, "simple"),
+            Self::Forking => write!(f, "forking"),
+            Self::Oneshot => write!(f, "oneshot"),
+        }
+    }
+}
+
+/// Per-service resource limits applied via `prlimit(1)` after spawn.
+///
+/// Values are in the unit expected by the kernel (bytes for memory,
+/// count for file descriptors and processes). Each limit sets both
+/// soft and hard to the same value.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    /// `RLIMIT_NOFILE` — maximum open file descriptors.
+    pub nofile: Option<u64>,
+    /// `RLIMIT_AS` — maximum virtual memory (bytes).
+    pub address_space: Option<u64>,
+    /// `RLIMIT_NPROC` — maximum number of processes.
+    pub nproc: Option<u64>,
+    /// `RLIMIT_CORE` — maximum core dump size (bytes). Set to `0` to disable core dumps.
+    pub core: Option<u64>,
+}
+
+impl ResourceLimits {
+    /// Generate `prlimit` commands to apply these limits to a running process.
+    ///
+    /// Uses the `prlimit` CLI tool to set limits without requiring
+    /// `unsafe` code (no `Command::pre_exec` needed).
+    #[must_use]
+    pub fn to_prlimit_commands(&self, pid: u32) -> Vec<SafeCommand> {
+        let mut cmds = Vec::new();
+        let pid_str = pid.to_string();
+
+        if let Some(nofile) = self.nofile {
+            let val = format!("{nofile}:{nofile}");
+            cmds.push(SafeCommand {
+                binary: "prlimit".to_string(),
+                args: vec![format!("--pid={pid_str}"), format!("--nofile={val}")],
+            });
+        }
+        if let Some(addr_space) = self.address_space {
+            let val = format!("{addr_space}:{addr_space}");
+            cmds.push(SafeCommand {
+                binary: "prlimit".to_string(),
+                args: vec![format!("--pid={pid_str}"), format!("--as={val}")],
+            });
+        }
+        if let Some(nproc) = self.nproc {
+            let val = format!("{nproc}:{nproc}");
+            cmds.push(SafeCommand {
+                binary: "prlimit".to_string(),
+                args: vec![format!("--pid={pid_str}"), format!("--nproc={val}")],
+            });
+        }
+        if let Some(core) = self.core {
+            let val = format!("{core}:{core}");
+            cmds.push(SafeCommand {
+                binary: "prlimit".to_string(),
+                args: vec![format!("--pid={pid_str}"), format!("--core={val}")],
+            });
+        }
+        cmds
+    }
+
+    /// Whether any limits are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.nofile.is_none()
+            && self.address_space.is_none()
+            && self.nproc.is_none()
+            && self.core.is_none()
+    }
+
+    /// Return secure defaults: core dumps disabled, no other limits.
+    #[must_use]
+    pub fn secure_defaults() -> Self {
+        Self {
+            nofile: None,
+            address_space: None,
+            nproc: None,
+            core: Some(0),
+        }
+    }
+}
+
+/// Log rotation configuration for a service's stdout/stderr files.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogConfig {
+    /// Rotate when the log file exceeds this size in bytes.
+    pub max_size_bytes: u64,
+    /// Number of rotated files to keep (e.g. 5 → `.log.1` through `.log.5`).
+    /// Minimum 1.
+    pub max_files: u32,
+}
+
+impl LogConfig {
+    /// Create a new `LogConfig`, enforcing minimum 1 for `max_files`.
+    #[must_use]
+    pub fn new(max_size_bytes: u64, max_files: u32) -> Self {
+        Self {
+            max_size_bytes,
+            max_files: max_files.max(1),
+        }
+    }
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            max_size_bytes: 10 * 1024 * 1024, // 10 MB
+            max_files: 5,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Security configuration
+// ---------------------------------------------------------------------------
+
+/// Socket type for socket activation.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SocketType {
+    /// TCP stream socket.
+    Stream,
+    /// UDP datagram socket.
+    Datagram,
+    /// Sequential packet socket.
+    SeqPacket,
+}
+
+impl fmt::Display for SocketType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stream => write!(f, "stream"),
+            Self::Datagram => write!(f, "dgram"),
+            Self::SeqPacket => write!(f, "seqpacket"),
+        }
+    }
+}
+
+/// A socket to be pre-opened for socket activation.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketSpec {
+    /// Listen address (e.g. `"0.0.0.0"`, `"127.0.0.1"`, `"::"`).
+    pub address: String,
+    /// Listen port.
+    pub port: u16,
+    /// Socket type.
+    pub socket_type: SocketType,
+}
+
+/// Socket activation configuration for a service.
+///
+/// The binary crate creates the actual sockets and passes file
+/// descriptors. The library generates the `LISTEN_FDS` and
+/// `LISTEN_PID` environment variables.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketActivationConfig {
+    /// Sockets to pre-open for this service.
+    pub sockets: Vec<SocketSpec>,
+}
+
+impl SocketActivationConfig {
+    /// Generate environment variables for sd_listen_fds protocol.
+    ///
+    /// Returns `LISTEN_FDS=N` and `LISTEN_PID=<pid>`.
+    /// Pass `pid = 0` during planning — the binary crate must update
+    /// `LISTEN_PID` to the actual child PID after fork.
+    #[must_use]
+    pub fn env_vars(&self, pid: u32) -> Vec<(String, String)> {
+        vec![
+            ("LISTEN_FDS".to_string(), self.sockets.len().to_string()),
+            ("LISTEN_PID".to_string(), pid.to_string()),
+        ]
+    }
+
+    /// Generate only `LISTEN_FDS=N` (without LISTEN_PID).
+    ///
+    /// Use this when the PID is not yet known (pre-spawn). The binary
+    /// crate sets `LISTEN_PID` after fork when the child PID is available.
+    #[must_use]
+    pub fn listen_fds_env(&self) -> (String, String) {
+        ("LISTEN_FDS".to_string(), self.sockets.len().to_string())
+    }
+}
+
+/// Action to take when a seccomp filter blocks a syscall.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SeccompAction {
+    /// Kill the process immediately.
+    Kill,
+    /// Send SIGSYS to the process.
+    Trap,
+    /// Log the violation but allow the syscall.
+    Log,
+}
+
+impl fmt::Display for SeccompAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Kill => write!(f, "kill"),
+            Self::Trap => write!(f, "trap"),
+            Self::Log => write!(f, "log"),
+        }
+    }
+}
+
+/// Seccomp BPF filter configuration for a service.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SeccompConfig {
+    /// Use the agnosys basic filter (20 safe syscalls, kill on everything else).
+    Basic,
+    /// Custom filter with explicit allow/deny lists using syscall names.
+    Custom {
+        /// Syscall names to allow (e.g. `["read", "write", "socket"]`).
+        allow: Vec<String>,
+        /// Syscall names to deny with specific actions.
+        deny: Vec<(String, SeccompAction)>,
+    },
+}
+
+/// Filesystem access level for Landlock rules.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LandlockAccess {
+    /// No access (default deny).
+    #[default]
+    NoAccess,
+    /// Read-only access.
+    ReadOnly,
+    /// Read and write access.
+    ReadWrite,
+}
+
+impl fmt::Display for LandlockAccess {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoAccess => write!(f, "none"),
+            Self::ReadOnly => write!(f, "ro"),
+            Self::ReadWrite => write!(f, "rw"),
+        }
+    }
+}
+
+/// A Landlock filesystem restriction rule.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LandlockRule {
+    /// Filesystem path to restrict.
+    pub path: PathBuf,
+    /// Access level granted.
+    pub access: LandlockAccess,
+}
+
+/// Landlock filesystem restriction configuration for a service.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LandlockConfig {
+    /// Filesystem rules to apply.
+    pub rules: Vec<LandlockRule>,
+}
+
+/// Linux capability for bounding set management.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LinuxCapability {
+    NetBindService,
+    SysAdmin,
+    DacOverride,
+    NetRaw,
+    SysChroot,
+    Setuid,
+    Setgid,
+    Kill,
+    SysPtrace,
+    SysTime,
+    NetAdmin,
+    Fowner,
+    Fsetid,
+}
+
+impl LinuxCapability {
+    /// Return the kernel capability name (e.g. `"cap_sys_admin"`).
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NetBindService => "cap_net_bind_service",
+            Self::SysAdmin => "cap_sys_admin",
+            Self::DacOverride => "cap_dac_override",
+            Self::NetRaw => "cap_net_raw",
+            Self::SysChroot => "cap_sys_chroot",
+            Self::Setuid => "cap_setuid",
+            Self::Setgid => "cap_setgid",
+            Self::Kill => "cap_kill",
+            Self::SysPtrace => "cap_sys_ptrace",
+            Self::SysTime => "cap_sys_time",
+            Self::NetAdmin => "cap_net_admin",
+            Self::Fowner => "cap_fowner",
+            Self::Fsetid => "cap_fsetid",
+        }
+    }
+}
+
+impl fmt::Display for LinuxCapability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Capability bounding set configuration for a service.
+///
+/// Specifies which capabilities to DROP from the service process.
+/// The process starts with the full bounding set; listed capabilities
+/// are explicitly removed.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityConfig {
+    /// Capabilities to drop from the bounding set.
+    pub drop: Vec<LinuxCapability>,
+}
+
+impl CapabilityConfig {
+    /// Generate a `setpriv` command that drops capabilities and execs a binary.
+    ///
+    /// Uses `setpriv --no-new-privs --bounding-set=-<cap>,...` which is
+    /// safer than `capsh` — no shell interpretation of arguments.
+    #[must_use]
+    pub fn to_setpriv_command(&self, binary: &str, args: &[String]) -> SafeCommand {
+        let mut setpriv_args: Vec<String> = Vec::new();
+        setpriv_args.push("--no-new-privs".to_string());
+        if !self.drop.is_empty() {
+            let caps: Vec<&str> = self.drop.iter().map(|c| c.as_str()).collect();
+            setpriv_args.push(format!("--bounding-set=-{}", caps.join(",-")));
+        }
+        setpriv_args.push(binary.to_string());
+        setpriv_args.extend_from_slice(args);
+        SafeCommand {
+            binary: "setpriv".to_string(),
+            args: setpriv_args,
+        }
+    }
+}
+
+/// Entry for boot-time filesystem setup (tmpfiles.d equivalent).
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TmpfileEntry {
+    /// Create a directory with the given permissions.
+    Directory {
+        path: PathBuf,
+        /// Octal mode (e.g. `0o755`).
+        mode: u32,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    },
+    /// Create a symbolic link.
+    Symlink { path: PathBuf, target: PathBuf },
+    /// Create a device node.
+    Device {
+        path: PathBuf,
+        /// Device type: `'b'` for block, `'c'` for character.
+        dev_type: char,
+        major: u32,
+        minor: u32,
+        /// Octal mode (e.g. `0o660`).
+        mode: u32,
+    },
+}
 
 /// Static definition of a service managed by argonaut.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,6 +758,27 @@ pub struct ServiceDefinition {
     /// Disabled services can still be started manually but are
     /// excluded from boot execution plans.
     pub enabled: bool,
+    /// How the service process behaves (simple daemon, forking, oneshot).
+    pub service_type: ServiceType,
+    /// Paths to environment files loaded before spawning.
+    /// Files are loaded in order; later files override earlier ones.
+    /// Format: one `KEY=VALUE` per line, `#` comments, empty lines ignored.
+    pub environment_files: Vec<PathBuf>,
+    /// PID file path for forking services. After the parent exits,
+    /// argonaut reads the child PID from this file.
+    pub pid_file: Option<PathBuf>,
+    /// Resource limits applied post-spawn via `prlimit(1)`.
+    pub resource_limits: Option<ResourceLimits>,
+    /// Log rotation configuration for stdout/stderr files.
+    pub log_config: Option<LogConfig>,
+    /// Socket activation configuration (LISTEN_FDS/LISTEN_PID protocol).
+    pub socket_activation: Option<SocketActivationConfig>,
+    /// Seccomp BPF filter configuration.
+    pub seccomp: Option<SeccompConfig>,
+    /// Landlock filesystem restriction rules.
+    pub landlock: Option<LandlockConfig>,
+    /// Linux capability bounding set (capabilities to drop).
+    pub capabilities: Option<CapabilityConfig>,
 }
 
 /// Runtime state of a service.
@@ -443,6 +862,9 @@ pub struct ArgonautConfig {
     pub verify_on_boot: bool,
     /// Edge boot configuration (used when `boot_mode` is `Edge`).
     pub edge_boot: EdgeBootConfig,
+    /// Boot-time filesystem entries (directories, symlinks, device nodes)
+    /// created before services start. Equivalent to systemd tmpfiles.d.
+    pub tmpfiles: Vec<TmpfileEntry>,
 }
 
 impl Default for ArgonautConfig {
@@ -455,6 +877,7 @@ impl Default for ArgonautConfig {
             log_to_console: true,
             verify_on_boot: true,
             edge_boot: EdgeBootConfig::default(),
+            tmpfiles: Vec::new(),
         }
     }
 }
@@ -912,6 +1335,10 @@ pub struct ProcessSpec {
     pub stderr_log: Option<PathBuf>,
     pub uid: Option<u32>,
     pub gid: Option<u32>,
+    /// Resource limits to apply after spawn via `prlimit(1)`.
+    pub resource_limits: Option<ResourceLimits>,
+    /// Log rotation configuration.
+    pub log_config: Option<LogConfig>,
 }
 
 impl ProcessSpec {
@@ -933,6 +1360,8 @@ impl ProcessSpec {
             ))),
             uid: None,
             gid: None,
+            resource_limits: def.resource_limits.clone(),
+            log_config: def.log_config.clone(),
         }
     }
 }
@@ -952,6 +1381,9 @@ pub struct EmergencyShellConfig {
     pub banner: String,
     /// Whether to require root password before granting access.
     pub require_auth: bool,
+    /// Hex-encoded SHA-256 hash of the emergency shell password.
+    /// Only used when `require_auth` is `true`.
+    pub auth_password_hash: Option<String>,
 }
 
 impl Default for EmergencyShellConfig {
@@ -979,6 +1411,7 @@ impl Default for EmergencyShellConfig {
             )
             .into(),
             require_auth: false,
+            auth_password_hash: None,
         }
     }
 }
