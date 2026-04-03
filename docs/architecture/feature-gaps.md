@@ -6,25 +6,25 @@ Based on research into s6, dinit, systemd, runit, OpenRC, and other production i
 
 | Feature | Why | Status |
 |---------|-----|--------|
-| Zombie reaping (SIGCHLD) | PID 1 MUST reap all children, not just tracked services. Orphans become zombies. | Not implemented (library limitation) |
-| Signal forwarding | PID 1 receives all signals. Must forward SIGTERM/SIGINT/SIGHUP to services. | Not implemented |
-| Parallel service startup | Independent services should start concurrently. Toposort gives the data; need wave-based executor. | Not implemented (sequential only) |
-| Cgroup-per-service | Clean process killing (kill cgroup, not PID), resource accounting, OOM priority. | Not implemented |
-| Resource limits (rlimits) | RLIMIT_NOFILE, RLIMIT_AS, RLIMIT_NPROC per service. | Not implemented |
-| Privilege drop (uid/gid) | Services must run as non-root. Currently `bail!()` on uid/gid. | Blocked by `forbid(unsafe_code)` — deferred to binary crate |
-| Forking service type | PostgreSQL and other daemons fork; parent exits. Need to track child PID via sd_notify or PID file. | Not implemented |
+| Zombie reaping (SIGCHLD) | PID 1 MUST reap all children, not just tracked services. Orphans become zombies. | Deferred to PID 1 binary crate |
+| Signal forwarding | PID 1 receives all signals. Must forward SIGTERM/SIGINT/SIGHUP to services. | Deferred to PID 1 binary crate |
+| Parallel service startup | Independent services should start concurrently. Toposort gives the data; need wave-based executor. | **Implemented** (v0.8.0) — `resolve_service_waves`, `boot_execution_plan_waves` |
+| Cgroup-per-service | Clean process killing (kill cgroup, not PID), resource accounting, OOM priority. | Deferred to PID 1 binary crate |
+| Resource limits (rlimits) | RLIMIT_NOFILE, RLIMIT_AS, RLIMIT_NPROC, RLIMIT_CORE per service. | **Implemented** (v0.8.0) — `ResourceLimits` + prlimit commands |
+| Privilege drop (uid/gid) | Services must run as non-root. Currently `bail!()` on uid/gid. | Deferred to PID 1 binary crate (`pre_exec` requires unsafe) |
+| Forking service type | PostgreSQL and other daemons fork; parent exits. Need to track child PID via sd_notify or PID file. | **Implemented** (v0.8.0) — `ServiceType::Forking`, `read_pid_file` |
 
 ## P1 — Should Have
 
 | Feature | Why | Status |
 |---------|-----|--------|
-| Socket activation | Zero-downtime restarts, on-demand start, breaks circular deps. Pass fd 3+ via LISTEN_FDS/LISTEN_PID. | Not implemented |
-| sd_notify WATCHDOG=1 | Many daemons send WATCHDOG=1 keepalive. Without handling this, watchdog-reliant services fail. | Not implemented |
-| sd_notify credential verification | SO_PASSCRED prevents spoofed READY=1 from arbitrary processes. | Not implemented |
-| Log rotation | Current append-only log files will fill disks. Need rotation or ring buffer. | Not implemented |
-| Environment file loading | `/etc/argonaut/env.d/<service>` — every production init supports this. | Not implemented |
-| tmpfiles.d equivalent | Create dirs, symlinks, device nodes at boot. Critical for `/run`, `/tmp`. | Not implemented |
-| Seccomp/Landlock per service | Boot stage exists but no implementation. Drop capabilities, apply filters. | Not implemented |
+| Socket activation | Zero-downtime restarts, on-demand start, breaks circular deps. Pass fd 3+ via LISTEN_FDS/LISTEN_PID. | **Implemented** (v0.9.0) — `SocketActivationConfig`, LISTEN_FDS env |
+| sd_notify WATCHDOG=1 | Many daemons send WATCHDOG=1 keepalive. Without handling this, watchdog-reliant services fail. | **Implemented** (v0.7.0) — `NotifyMessage.watchdog` |
+| sd_notify credential verification | SO_PASSCRED prevents spoofed READY=1 from arbitrary processes. | **Implemented** (v0.7.0) — `enable_credentials()` |
+| Log rotation | Current append-only log files will fill disks. Need rotation or ring buffer. | **Implemented** (v0.8.0) — `LogConfig`, size-based rotation |
+| Environment file loading | `/etc/argonaut/env.d/<service>` — every production init supports this. | **Implemented** (v0.8.0) — `load_environment_file`, implicit env.d |
+| tmpfiles.d equivalent | Create dirs, symlinks, device nodes at boot. Critical for `/run`, `/tmp`. | **Implemented** (v0.9.0) — `TmpfileEntry`, `generate_tmpfile_commands` |
+| Seccomp/Landlock per service | Boot stage exists but no implementation. Drop capabilities, apply filters. | **Implemented** (v0.9.0) — `SeccompConfig`, `LandlockConfig`, `CapabilityConfig` + agnosys integration |
 
 ## P2 — Nice to Have
 
@@ -37,24 +37,24 @@ Based on research into s6, dinit, systemd, runit, OpenRC, and other production i
 | SBOM generation | Software Bill of Materials for supply chain compliance. |
 | Reproducible builds | SLSA level 3+ provenance. |
 
-## Research-Driven Fixes Needed
+## Research-Driven Fixes (Resolved)
 
-### dm-verity
-- Remove redundant `veritysetup verify` from boot path (doubles I/O — `open` already verifies on read)
-- Add `--restart-on-corruption` flag for edge mode
-- Make verity failure fatal in edge mode (currently records error but continues)
-- Consider FEC support (`--fec-device`) for unreliable edge storage
+### dm-verity — all resolved in v0.7.0
+- ~~Remove redundant `veritysetup verify`~~ — Done, `open` already verifies on read
+- ~~`--restart-on-corruption` for edge mode~~ — Done
+- ~~Verity failure fatal in edge mode~~ — Done
+- FEC support (`--fec-device`) — deferred (P2, no edge storage reliability issues yet)
 
-### LUKS2 + TPM2
-- Add `--token-id=0` and `--tries=1` for deterministic TPM2 unlock
-- Default `tpm_attestation` to `true` for edge mode
-- Add PCR binding configuration to EdgeBootConfig
+### LUKS2 + TPM2 — all resolved in v0.7.0
+- ~~`--token-id=0` and `--tries=1`~~ — Done
+- ~~Default `tpm_attestation` to `true`~~ — Done
+- ~~PCR binding configuration~~ — Done (`pcr_bindings` field)
 
-### sd_notify
-- Implement WATCHDOG=1 keepalive handling
-- Add SO_PASSCRED credential verification
-- Support abstract socket namespace
-- Support RELOADING=1 and STOPPING=1 lifecycle fields
+### sd_notify — all resolved in v0.7.0
+- ~~WATCHDOG=1 keepalive~~ — Done
+- ~~SO_PASSCRED credential verification~~ — Done
+- ~~RELOADING=1 and STOPPING=1~~ — Done
+- Abstract socket namespace — deferred (P2, no consumer needs it yet)
 
 ## Architecture Recommendation
 
