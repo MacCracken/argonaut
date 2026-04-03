@@ -254,6 +254,76 @@ fn stats_collection(c: &mut Criterion) {
     });
 }
 
+fn wave_execution_plan(c: &mut Criterion) {
+    let init = argonaut::ArgonautInit::new(ArgonautConfig::default());
+    c.bench_function("boot_execution_plan_waves_desktop", |b| {
+        b.iter(|| init.boot_execution_plan_waves());
+    });
+}
+
+fn api_responses(c: &mut Criterion) {
+    let mut init = argonaut::ArgonautInit::new(ArgonautConfig::default());
+    // Set some services to Running for realistic output
+    init.set_service_state("postgres", ServiceState::Starting);
+    init.set_service_state("postgres", ServiceState::Running);
+
+    c.bench_function("list_services_desktop", |b| {
+        b.iter(|| init.list_services());
+    });
+    c.bench_function("system_status_desktop", |b| {
+        b.iter(|| init.system_status());
+    });
+    c.bench_function("system_metrics_desktop", |b| {
+        b.iter(|| init.system_metrics());
+    });
+    c.bench_function("boot_log_desktop", |b| {
+        b.iter(|| init.boot_log());
+    });
+}
+
+fn tmpfile_generation(c: &mut Criterion) {
+    // TmpfileEntry is non_exhaustive — use serde to construct from JSON
+    let entries: Vec<argonaut::TmpfileEntry> = (0..20)
+        .map(|i| {
+            serde_json::from_value(serde_json::json!({
+                "Directory": {
+                    "path": format!("/run/svc-{i}"),
+                    "mode": 493,
+                    "uid": 1000,
+                    "gid": 1000
+                }
+            }))
+            .unwrap()
+        })
+        .collect();
+
+    c.bench_function("generate_tmpfile_commands_20", |b| {
+        b.iter(|| argonaut::generate_tmpfile_commands(black_box(&entries)));
+    });
+}
+
+fn resource_limit_commands(c: &mut Criterion) {
+    // ResourceLimits is non_exhaustive — construct via serde
+    let limits: argonaut::ResourceLimits = serde_json::from_str(
+        r#"{"nofile":65536,"address_space":4294967296,"nproc":4096,"core":0}"#,
+    )
+    .unwrap();
+    c.bench_function("resource_limits_prlimit_commands", |b| {
+        b.iter(|| limits.to_prlimit_commands(black_box(12345)));
+    });
+}
+
+fn systemd_unit_generation(c: &mut Criterion) {
+    let services = argonaut::ArgonautInit::default_services(BootMode::Desktop);
+    c.bench_function("generate_systemd_unit_desktop_all", |b| {
+        b.iter(|| {
+            for svc in &services {
+                let _ = argonaut::generate_unit(black_box(svc));
+            }
+        });
+    });
+}
+
 criterion_group!(
     benches,
     boot_sequence,
@@ -268,5 +338,10 @@ criterion_group!(
     safe_command,
     edge_boot,
     stats_collection,
+    wave_execution_plan,
+    api_responses,
+    tmpfile_generation,
+    resource_limit_commands,
+    systemd_unit_generation,
 );
 criterion_main!(benches);

@@ -149,3 +149,17 @@ timestamp,label,benchmark,ns_per_iter,low_ns,high_ns
 2026-04-03T06:17:48Z,post-audit-v0.9,safe_command_display,155.68,155.31,156.07
 2026-04-03T06:17:48Z,post-audit-v0.9,verify_rootfs_integrity,194.20,193.67,194.75
 2026-04-03T06:17:48Z,post-audit-v0.9,stats_desktop,23.89,23.84,23.95
+2026-04-03T07:23:11Z,post-coverage-v0.9,init_new_desktop,4890.00,4874.40,4907.50
+2026-04-03T07:23:11Z,post-coverage-v0.9,init_new_minimal,611.27,608.50,614.38
+2026-04-03T07:23:11Z,post-coverage-v0.9,init_new_edge,1028.20,1023.90,1032.30
+2026-04-03T07:23:11Z,post-coverage-v0.9,plan_shutdown_desktop,2142.50,2134.80,2150.20
+2026-04-03T07:23:11Z,post-coverage-v0.9,plan_shutdown_edge,418.35,416.28,420.39
+2026-04-03T07:23:11Z,post-coverage-v0.9,plan_runlevel_switch,1290.80,1285.80,1296.10
+2026-04-03T07:23:11Z,post-coverage-v0.9,mark_all_steps_complete,5771.00,5740.20,5804.70
+2026-04-03T07:23:11Z,post-coverage-v0.9,safe_command_display,145.59,145.02,146.24
+2026-04-03T07:23:11Z,post-coverage-v0.9,verify_rootfs_integrity,182.45,181.59,183.29
+2026-04-03T07:23:11Z,post-coverage-v0.9,stats_desktop,23.86,23.78,23.95
+2026-04-03T07:23:11Z,post-coverage-v0.9,list_services_desktop,535.26,534.00,536.58
+2026-04-03T07:23:11Z,post-coverage-v0.9,system_status_desktop,565.16,562.48,567.99
+2026-04-03T07:23:11Z,post-coverage-v0.9,system_metrics_desktop,212.86,212.01,213.70
+2026-04-03T07:23:11Z,post-coverage-v0.9,boot_log_desktop,172.01,169.93,174.83

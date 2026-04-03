@@ -3464,3 +3464,1562 @@ fn tmpfile_validate_symlink_target_traversal() {
     let err = super::tmpfiles::validate_tmpfile_entries(&entries).unwrap_err();
     assert!(err.to_string().contains("traversal"));
 }
+
+// =======================================================================
+// Coverage improvement tests
+// =======================================================================
+
+// --- BootStage Display (all variants) ---
+
+#[test]
+fn boot_stage_display_all_variants() {
+    assert_eq!(BootStage::MountFilesystems.to_string(), "mount-filesystems");
+    assert_eq!(
+        BootStage::StartDeviceManager.to_string(),
+        "start-device-manager"
+    );
+    assert_eq!(BootStage::VerifyRootfs.to_string(), "verify-rootfs");
+    assert_eq!(BootStage::StartSecurity.to_string(), "start-security");
+    assert_eq!(
+        BootStage::StartDatabaseServices.to_string(),
+        "start-database-services"
+    );
+    assert_eq!(
+        BootStage::StartAgentRuntime.to_string(),
+        "start-agent-runtime"
+    );
+    assert_eq!(BootStage::StartLlmGateway.to_string(), "start-llm-gateway");
+    assert_eq!(
+        BootStage::StartModelServices.to_string(),
+        "start-model-services"
+    );
+    assert_eq!(BootStage::StartCompositor.to_string(), "start-compositor");
+    assert_eq!(BootStage::StartShell.to_string(), "start-shell");
+    assert_eq!(BootStage::BootComplete.to_string(), "boot-complete");
+}
+
+// --- BootStage ordering ---
+
+#[test]
+fn boot_stage_ord_all() {
+    assert!(BootStage::MountFilesystems < BootStage::StartDeviceManager);
+    assert!(BootStage::StartDeviceManager < BootStage::VerifyRootfs);
+    assert!(BootStage::VerifyRootfs < BootStage::StartSecurity);
+    assert!(BootStage::StartSecurity < BootStage::StartDatabaseServices);
+    assert!(BootStage::StartDatabaseServices < BootStage::StartAgentRuntime);
+    assert!(BootStage::StartAgentRuntime < BootStage::StartLlmGateway);
+    assert!(BootStage::StartLlmGateway < BootStage::StartModelServices);
+    assert!(BootStage::StartModelServices < BootStage::StartCompositor);
+    assert!(BootStage::StartCompositor < BootStage::StartShell);
+    assert!(BootStage::StartShell < BootStage::BootComplete);
+    // PartialOrd consistent with Ord
+    assert_eq!(
+        BootStage::MountFilesystems.partial_cmp(&BootStage::BootComplete),
+        Some(std::cmp::Ordering::Less)
+    );
+}
+
+// --- Runlevel Display (all variants including Edge) ---
+
+#[test]
+fn runlevel_display_edge() {
+    assert_eq!(Runlevel::Edge.to_string(), "edge");
+}
+
+#[test]
+fn runlevel_level_edge() {
+    assert_eq!(Runlevel::Edge.level(), 8);
+}
+
+// --- Runlevel <-> BootMode ---
+
+#[test]
+fn runlevel_to_boot_mode_all() {
+    assert_eq!(Runlevel::Emergency.to_boot_mode(), None);
+    assert_eq!(Runlevel::Rescue.to_boot_mode(), None);
+    assert_eq!(Runlevel::Console.to_boot_mode(), Some(BootMode::Server));
+    assert_eq!(Runlevel::Graphical.to_boot_mode(), Some(BootMode::Desktop));
+    assert_eq!(Runlevel::Container.to_boot_mode(), Some(BootMode::Minimal));
+    assert_eq!(Runlevel::Edge.to_boot_mode(), Some(BootMode::Edge));
+}
+
+#[test]
+fn runlevel_from_boot_mode_all() {
+    assert_eq!(
+        Runlevel::from_boot_mode(BootMode::Server),
+        Runlevel::Console
+    );
+    assert_eq!(
+        Runlevel::from_boot_mode(BootMode::Desktop),
+        Runlevel::Graphical
+    );
+    assert_eq!(
+        Runlevel::from_boot_mode(BootMode::Minimal),
+        Runlevel::Container
+    );
+    assert_eq!(Runlevel::from_boot_mode(BootMode::Edge), Runlevel::Edge);
+    assert_eq!(
+        Runlevel::from_boot_mode(BootMode::Recovery),
+        Runlevel::Emergency
+    );
+}
+
+// --- ShutdownType Display ---
+
+#[test]
+fn shutdown_type_display_all() {
+    assert_eq!(ShutdownType::Poweroff.to_string(), "poweroff");
+    assert_eq!(ShutdownType::Reboot.to_string(), "reboot");
+    assert_eq!(ShutdownType::Halt.to_string(), "halt");
+    assert_eq!(ShutdownType::Kexec.to_string(), "kexec");
+}
+
+// --- ShutdownAction Display ---
+
+#[test]
+fn shutdown_action_variants_constructable() {
+    // Ensure all variants can be constructed and compared
+    let wall = ShutdownAction::WallMessage("test".into());
+    let notify = ShutdownAction::NotifyAgents;
+    let stop = ShutdownAction::StopService {
+        name: "foo".into(),
+        signal: 15,
+    };
+    let force = ShutdownAction::ForceKillService { name: "bar".into() };
+    let sync_fs = ShutdownAction::SyncFilesystems;
+    let umount = ShutdownAction::UnmountFilesystems;
+    let swap = ShutdownAction::SwapOff;
+    let luks = ShutdownAction::CloseLuks;
+    let kernel = ShutdownAction::KernelAction(ShutdownType::Reboot);
+
+    assert_ne!(wall, notify);
+    assert_ne!(stop, force);
+    assert_ne!(sync_fs, umount);
+    assert_ne!(swap, luks);
+    assert_eq!(kernel, ShutdownAction::KernelAction(ShutdownType::Reboot));
+}
+
+// --- ShutdownStepStatus Display (all variants) ---
+
+#[test]
+fn shutdown_step_status_display_all() {
+    assert_eq!(ShutdownStepStatus::Pending.to_string(), "pending");
+    assert_eq!(ShutdownStepStatus::InProgress.to_string(), "in-progress");
+    assert_eq!(ShutdownStepStatus::Complete.to_string(), "complete");
+    assert_eq!(
+        ShutdownStepStatus::Failed("oops".into()).to_string(),
+        "failed: oops"
+    );
+    assert_eq!(ShutdownStepStatus::Skipped.to_string(), "skipped");
+}
+
+// --- ServiceType Display ---
+
+#[test]
+fn service_type_display_all() {
+    assert_eq!(ServiceType::Simple.to_string(), "simple");
+    assert_eq!(ServiceType::Forking.to_string(), "forking");
+    assert_eq!(ServiceType::Oneshot.to_string(), "oneshot");
+}
+
+// --- ExitStatus Display ---
+
+#[test]
+fn exit_status_display_all() {
+    assert_eq!(ExitStatus::Code(0).to_string(), "exit(0)");
+    assert_eq!(ExitStatus::Code(1).to_string(), "exit(1)");
+    assert_eq!(ExitStatus::Signal(9).to_string(), "signal(9)");
+    assert_eq!(ExitStatus::Signal(15).to_string(), "signal(15)");
+    assert_eq!(ExitStatus::Running.to_string(), "running");
+    assert_eq!(ExitStatus::NotStarted.to_string(), "not-started");
+}
+
+// --- ServiceState Display ---
+
+#[test]
+fn service_state_display_all() {
+    assert_eq!(ServiceState::Stopped.to_string(), "stopped");
+    assert_eq!(ServiceState::Starting.to_string(), "starting");
+    assert_eq!(ServiceState::Running.to_string(), "running");
+    assert_eq!(ServiceState::Stopping.to_string(), "stopping");
+    assert_eq!(
+        ServiceState::Failed("boom".into()).to_string(),
+        "failed: boom"
+    );
+}
+
+// --- ServiceState valid_transition comprehensive ---
+
+#[test]
+fn service_state_valid_transition_comprehensive() {
+    // Same state is always OK
+    assert!(ServiceState::Stopped.valid_transition(&ServiceState::Stopped));
+    assert!(ServiceState::Running.valid_transition(&ServiceState::Running));
+
+    // Valid transitions
+    assert!(ServiceState::Stopped.valid_transition(&ServiceState::Starting));
+    assert!(ServiceState::Starting.valid_transition(&ServiceState::Running));
+    assert!(ServiceState::Starting.valid_transition(&ServiceState::Failed("x".into())));
+    assert!(ServiceState::Running.valid_transition(&ServiceState::Stopping));
+    assert!(ServiceState::Running.valid_transition(&ServiceState::Failed("x".into())));
+    assert!(ServiceState::Stopping.valid_transition(&ServiceState::Stopped));
+    assert!(ServiceState::Stopping.valid_transition(&ServiceState::Failed("x".into())));
+    assert!(ServiceState::Failed("x".into()).valid_transition(&ServiceState::Starting));
+    assert!(ServiceState::Failed("x".into()).valid_transition(&ServiceState::Stopped));
+
+    // Invalid transitions
+    assert!(!ServiceState::Stopped.valid_transition(&ServiceState::Running));
+    assert!(!ServiceState::Stopped.valid_transition(&ServiceState::Stopping));
+    assert!(!ServiceState::Starting.valid_transition(&ServiceState::Stopped));
+    assert!(!ServiceState::Starting.valid_transition(&ServiceState::Stopping));
+    assert!(!ServiceState::Running.valid_transition(&ServiceState::Starting));
+    assert!(!ServiceState::Running.valid_transition(&ServiceState::Stopped));
+    assert!(!ServiceState::Stopping.valid_transition(&ServiceState::Starting));
+    assert!(!ServiceState::Stopping.valid_transition(&ServiceState::Running));
+    assert!(!ServiceState::Failed("x".into()).valid_transition(&ServiceState::Running));
+    assert!(!ServiceState::Failed("x".into()).valid_transition(&ServiceState::Stopping));
+}
+
+// --- ServiceEventType Display ---
+
+#[test]
+fn service_event_type_display_all() {
+    assert_eq!(ServiceEventType::Starting.to_string(), "starting");
+    assert_eq!(
+        ServiceEventType::Started { pid: 42 }.to_string(),
+        "started(pid=42)"
+    );
+    assert_eq!(ServiceEventType::HealthCheckPassed.to_string(), "health-ok");
+    assert_eq!(
+        ServiceEventType::HealthCheckFailed { consecutive: 3 }.to_string(),
+        "health-fail(3x)"
+    );
+    assert_eq!(ServiceEventType::ReadyCheckPassed.to_string(), "ready");
+    assert_eq!(ServiceEventType::ReadyCheckFailed.to_string(), "not-ready");
+    assert_eq!(ServiceEventType::Stopping.to_string(), "stopping");
+    assert_eq!(
+        ServiceEventType::Stopped {
+            exit_status: ExitStatus::Code(0)
+        }
+        .to_string(),
+        "stopped(exit(0))"
+    );
+    assert_eq!(
+        ServiceEventType::Restarting { restart_count: 2 }.to_string(),
+        "restarting(#2)"
+    );
+    assert_eq!(
+        ServiceEventType::DependencyWaiting {
+            dependency: "db".into()
+        }
+        .to_string(),
+        "waiting(db)"
+    );
+    assert_eq!(
+        ServiceEventType::DependencyMet {
+            dependency: "db".into()
+        }
+        .to_string(),
+        "dep-met(db)"
+    );
+    assert_eq!(
+        ServiceEventType::TimeoutKilled.to_string(),
+        "timeout-killed"
+    );
+    assert_eq!(
+        ServiceEventType::CrashDetected {
+            exit_status: ExitStatus::Signal(11)
+        }
+        .to_string(),
+        "crash(signal(11))"
+    );
+    assert_eq!(ServiceEventType::Enabled.to_string(), "enabled");
+    assert_eq!(ServiceEventType::Disabled.to_string(), "disabled");
+}
+
+// --- HealthCheckType Display ---
+
+#[test]
+fn health_check_type_display_all() {
+    assert_eq!(
+        HealthCheckType::HttpGet("http://localhost/health".into()).to_string(),
+        "http-get(http://localhost/health)"
+    );
+    assert_eq!(
+        HealthCheckType::TcpConnect("127.0.0.1".into(), 8080).to_string(),
+        "tcp-connect(127.0.0.1:8080)"
+    );
+    assert_eq!(
+        HealthCheckType::Command("/bin/true".into()).to_string(),
+        "command(/bin/true)"
+    );
+    assert_eq!(HealthCheckType::ProcessAlive.to_string(), "process-alive");
+}
+
+// --- SeccompAction Display ---
+
+#[test]
+fn seccomp_action_display_all() {
+    use super::types::SeccompAction;
+    assert_eq!(SeccompAction::Kill.to_string(), "kill");
+    assert_eq!(SeccompAction::Trap.to_string(), "trap");
+    assert_eq!(SeccompAction::Log.to_string(), "log");
+}
+
+// --- SocketType Display ---
+
+#[test]
+fn socket_type_display_all() {
+    use super::types::SocketType;
+    assert_eq!(SocketType::Stream.to_string(), "stream");
+    assert_eq!(SocketType::Datagram.to_string(), "dgram");
+    assert_eq!(SocketType::SeqPacket.to_string(), "seqpacket");
+}
+
+// --- LandlockAccess Display ---
+
+#[test]
+fn landlock_access_display_all() {
+    use super::types::LandlockAccess;
+    assert_eq!(LandlockAccess::NoAccess.to_string(), "none");
+    assert_eq!(LandlockAccess::ReadOnly.to_string(), "ro");
+    assert_eq!(LandlockAccess::ReadWrite.to_string(), "rw");
+}
+
+// --- LinuxCapability Display and as_str ---
+
+#[test]
+fn linux_capability_display_all() {
+    use super::types::LinuxCapability;
+    assert_eq!(
+        LinuxCapability::NetBindService.to_string(),
+        "cap_net_bind_service"
+    );
+    assert_eq!(LinuxCapability::SysAdmin.to_string(), "cap_sys_admin");
+    assert_eq!(LinuxCapability::DacOverride.to_string(), "cap_dac_override");
+    assert_eq!(LinuxCapability::NetRaw.to_string(), "cap_net_raw");
+    assert_eq!(LinuxCapability::SysChroot.to_string(), "cap_sys_chroot");
+    assert_eq!(LinuxCapability::Setuid.to_string(), "cap_setuid");
+    assert_eq!(LinuxCapability::Setgid.to_string(), "cap_setgid");
+    assert_eq!(LinuxCapability::Kill.to_string(), "cap_kill");
+    assert_eq!(LinuxCapability::SysPtrace.to_string(), "cap_sys_ptrace");
+    assert_eq!(LinuxCapability::SysTime.to_string(), "cap_sys_time");
+    assert_eq!(LinuxCapability::NetAdmin.to_string(), "cap_net_admin");
+    assert_eq!(LinuxCapability::Fowner.to_string(), "cap_fowner");
+    assert_eq!(LinuxCapability::Fsetid.to_string(), "cap_fsetid");
+}
+
+// --- CapabilityConfig with empty drop list ---
+
+#[test]
+fn capability_config_empty_drop_list() {
+    use super::types::CapabilityConfig;
+    let config = CapabilityConfig { drop: vec![] };
+    let cmd = config.to_setpriv_command("/usr/bin/test", &["--arg".into()]);
+    assert_eq!(cmd.binary, "setpriv");
+    // Should have --no-new-privs, binary, arg but no --bounding-set
+    assert!(cmd.args.contains(&"--no-new-privs".to_string()));
+    assert!(cmd.args.contains(&"/usr/bin/test".to_string()));
+    assert!(cmd.args.contains(&"--arg".to_string()));
+    assert!(!cmd.args.iter().any(|a| a.starts_with("--bounding-set")));
+}
+
+// --- CapabilityConfig with multiple capabilities ---
+
+#[test]
+fn capability_config_multiple_caps() {
+    use super::types::{CapabilityConfig, LinuxCapability};
+    let config = CapabilityConfig {
+        drop: vec![LinuxCapability::SysAdmin, LinuxCapability::NetRaw],
+    };
+    let cmd = config.to_setpriv_command("/usr/bin/foo", &[]);
+    assert!(
+        cmd.args
+            .iter()
+            .any(|a| a.contains("cap_sys_admin") && a.contains("cap_net_raw"))
+    );
+}
+
+// --- SafeCommand Display ---
+
+#[test]
+fn safe_command_display_with_args() {
+    let cmd = SafeCommand {
+        binary: "echo".into(),
+        args: vec!["hello".into(), "world".into()],
+    };
+    assert_eq!(cmd.to_string(), "echo hello world");
+    assert_eq!(cmd.display(), "echo hello world");
+}
+
+#[test]
+fn safe_command_display_bare() {
+    let cmd = SafeCommand {
+        binary: "sync".into(),
+        args: vec![],
+    };
+    assert_eq!(cmd.to_string(), "sync");
+}
+
+// --- BootMode Display (recovery and edge) ---
+
+#[test]
+fn boot_mode_display_edge_variant() {
+    assert_eq!(BootMode::Edge.to_string(), "edge");
+}
+
+#[test]
+fn boot_mode_display_recovery_variant() {
+    assert_eq!(BootMode::Recovery.to_string(), "recovery");
+}
+
+// --- ServiceTarget::all_services ---
+
+#[test]
+fn service_target_all_services() {
+    let target = ServiceTarget {
+        name: "test".into(),
+        description: "test target".into(),
+        requires: vec!["a".into(), "b".into()],
+        wants: vec!["c".into()],
+        active_in: vec![Runlevel::Console],
+    };
+    let all = target.all_services();
+    assert_eq!(all.len(), 3);
+    assert!(all.contains(&"a"));
+    assert!(all.contains(&"b"));
+    assert!(all.contains(&"c"));
+}
+
+#[test]
+fn service_target_is_active_in_edge() {
+    let targets = ServiceTarget::defaults();
+    let edge = targets.iter().find(|t| t.name == "edge").unwrap();
+    assert!(edge.is_active_in(Runlevel::Edge));
+    assert!(!edge.is_active_in(Runlevel::Console));
+    assert!(!edge.is_active_in(Runlevel::Emergency));
+}
+
+// --- ProcessSpec::from_service ---
+
+#[test]
+fn process_spec_from_service_fields() {
+    let def = dummy_service("test-svc", vec![]);
+    let spec = ProcessSpec::from_service(&def);
+    assert_eq!(spec.binary, PathBuf::from("/usr/bin/test-svc"));
+    assert!(spec.args.is_empty());
+    assert!(
+        spec.stdout_log
+            .unwrap()
+            .to_string_lossy()
+            .contains("test-svc.log")
+    );
+    assert!(
+        spec.stderr_log
+            .unwrap()
+            .to_string_lossy()
+            .contains("test-svc.err")
+    );
+    assert!(spec.uid.is_none());
+    assert!(spec.gid.is_none());
+    assert!(spec.working_dir.is_none());
+}
+
+// --- LogConfig ---
+
+#[test]
+fn log_config_new_min_files() {
+    use super::types::LogConfig;
+    // max_files of 0 should be clamped to 1
+    let config = LogConfig::new(1024, 0);
+    assert_eq!(config.max_files, 1);
+    assert_eq!(config.max_size_bytes, 1024);
+}
+
+#[test]
+fn log_config_default_values() {
+    use super::types::LogConfig;
+    let config = LogConfig::default();
+    assert_eq!(config.max_size_bytes, 10 * 1024 * 1024);
+    assert_eq!(config.max_files, 5);
+}
+
+// --- EdgeBootConfig default ---
+
+#[test]
+fn edge_boot_config_default() {
+    let config = EdgeBootConfig::default();
+    assert!(config.readonly_rootfs);
+    assert!(config.luks_enabled);
+    assert!(config.tpm_attestation);
+    assert_eq!(config.max_boot_time_ms, 3000);
+    assert_eq!(config.pcr_bindings, "7+14");
+}
+
+// --- EmergencyShellConfig default ---
+
+#[test]
+fn emergency_shell_config_default() {
+    let config = EmergencyShellConfig::default();
+    assert_eq!(config.shell_path, PathBuf::from("/usr/bin/agnoshi"));
+    assert!(config.environment.contains_key("HOME"));
+    assert!(config.environment.contains_key("TERM"));
+    assert!(config.environment.contains_key("PATH"));
+    assert!(config.environment.contains_key("SHELL"));
+    assert!(config.banner.contains("Emergency Shell"));
+    assert!(!config.require_auth);
+    assert!(config.auth_password_hash.is_none());
+}
+
+// --- RestartConfig ---
+
+#[test]
+fn restart_config_backoff_with_zero_base() {
+    let config = RestartConfig {
+        max_restarts: 5,
+        base_delay_ms: 0,
+        max_delay_ms: 0,
+    };
+    // Both zero should be clamped to 100
+    let delay = config.backoff_delay(0);
+    assert_eq!(delay, 100);
+}
+
+#[test]
+fn restart_config_limit_exceeded_zero_means_infinite() {
+    let config = RestartConfig {
+        max_restarts: 0,
+        base_delay_ms: 1000,
+        max_delay_ms: 30_000,
+    };
+    // max_restarts=0 means never give up
+    assert!(!config.limit_exceeded(100));
+    assert!(!config.limit_exceeded(u32::MAX));
+}
+
+// --- ResourceLimits ---
+
+#[test]
+fn resource_limits_is_empty() {
+    use super::types::ResourceLimits;
+    let limits = ResourceLimits {
+        nofile: None,
+        address_space: None,
+        nproc: None,
+        core: None,
+    };
+    assert!(limits.is_empty());
+
+    let limits2 = ResourceLimits {
+        nofile: Some(1024),
+        address_space: None,
+        nproc: None,
+        core: None,
+    };
+    assert!(!limits2.is_empty());
+}
+
+#[test]
+fn resource_limits_to_prlimit_all_fields() {
+    use super::types::ResourceLimits;
+    let limits = ResourceLimits {
+        nofile: Some(1024),
+        address_space: Some(4096),
+        nproc: Some(64),
+        core: Some(0),
+    };
+    let cmds = limits.to_prlimit_commands(100);
+    assert_eq!(cmds.len(), 4);
+    assert!(cmds[0].args.iter().any(|a| a.contains("--nofile=")));
+    assert!(cmds[1].args.iter().any(|a| a.contains("--as=")));
+    assert!(cmds[2].args.iter().any(|a| a.contains("--nproc=")));
+    assert!(cmds[3].args.iter().any(|a| a.contains("--core=")));
+}
+
+#[test]
+fn resource_limits_to_prlimit_empty() {
+    use super::types::ResourceLimits;
+    let limits = ResourceLimits {
+        nofile: None,
+        address_space: None,
+        nproc: None,
+        core: None,
+    };
+    assert!(limits.to_prlimit_commands(1).is_empty());
+}
+
+// --- CrashAction ---
+
+#[test]
+fn crash_action_constructable() {
+    let restart = CrashAction::Restart { delay_ms: 1000 };
+    let ignore = CrashAction::Ignore;
+    let give_up = CrashAction::GiveUp {
+        reason: "too many".into(),
+    };
+    assert_ne!(restart, ignore);
+    assert_ne!(ignore, give_up);
+}
+
+// --- HealthTracker ---
+
+#[test]
+fn health_tracker_record_and_reset() {
+    use super::types::HealthTracker;
+    let mut tracker = HealthTracker::new();
+
+    // Passing check resets
+    assert!(!tracker.record("svc", true, 3));
+    assert_eq!(tracker.failure_count("svc"), 0);
+
+    // Failing checks accumulate
+    assert!(!tracker.record("svc", false, 3));
+    assert_eq!(tracker.failure_count("svc"), 1);
+    assert!(!tracker.record("svc", false, 3));
+    assert_eq!(tracker.failure_count("svc"), 2);
+    assert!(tracker.record("svc", false, 3)); // hits threshold
+    assert_eq!(tracker.failure_count("svc"), 3);
+
+    // Reset clears
+    tracker.reset("svc");
+    assert_eq!(tracker.failure_count("svc"), 0);
+}
+
+#[test]
+fn health_tracker_pass_resets_failures() {
+    use super::types::HealthTracker;
+    let mut tracker = HealthTracker::new();
+    let _ = tracker.record("svc", false, 3);
+    let _ = tracker.record("svc", false, 3);
+    // Now pass — should reset
+    let _ = tracker.record("svc", true, 3);
+    assert_eq!(tracker.failure_count("svc"), 0);
+    // Next failure starts from 0 again
+    assert!(!tracker.record("svc", false, 3));
+    assert_eq!(tracker.failure_count("svc"), 1);
+}
+
+#[test]
+fn health_tracker_unknown_service() {
+    use super::types::HealthTracker;
+    let tracker = HealthTracker::new();
+    assert_eq!(tracker.failure_count("nonexistent"), 0);
+}
+
+// --- HealthHistory iter with wrapping ---
+
+#[test]
+fn health_history_iter_chronological_after_wrap() {
+    use super::health::HealthHistory;
+    use super::types::HealthCheckResult;
+
+    let mut h = HealthHistory::new(3);
+    // Push 5 items into a capacity-3 buffer
+    for i in 0..5u64 {
+        h.record(
+            HealthCheckResult {
+                service: "svc".into(),
+                check_type: "test".into(),
+                passed: true,
+                latency_ms: i,
+                message: None,
+                checked_at: Utc::now(),
+            },
+            3,
+        );
+    }
+    assert_eq!(h.len(), 3);
+    assert_eq!(h.total_checks(), 5);
+
+    // Iter should return items in chronological order (latency 2, 3, 4)
+    let latencies: Vec<u64> = h.iter().map(|r| r.latency_ms).collect();
+    assert_eq!(latencies, vec![2, 3, 4]);
+}
+
+#[test]
+fn health_history_latest_after_wrap() {
+    use super::health::HealthHistory;
+    use super::types::HealthCheckResult;
+
+    let mut h = HealthHistory::new(2);
+    for i in 0..4u64 {
+        h.record(
+            HealthCheckResult {
+                service: "svc".into(),
+                check_type: "test".into(),
+                passed: i % 2 == 0,
+                latency_ms: i,
+                message: None,
+                checked_at: Utc::now(),
+            },
+            3,
+        );
+    }
+    // Latest should be the last pushed (latency 3)
+    let latest = h.latest().unwrap();
+    assert_eq!(latest.latency_ms, 3);
+    assert!(!latest.passed);
+}
+
+#[test]
+fn health_history_latest_empty() {
+    use super::health::HealthHistory;
+    let h = HealthHistory::new(5);
+    assert!(h.latest().is_none());
+}
+
+#[test]
+fn health_history_iter_not_full() {
+    use super::health::HealthHistory;
+    use super::types::HealthCheckResult;
+
+    let mut h = HealthHistory::new(10);
+    for i in 0..3u64 {
+        h.record(
+            HealthCheckResult {
+                service: "svc".into(),
+                check_type: "test".into(),
+                passed: true,
+                latency_ms: i,
+                message: None,
+                checked_at: Utc::now(),
+            },
+            3,
+        );
+    }
+    let latencies: Vec<u64> = h.iter().map(|r| r.latency_ms).collect();
+    assert_eq!(latencies, vec![0, 1, 2]);
+}
+
+// --- HealthState Display ---
+
+#[test]
+fn health_state_display_all() {
+    use super::health::HealthState;
+    assert_eq!(HealthState::Unknown.to_string(), "unknown");
+    assert_eq!(HealthState::Healthy.to_string(), "healthy");
+    assert_eq!(HealthState::Degraded.to_string(), "degraded");
+    assert_eq!(HealthState::Unhealthy.to_string(), "unhealthy");
+}
+
+// --- edge_boot: verify_rootfs_integrity validation ---
+
+#[test]
+fn verify_rootfs_empty_params() {
+    let err = super::edge_boot::verify_rootfs_integrity("", "/dev/sda2", "a".repeat(64).as_str())
+        .unwrap_err();
+    assert!(err.contains("cannot be empty"));
+}
+
+#[test]
+fn verify_rootfs_bad_hash_length() {
+    let err =
+        super::edge_boot::verify_rootfs_integrity("/dev/sda1", "/dev/sda2", "abc").unwrap_err();
+    assert!(err.contains("64 hex"));
+}
+
+#[test]
+fn verify_rootfs_non_hex_hash() {
+    let hash = "g".repeat(64);
+    let err =
+        super::edge_boot::verify_rootfs_integrity("/dev/sda1", "/dev/sda2", &hash).unwrap_err();
+    assert!(err.contains("hex characters"));
+}
+
+#[test]
+fn verify_rootfs_path_traversal() {
+    let hash = "a".repeat(64);
+    let err = super::edge_boot::verify_rootfs_integrity("/dev/../etc/passwd", "/dev/sda2", &hash)
+        .unwrap_err();
+    assert!(err.contains(".."));
+}
+
+#[test]
+fn verify_rootfs_non_dev_path() {
+    let hash = "a".repeat(64);
+    let err =
+        super::edge_boot::verify_rootfs_integrity("/tmp/sda1", "/dev/sda2", &hash).unwrap_err();
+    assert!(err.contains("/dev/"));
+}
+
+#[test]
+fn verify_rootfs_valid() {
+    let hash = "a".repeat(64);
+    let cmds = super::edge_boot::verify_rootfs_integrity("/dev/sda1", "/dev/sda2", &hash).unwrap();
+    assert_eq!(cmds.len(), 2);
+    assert_eq!(cmds[0].binary, "veritysetup");
+    assert_eq!(cmds[1].binary, "mount");
+}
+
+// --- edge_boot: unlock_luks validation ---
+
+#[test]
+fn unlock_luks_empty_mapped_name() {
+    let err = super::edge_boot::unlock_luks("/dev/sda3", "").unwrap_err();
+    assert!(err.contains("mapped name cannot be empty"));
+}
+
+#[test]
+fn unlock_luks_invalid_mapped_name() {
+    let err = super::edge_boot::unlock_luks("/dev/sda3", "foo bar").unwrap_err();
+    assert!(err.contains("invalid characters"));
+}
+
+#[test]
+fn unlock_luks_invalid_device() {
+    let err = super::edge_boot::unlock_luks("/tmp/foo", "data").unwrap_err();
+    assert!(err.contains("/dev/"));
+}
+
+#[test]
+fn unlock_luks_valid() {
+    let cmds = super::edge_boot::unlock_luks("/dev/sda3", "agnos-data").unwrap();
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0].binary, "cryptsetup");
+    assert!(cmds[0].args.contains(&"agnos-data".to_string()));
+}
+
+// --- edge_boot: close_luks ---
+
+#[test]
+fn close_luks_command_structure() {
+    let cmds = super::edge_boot::close_luks("agnos-data");
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0].binary, "cryptsetup");
+    assert!(cmds[0].args.contains(&"close".to_string()));
+    assert!(cmds[0].args.contains(&"agnos-data".to_string()));
+}
+
+// --- edge_boot: configure_readonly_rootfs ---
+
+#[test]
+fn configure_readonly_rootfs_has_mount_commands() {
+    let cmds = configure_readonly_rootfs();
+    assert!(cmds.len() >= 5);
+    // First should remount root as ro
+    assert!(cmds[0].args.contains(&"remount,ro".to_string()));
+    // Others should be tmpfs mounts
+    for cmd in &cmds[1..] {
+        assert!(cmd.args.contains(&"tmpfs".to_string()));
+    }
+}
+
+// --- edge_boot: validate_edge_profile ---
+
+#[test]
+fn validate_edge_profile_all_good() {
+    use super::edge_boot::{EdgeBootResult, validate_edge_profile};
+    let result = EdgeBootResult {
+        rootfs_locked: true,
+        verity_verified: true,
+        luks_unlocked: true,
+        boot_time_ms: 500,
+        within_budget: true,
+        errors: vec![],
+    };
+    // Use a very large memory limit so the real system passes
+    let violations = validate_edge_profile(&result, 1_000_000);
+    // Should have no violations (or possibly just a memory one on large machines)
+    assert!(violations.is_empty() || violations.iter().all(|v| v.contains("memory")));
+}
+
+#[test]
+fn validate_edge_profile_multiple_violations() {
+    use super::edge_boot::{EdgeBootResult, validate_edge_profile};
+    let result = EdgeBootResult {
+        rootfs_locked: false,
+        verity_verified: false,
+        luks_unlocked: false,
+        boot_time_ms: 5000,
+        within_budget: false,
+        errors: vec!["err1".into(), "err2".into()],
+    };
+    let violations = validate_edge_profile(&result, 1_000_000);
+    assert!(violations.iter().any(|v| v.contains("boot time")));
+    assert!(violations.iter().any(|v| v.contains("rootfs")));
+    assert!(violations.iter().any(|v| v.contains("errors")));
+}
+
+// --- edge_boot: FleetRegistration ---
+
+#[test]
+fn fleet_registration_from_system() {
+    use super::edge_boot::{EdgeBootResult, FleetRegistration};
+    let result = EdgeBootResult {
+        rootfs_locked: true,
+        verity_verified: true,
+        luks_unlocked: false,
+        boot_time_ms: 100,
+        within_budget: true,
+        errors: vec![],
+    };
+    let reg = FleetRegistration::from_system(&result);
+    assert_eq!(reg.boot_mode, "edge");
+    assert!(reg.verity_active);
+    assert!(!reg.luks_active);
+    // machine_id and hostname come from /etc, may be empty in test env
+    // kernel_version comes from /proc/version
+    let json = reg.to_json().unwrap();
+    assert!(json.contains("boot_mode"));
+    assert!(json.contains("edge"));
+}
+
+// --- ArgonautInit: stats with mixed states ---
+
+#[test]
+fn stats_with_mixed_service_states() {
+    let config = minimal_config();
+    let mut init = ArgonautInit::new(config);
+
+    // Set some services to various states
+    let names: Vec<String> = init.services.keys().cloned().collect();
+    if names.len() >= 2 {
+        // Start and run first service
+        init.set_service_state(&names[0], ServiceState::Starting);
+        init.set_service_state(&names[0], ServiceState::Running);
+        init.services.get_mut(&names[0]).unwrap().restart_count = 3;
+
+        // Fail second service
+        init.set_service_state(&names[1], ServiceState::Starting);
+        init.set_service_state(&names[1], ServiceState::Failed("test".into()));
+
+        let stats = init.stats();
+        assert_eq!(stats.services_running, 1);
+        assert_eq!(stats.services_failed, 1);
+        assert!(stats.total_restarts >= 3);
+    }
+}
+
+// --- ArgonautInit: boot_duration_ms ---
+
+#[test]
+fn boot_duration_ms_with_completed_boot() {
+    let config = minimal_config();
+    let mut init = ArgonautInit::new(config);
+
+    // Mark first and last stages complete
+    init.mark_step_complete(BootStage::MountFilesystems);
+    // Skip to BootComplete
+    init.mark_step_complete(BootStage::BootComplete);
+
+    // boot_started and boot_completed should both be set
+    assert!(init.boot_started.is_some());
+    assert!(init.boot_completed.is_some());
+    let dur = init.boot_duration_ms();
+    assert!(dur.is_some());
+    // Duration should be very small since we completed immediately
+    assert!(dur.unwrap() < 5000);
+}
+
+// --- ArgonautInit: should_drop_to_emergency ---
+
+#[test]
+fn should_drop_to_emergency_no_failures() {
+    let config = minimal_config();
+    let init = ArgonautInit::new(config);
+    assert!(!init.should_drop_to_emergency());
+}
+
+#[test]
+fn should_drop_to_emergency_required_failure() {
+    let config = minimal_config();
+    let mut init = ArgonautInit::new(config);
+    // Fail a required step
+    init.mark_step_failed(BootStage::MountFilesystems, "disk failure".into());
+    assert!(init.should_drop_to_emergency());
+}
+
+#[test]
+fn should_drop_to_emergency_optional_failure_only() {
+    let config = minimal_config();
+    let mut init = ArgonautInit::new(config);
+    // Mark a step as not-required and failed
+    if let Some(step) = init.boot_sequence.iter_mut().find(|s| !s.required) {
+        let stage = step.stage;
+        step.required = false;
+        init.mark_step_failed(stage, "non-critical".into());
+        // Should NOT drop for optional failures
+        // (only if no required steps have failed)
+        let has_required_failure = init.failed_steps().iter().any(|s| s.required);
+        if !has_required_failure {
+            assert!(!init.should_drop_to_emergency());
+        }
+    }
+}
+
+// --- ArgonautInit: mark_step_complete / mark_step_failed ---
+
+#[test]
+fn mark_step_complete_unknown_stage() {
+    let mut init = ArgonautInit::new(ArgonautConfig {
+        boot_mode: BootMode::Minimal,
+        ..Default::default()
+    });
+    // StartShell is not in Minimal boot sequence
+    let result = init.mark_step_complete(BootStage::StartShell);
+    assert!(!result);
+}
+
+#[test]
+fn mark_step_failed_unknown_stage() {
+    let mut init = ArgonautInit::new(ArgonautConfig {
+        boot_mode: BootMode::Minimal,
+        ..Default::default()
+    });
+    let result = init.mark_step_failed(BootStage::StartShell, "err".into());
+    assert!(!result);
+}
+
+// --- ArgonautInit: is_boot_complete ---
+
+#[test]
+fn is_boot_complete_fresh() {
+    let init = ArgonautInit::new(minimal_config());
+    assert!(!init.is_boot_complete());
+}
+
+#[test]
+fn is_boot_complete_all_done() {
+    let mut init = ArgonautInit::new(minimal_config());
+    let stages: Vec<BootStage> = init.boot_sequence.iter().map(|s| s.stage).collect();
+    for stage in stages {
+        init.mark_step_complete(stage);
+    }
+    assert!(init.is_boot_complete());
+}
+
+// --- ArgonautInit: current_stage ---
+
+#[test]
+fn current_stage_is_first_pending() {
+    let init = ArgonautInit::new(minimal_config());
+    let current = init.current_stage().unwrap();
+    assert_eq!(current.stage, BootStage::MountFilesystems);
+}
+
+#[test]
+fn current_stage_advances_after_complete() {
+    let mut init = ArgonautInit::new(minimal_config());
+    init.mark_step_complete(BootStage::MountFilesystems);
+    let current = init.current_stage().unwrap();
+    assert_ne!(current.stage, BootStage::MountFilesystems);
+}
+
+// --- ArgonautInit: failed_steps ---
+
+#[test]
+fn failed_steps_empty_initially() {
+    let init = ArgonautInit::new(minimal_config());
+    assert!(init.failed_steps().is_empty());
+}
+
+// --- ArgonautInit: emergency_shell_config ---
+
+#[test]
+fn emergency_shell_config_accessible() {
+    let init = ArgonautInit::new(minimal_config());
+    let config = init.emergency_shell_config();
+    assert!(config.banner.contains("Emergency"));
+}
+
+// --- ArgonautInit: runlevel_boot_mode ---
+
+#[test]
+fn runlevel_boot_mode_mapping() {
+    assert_eq!(
+        ArgonautInit::runlevel_boot_mode(Runlevel::Console),
+        Some(BootMode::Server)
+    );
+    assert_eq!(ArgonautInit::runlevel_boot_mode(Runlevel::Emergency), None);
+    assert_eq!(
+        ArgonautInit::runlevel_boot_mode(Runlevel::Edge),
+        Some(BootMode::Edge)
+    );
+}
+
+// --- ArgonautInit: plan_runlevel_switch ---
+
+#[test]
+fn plan_runlevel_switch_to_rescue() {
+    let config = server_config();
+    let init = ArgonautInit::new(config);
+    let targets = ServiceTarget::defaults();
+    let plan = init.plan_runlevel_switch(Runlevel::Rescue, &targets);
+    assert_eq!(plan.to, Runlevel::Rescue);
+    assert!(plan.drop_to_shell);
+    // Should start basic services (eudev, dbus, syslogd)
+    let basic_target = targets.iter().find(|t| t.name == "basic").unwrap();
+    for svc in &basic_target.requires {
+        assert!(
+            plan.services_to_start.contains(svc),
+            "should start {} for rescue",
+            svc
+        );
+    }
+}
+
+#[test]
+fn plan_runlevel_switch_to_edge() {
+    let config = server_config();
+    let init = ArgonautInit::new(config);
+    let targets = ServiceTarget::defaults();
+    let plan = init.plan_runlevel_switch(Runlevel::Edge, &targets);
+    assert_eq!(plan.to, Runlevel::Edge);
+    assert!(!plan.drop_to_shell);
+    // Edge target requires daimon
+    assert!(plan.services_to_start.contains(&"daimon".to_string()));
+}
+
+#[test]
+fn plan_runlevel_switch_to_container() {
+    let config = desktop_config();
+    let init = ArgonautInit::new(config);
+    let targets = ServiceTarget::defaults();
+    let plan = init.plan_runlevel_switch(Runlevel::Container, &targets);
+    assert_eq!(plan.to, Runlevel::Container);
+    assert!(!plan.drop_to_shell);
+}
+
+// --- ArgonautInit: shutdown plan ---
+
+#[test]
+fn shutdown_plan_poweroff_has_expected_steps() {
+    let config = minimal_config();
+    let init = ArgonautInit::new(config);
+    let plan = init.plan_shutdown(ShutdownType::Poweroff).unwrap();
+    assert_eq!(plan.shutdown_type, ShutdownType::Poweroff);
+    assert!(plan.wall_message.is_some());
+    // Should have at least wall, notify, sync, umount, swapoff, luks, kernel
+    assert!(plan.steps.len() >= 7);
+    // First step should be wall message
+    assert!(matches!(
+        plan.steps[0].action,
+        ShutdownAction::WallMessage(_)
+    ));
+    // Last step should be kernel action
+    assert!(matches!(
+        plan.steps.last().unwrap().action,
+        ShutdownAction::KernelAction(ShutdownType::Poweroff)
+    ));
+}
+
+#[test]
+fn shutdown_plan_reboot_variant() {
+    let config = minimal_config();
+    let init = ArgonautInit::new(config);
+    let plan = init.plan_shutdown(ShutdownType::Reboot).unwrap();
+    assert_eq!(plan.shutdown_type, ShutdownType::Reboot);
+    assert!(matches!(
+        plan.steps.last().unwrap().action,
+        ShutdownAction::KernelAction(ShutdownType::Reboot)
+    ));
+}
+
+// --- ArgonautInit: execute_shutdown with no running services ---
+
+#[test]
+fn execute_shutdown_no_services() {
+    let config = minimal_config();
+    let mut init = ArgonautInit::new(config);
+    let plan = init.plan_shutdown(ShutdownType::Poweroff).unwrap();
+    let result = init.execute_shutdown(plan);
+    // All non-service steps should complete
+    for step in &result.steps {
+        match &step.action {
+            ShutdownAction::SyncFilesystems => {
+                // sync should succeed
+                assert!(
+                    matches!(step.status, ShutdownStepStatus::Complete),
+                    "sync step should complete, got: {:?}",
+                    step.status
+                );
+            }
+            ShutdownAction::StopService { .. } => {
+                // No services running, so no stop steps expected
+            }
+            _ => {
+                // Wall, notify, umount, luks, kernel should all complete
+                assert!(
+                    matches!(
+                        step.status,
+                        ShutdownStepStatus::Complete | ShutdownStepStatus::Failed(_)
+                    ),
+                    "step '{}' unexpected status: {:?}",
+                    step.description,
+                    step.status
+                );
+            }
+        }
+    }
+}
+
+// --- Process: SpawnedProcess::from_forked_pid ---
+
+#[test]
+fn spawned_process_from_forked_pid() {
+    let proc = super::process::SpawnedProcess::from_forked_pid("test-svc", 12345);
+    assert_eq!(proc.service_name, "test-svc");
+    assert_eq!(proc.pid, 12345);
+    assert!(proc.forked);
+    assert!(proc.stdout_log.is_none());
+    assert!(proc.stderr_log.is_none());
+}
+
+#[test]
+fn spawned_process_from_forked_pid_uptime() {
+    let proc = super::process::SpawnedProcess::from_forked_pid("svc", 1);
+    let uptime = proc.uptime();
+    // Just created, should be very small
+    assert!(uptime.as_secs() < 5);
+}
+
+// --- ProcessTable ---
+
+#[test]
+fn process_table_basic_operations() {
+    use super::process::{ProcessTable, SpawnedProcess};
+    let mut table = ProcessTable::new();
+    assert!(table.is_empty());
+    assert_eq!(table.len(), 0);
+    assert!(!table.contains("foo"));
+
+    let proc = SpawnedProcess::from_forked_pid("foo", 999);
+    table.insert(proc);
+    assert!(!table.is_empty());
+    assert_eq!(table.len(), 1);
+    assert!(table.contains("foo"));
+    assert!(table.get("foo").is_some());
+    assert!(table.get("bar").is_none());
+
+    let removed = table.remove("foo");
+    assert!(removed.is_some());
+    assert!(table.is_empty());
+}
+
+#[test]
+fn process_table_iter() {
+    use super::process::{ProcessTable, SpawnedProcess};
+    let mut table = ProcessTable::new();
+    table.insert(SpawnedProcess::from_forked_pid("a", 1));
+    table.insert(SpawnedProcess::from_forked_pid("b", 2));
+
+    let names: Vec<&str> = table.iter().map(|(name, _)| name).collect();
+    assert_eq!(names.len(), 2);
+    assert!(names.contains(&"a"));
+    assert!(names.contains(&"b"));
+}
+
+#[test]
+fn process_table_get_mut() {
+    use super::process::{ProcessTable, SpawnedProcess};
+    let mut table = ProcessTable::new();
+    table.insert(SpawnedProcess::from_forked_pid("svc", 100));
+    let proc = table.get_mut("svc").unwrap();
+    assert_eq!(proc.pid, 100);
+}
+
+// --- SocketActivationConfig ---
+
+#[test]
+fn socket_activation_env_vars() {
+    use super::types::{SocketActivationConfig, SocketSpec, SocketType};
+    let config = SocketActivationConfig {
+        sockets: vec![
+            SocketSpec {
+                address: "0.0.0.0".into(),
+                port: 80,
+                socket_type: SocketType::Stream,
+            },
+            SocketSpec {
+                address: "0.0.0.0".into(),
+                port: 443,
+                socket_type: SocketType::Stream,
+            },
+        ],
+    };
+    let vars = config.env_vars(1234);
+    assert_eq!(vars.len(), 2);
+    assert_eq!(vars[0], ("LISTEN_FDS".into(), "2".into()));
+    assert_eq!(vars[1], ("LISTEN_PID".into(), "1234".into()));
+}
+
+// --- Security module ---
+
+#[test]
+fn seccomp_description_basic() {
+    use super::security::seccomp_description;
+    use super::types::SeccompConfig;
+    let desc = seccomp_description(&SeccompConfig::Basic);
+    assert!(desc.contains("basic") || desc.contains("Basic"));
+}
+
+#[test]
+fn seccomp_description_custom() {
+    use super::security::seccomp_description;
+    use super::types::{SeccompAction, SeccompConfig};
+    let desc = seccomp_description(&SeccompConfig::Custom {
+        allow: vec!["read".into(), "write".into()],
+        deny: vec![("mount".into(), SeccompAction::Kill)],
+    });
+    assert!(desc.contains("allow") || desc.contains("2"));
+}
+
+#[test]
+fn landlock_description_test() {
+    use super::security::landlock_description;
+    use super::types::{LandlockAccess, LandlockConfig, LandlockRule};
+    let config = LandlockConfig {
+        rules: vec![
+            LandlockRule {
+                path: PathBuf::from("/tmp"),
+                access: LandlockAccess::ReadWrite,
+            },
+            LandlockRule {
+                path: PathBuf::from("/etc"),
+                access: LandlockAccess::ReadOnly,
+            },
+        ],
+    };
+    let desc = landlock_description(&config);
+    assert!(desc.contains("/tmp") || desc.contains("2 rule"));
+}
+
+#[test]
+fn verify_emergency_auth_no_auth_required() {
+    use super::security::verify_emergency_auth;
+    let config = EmergencyShellConfig::default();
+    // require_auth is false, should always pass
+    assert!(verify_emergency_auth(&config, "anything"));
+}
+
+#[test]
+fn verify_emergency_auth_with_no_hash_configured() {
+    use super::security::verify_emergency_auth;
+    // require_auth=true but no hash configured => should grant access
+    let config = EmergencyShellConfig {
+        require_auth: true,
+        auth_password_hash: None,
+        ..EmergencyShellConfig::default()
+    };
+    assert!(verify_emergency_auth(&config, "anything"));
+}
+
+#[test]
+fn generate_socket_env_test() {
+    use super::security::generate_socket_env;
+    use super::types::{SocketActivationConfig, SocketSpec, SocketType};
+    let config = SocketActivationConfig {
+        sockets: vec![SocketSpec {
+            address: "127.0.0.1".into(),
+            port: 8080,
+            socket_type: SocketType::Datagram,
+        }],
+    };
+    let vars = generate_socket_env(&config, 42);
+    assert!(vars.iter().any(|(k, _)| k == "LISTEN_FDS"));
+    assert!(vars.iter().any(|(k, _)| k == "LISTEN_PID"));
+}
+
+// --- Health check command execution (safe tests using /usr/bin/true and /usr/bin/false) ---
+
+#[test]
+fn execute_health_check_command_true() {
+    use super::health::execute_health_check;
+    use super::types::{HealthCheck, HealthCheckType};
+    let check = HealthCheck {
+        check_type: HealthCheckType::Command("/usr/bin/true".into()),
+        interval_ms: 1000,
+        timeout_ms: 5000,
+        retries: 1,
+    };
+    let result = execute_health_check("test-svc", &check, None);
+    assert!(result.passed);
+    assert_eq!(result.service, "test-svc");
+}
+
+#[test]
+fn execute_health_check_command_false() {
+    use super::health::execute_health_check;
+    use super::types::{HealthCheck, HealthCheckType};
+    let check = HealthCheck {
+        check_type: HealthCheckType::Command("/usr/bin/false".into()),
+        interval_ms: 1000,
+        timeout_ms: 5000,
+        retries: 1,
+    };
+    let result = execute_health_check("test-svc", &check, None);
+    assert!(!result.passed);
+}
+
+#[test]
+fn execute_health_check_process_alive_self() {
+    use super::health::execute_health_check;
+    use super::types::{HealthCheck, HealthCheckType};
+    let check = HealthCheck {
+        check_type: HealthCheckType::ProcessAlive,
+        interval_ms: 1000,
+        timeout_ms: 5000,
+        retries: 1,
+    };
+    let result = execute_health_check("test-svc", &check, Some(std::process::id()));
+    assert!(result.passed);
+}
+
+#[test]
+fn execute_health_check_process_alive_no_pid() {
+    use super::health::execute_health_check;
+    use super::types::{HealthCheck, HealthCheckType};
+    let check = HealthCheck {
+        check_type: HealthCheckType::ProcessAlive,
+        interval_ms: 1000,
+        timeout_ms: 5000,
+        retries: 1,
+    };
+    let result = execute_health_check("test-svc", &check, None);
+    assert!(!result.passed);
+}
+
+#[test]
+fn execute_health_check_https_rejected() {
+    use super::health::execute_health_check;
+    use super::types::{HealthCheck, HealthCheckType};
+    let check = HealthCheck {
+        check_type: HealthCheckType::HttpGet("https://localhost/health".into()),
+        interval_ms: 1000,
+        timeout_ms: 500,
+        retries: 1,
+    };
+    let result = execute_health_check("test-svc", &check, None);
+    assert!(!result.passed);
+    assert!(result.message.as_ref().unwrap().contains("HTTPS"));
+}
+
+#[test]
+fn execute_health_check_tcp_refused() {
+    use super::health::execute_health_check;
+    use super::types::{HealthCheck, HealthCheckType};
+    let check = HealthCheck {
+        check_type: HealthCheckType::TcpConnect("127.0.0.1".into(), 1),
+        interval_ms: 1000,
+        timeout_ms: 500,
+        retries: 1,
+    };
+    let result = execute_health_check("test-svc", &check, None);
+    assert!(!result.passed);
+}
+
+// --- Ready check (using /usr/bin/true) ---
+
+#[test]
+fn execute_ready_check_passes() {
+    use super::health::execute_ready_check;
+    use super::types::{HealthCheckType, ReadyCheck};
+    let check = ReadyCheck {
+        check_type: HealthCheckType::Command("/usr/bin/true".into()),
+        timeout_ms: 5000,
+        retries: 2,
+        retry_delay_ms: 10,
+    };
+    let result = execute_ready_check("test-svc", &check, None);
+    assert!(result.passed);
+}
+
+#[test]
+fn execute_ready_check_fails_after_retries() {
+    use super::health::execute_ready_check;
+    use super::types::{HealthCheckType, ReadyCheck};
+    let check = ReadyCheck {
+        check_type: HealthCheckType::Command("/usr/bin/false".into()),
+        timeout_ms: 5000,
+        retries: 1,
+        retry_delay_ms: 10,
+    };
+    let result = execute_ready_check("test-svc", &check, None);
+    assert!(!result.passed);
+    assert!(result.message.as_ref().unwrap().contains("retries"));
+}
+
+// --- Serde round-trips ---
+
+#[test]
+fn serde_roundtrip_boot_mode() {
+    for mode in [
+        BootMode::Server,
+        BootMode::Desktop,
+        BootMode::Minimal,
+        BootMode::Edge,
+        BootMode::Recovery,
+    ] {
+        let json = serde_json::to_string(&mode).unwrap();
+        let back: BootMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(mode, back);
+    }
+}
+
+#[test]
+fn serde_roundtrip_runlevel() {
+    for rl in [
+        Runlevel::Emergency,
+        Runlevel::Rescue,
+        Runlevel::Console,
+        Runlevel::Graphical,
+        Runlevel::Container,
+        Runlevel::Edge,
+    ] {
+        let json = serde_json::to_string(&rl).unwrap();
+        let back: Runlevel = serde_json::from_str(&json).unwrap();
+        assert_eq!(rl, back);
+    }
+}
+
+#[test]
+fn serde_roundtrip_shutdown_type() {
+    for st in [
+        ShutdownType::Poweroff,
+        ShutdownType::Reboot,
+        ShutdownType::Halt,
+        ShutdownType::Kexec,
+    ] {
+        let json = serde_json::to_string(&st).unwrap();
+        let back: ShutdownType = serde_json::from_str(&json).unwrap();
+        assert_eq!(st, back);
+    }
+}
+
+#[test]
+fn serde_roundtrip_service_state() {
+    for state in [
+        ServiceState::Stopped,
+        ServiceState::Starting,
+        ServiceState::Running,
+        ServiceState::Stopping,
+        ServiceState::Failed("test err".into()),
+    ] {
+        let json = serde_json::to_string(&state).unwrap();
+        let back: ServiceState = serde_json::from_str(&json).unwrap();
+        assert_eq!(state, back);
+    }
+}
+
+#[test]
+fn serde_roundtrip_argonaut_config() {
+    let config = ArgonautConfig::default();
+    let json = serde_json::to_string(&config).unwrap();
+    let back: ArgonautConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.boot_mode, config.boot_mode);
+    assert_eq!(back.boot_timeout_ms, config.boot_timeout_ms);
+}
+
+// --- to_capability_commands ---
+
+#[test]
+fn to_capability_commands_generates_setpriv() {
+    use super::security::to_capability_commands;
+    use super::types::{CapabilityConfig, LinuxCapability};
+    let config = CapabilityConfig {
+        drop: vec![LinuxCapability::SysAdmin, LinuxCapability::NetRaw],
+    };
+    let cmds = to_capability_commands(&config, "/usr/bin/test", &["--flag".into()]);
+    assert_eq!(cmds.binary, "setpriv");
+    assert!(cmds.args.contains(&"--no-new-privs".to_string()));
+}

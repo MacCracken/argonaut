@@ -18,8 +18,8 @@ audit = ["dep:libro"]
 security = ["dep:agnosys"]
 
 [dependencies]
-agnosys = { version = "0.50", path = "../agnosys", features = ["security"], optional = true }
-libro = { version = "0.91", path = "../libro", optional = true }
+agnosys = { version = "0.50", git = "https://github.com/MacCracken/agnosys", features = ["security"], optional = true }
+libro = { version = "0.92", git = "https://github.com/MacCracken/libro", optional = true }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 nix = { version = "0.31", features = ["signal", "process", "socket", "uio"] }

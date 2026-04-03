@@ -5,6 +5,7 @@ version = 4
 [[package]]
 name = "agnosys"
 version = "0.50.0"
+source = "git+https://github.com/MacCracken/agnosys#f71cd9e50fb07dd1e95092fdfd42b46864705194"
 dependencies = [
  "bitflags",
  "libc",
@@ -474,7 +475,8 @@ checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
 
 [[package]]
 name = "libro"
-version = "0.91.0"
+version = "0.92.0"
+source = "git+https://github.com/MacCracken/libro#491499e846331919490c97ba040c8653f505ade6"
 dependencies = [
  "blake3",
  "chrono",
