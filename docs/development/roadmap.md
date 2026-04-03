@@ -21,15 +21,15 @@ Fixes identified by external research into init system best practices, protocol 
 - [x] Handle `WATCHDOG=1` keepalive messages
 - [x] `SO_PASSCRED` via `enable_credentials()` for sender verification
 - [x] Drain limit on `NotifyListener::drain(limit)` to prevent DoS
-- [ ] Support `RELOADING=1` and `STOPPING=1` lifecycle fields
+- [x] Support `RELOADING=1` and `STOPPING=1` lifecycle fields
 
 ### Integration items
-- [ ] systemd unit generation (for hybrid installs)
-- [ ] agnoshi commands: `service start/stop/restart/status/enable/disable`
-- [ ] MCP tools: `argonaut_services`, `argonaut_status`, `argonaut_boot_log`
-- [ ] Audit logging via libro (service state transitions)
-- [ ] daimon API: `/v1/services` CRUD endpoints backed by argonaut
-- [ ] Integration with nazar (expose `/v1/services` metrics endpoint)
+- [x] systemd unit generation (for hybrid installs)
+- [x] agnoshi commands: `service start/stop/restart/status/enable/disable`
+- [x] MCP tools: `argonaut_services`, `argonaut_status`, `argonaut_boot_log`
+- [x] Audit logging via libro (service state transitions)
+- [x] daimon API: `/v1/services` CRUD endpoints backed by argonaut
+- [x] Integration with nazar (expose `/v1/services` metrics endpoint)
 
 ---
 

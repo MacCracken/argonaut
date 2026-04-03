@@ -64,11 +64,23 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 - `validate_edge_profile` — validates boot time budget, rootfs lockdown, and memory usage via `/proc/meminfo`
 - `FleetRegistration` — builds system identity payload from `/etc/machine-id`, `/etc/hostname`, `/proc` for fleet server registration (JSON serializable)
 
-#### v0.5.0 scope — Live Runlevel Transitions
-- `execute_runlevel_switch` — two-phase execution: drain (stop non-target) then start (dependency-ordered)
-- `RunlevelSwitchResult` — structured result with stopped/started/errors/drop_to_shell
-- `drop_to_emergency_shell` — spawns agnoshi from `EmergencyShellConfig`
-- Emergency shortcircuit in `plan_runlevel_switch` — early return, no wasted computation
+#### v0.7.0 scope — Research-Driven Hardening & Integration
+- `RELOADING=1` and `STOPPING=1` sd_notify lifecycle field support in `NotifyMessage`
+- `systemd.rs` module — `generate_unit()` / `generate_unit_filename()` for hybrid systemd installs
+- `api.rs` module — shared API response types for all consumers:
+  - `ServiceStatus`, `ServiceListResponse`, `SystemStatusResponse`, `BootLogResponse` (agnoshi, MCP, daimon)
+  - `ServiceCreateRequest` — daimon REST API service creation with input validation
+  - `ServiceMetrics`, `SystemMetrics` — nazar metrics scrape endpoint types
+  - `service_status()`, `list_services()`, `system_status()`, `boot_log()`, `system_metrics()`, `create_service_from_request()` methods on `ArgonautInit`
+- `audit.rs` module (feature-gated: `audit`) — libro audit chain integration:
+  - `AuditLog` wrapping `libro::AuditChain` for tamper-proof service event recording
+  - `event_severity()` mapping all `ServiceEventType` variants to libro severity levels
+  - `AuditIntegration` trait on `ArgonautInit` for combined tracing + audit recording
+- `enable_service()` / `disable_service()` — runtime service enable/disable with `Enabled`/`Disabled` event types
+- `enabled` field on `ServiceDefinition` — `start_service` guards on flag, `boot_execution_plan` skips disabled
+- `Default` impl for `RestartPolicy` (defaults to `OnFailure`)
+- Security: systemd unit file injection prevention (newline sanitization, `$` escaping, sorted env vars)
+- Security: `create_service_from_request` rejects `..` traversal names and relative `binary_path`
 
 ### Changed
 - `configure_readonly_rootfs()` returns `Vec<SafeCommand>` (was `Vec<String>` — injection risk)
