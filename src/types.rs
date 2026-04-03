@@ -210,11 +210,12 @@ pub struct BootStep {
 
 /// How the init system should handle a service that exits.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RestartPolicy {
     /// Always restart, regardless of exit code.
     Always,
-    /// Restart only on non-zero exit.
+    /// Restart only on non-zero exit (default).
+    #[default]
     OnFailure,
     /// Never restart; the service is one-shot.
     Never,
@@ -355,6 +356,10 @@ pub struct ServiceDefinition {
     pub health_check: Option<HealthCheck>,
     /// Optional one-shot startup readiness check.
     pub ready_check: Option<ReadyCheck>,
+    /// Whether the service is enabled for automatic startup.
+    /// Disabled services can still be started manually but are
+    /// excluded from boot execution plans.
+    pub enabled: bool,
 }
 
 /// Runtime state of a service.

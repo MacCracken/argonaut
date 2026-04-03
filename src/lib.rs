@@ -17,6 +17,8 @@
 //! - **runlevels**: Shutdown planning and runlevel switching
 //! - **edge_boot**: Read-only rootfs and dm-verity helpers
 
+pub mod api;
+pub mod systemd;
 pub mod types;
 
 mod boot;
@@ -28,11 +30,18 @@ pub mod health;
 pub mod notify;
 pub mod process;
 
+#[cfg(feature = "audit")]
+pub mod audit;
+
 #[cfg(test)]
 mod tests;
 
 // Re-export all public types so external consumers see the same flat API
 // as they did when this was a single argonaut.rs file.
+pub use api::{
+    BootLogResponse, ServiceCreateRequest, ServiceListResponse, ServiceMetrics, ServiceStatus,
+    SystemMetrics, SystemStatusResponse,
+};
 pub use edge_boot::{
     EdgeBootResult, FleetRegistration, close_luks, configure_readonly_rootfs, execute_edge_boot,
     unlock_luks, validate_edge_profile, verify_rootfs_integrity,
@@ -40,6 +49,7 @@ pub use edge_boot::{
 pub use health::{HealthHistory, HealthState, execute_health_check, execute_ready_check};
 pub use notify::{NotifyListener, NotifyMessage, send_notify};
 pub use process::{ProcessTable, SpawnedProcess, run_command, run_command_sequence, spawn_process};
+pub use systemd::{generate_unit, generate_unit_filename};
 pub use types::{
     ArgonautConfig, ArgonautStats, BootMode, BootStage, BootStep, BootStepStatus, CrashAction,
     EdgeBootConfig, EmergencyShellConfig, ExitStatus, HealthCheck, HealthCheckResult,
@@ -48,6 +58,9 @@ pub use types::{
     ServiceDefinition, ServiceEvent, ServiceEventType, ServiceState, ServiceTarget, ShutdownAction,
     ShutdownPlan, ShutdownStep, ShutdownStepStatus, ShutdownType,
 };
+
+#[cfg(feature = "audit")]
+pub use audit::{AuditIntegration, AuditLog, event_severity};
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -263,6 +276,13 @@ impl ArgonautInit {
     /// Returns an error if the service is unknown, dependencies aren't
     /// met, or the process fails to spawn.
     pub fn start_service(&mut self, name: &str) -> Result<u32> {
+        // Check if service is enabled
+        if let Some(svc) = self.services.get(name)
+            && !svc.definition.enabled
+        {
+            bail!("cannot start service '{}': service is disabled", name);
+        }
+
         // Validate the service exists and transition to Starting
         if !self.set_service_state(name, ServiceState::Starting) {
             bail!(

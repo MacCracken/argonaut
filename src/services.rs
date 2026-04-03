@@ -50,6 +50,7 @@ impl super::ArgonautInit {
                     retries: 15,
                     retry_delay_ms: 500,
                 }),
+                enabled: true,
             },
             ServiceDefinition {
                 name: "redis".into(),
@@ -73,6 +74,7 @@ impl super::ArgonautInit {
                     retries: 10,
                     retry_delay_ms: 200,
                 }),
+                enabled: true,
             },
         ]
     }
@@ -111,6 +113,7 @@ impl super::ArgonautInit {
                 retries: 15,
                 retry_delay_ms: 500,
             }),
+            enabled: true,
         }
     }
 
@@ -143,6 +146,7 @@ impl super::ArgonautInit {
                 retries: 3,
             }),
             ready_check: None,
+            enabled: true,
         }
     }
 
@@ -231,6 +235,7 @@ impl super::ArgonautInit {
                     retries: 5,
                     retry_delay_ms: 200,
                 }),
+                enabled: true,
             });
             return services;
         }
@@ -269,6 +274,7 @@ impl super::ArgonautInit {
                 retries: 10,
                 retry_delay_ms: 200,
             }),
+            enabled: true,
         });
 
         if mode == BootMode::Server || mode == BootMode::Desktop {
@@ -294,6 +300,7 @@ impl super::ArgonautInit {
                     retries: 10,
                     retry_delay_ms: 200,
                 }),
+                enabled: true,
             });
             services.push(Self::synapse_service());
         }
@@ -320,6 +327,7 @@ impl super::ArgonautInit {
                     retries: 2,
                 }),
                 ready_check: None,
+                enabled: true,
             });
 
             services.push(ServiceDefinition {
@@ -339,6 +347,7 @@ impl super::ArgonautInit {
                     retries: 3,
                 }),
                 ready_check: None,
+                enabled: true,
             });
         }
 
@@ -536,6 +545,43 @@ impl super::ArgonautInit {
         Ok(order)
     }
 
+    /// Enable a service for automatic startup.
+    ///
+    /// Sets `enabled = true` on the service definition. Does not start
+    /// the service — call [`start_service`] separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the service is not registered.
+    pub fn enable_service(&mut self, name: &str) -> Result<()> {
+        let svc = self
+            .services
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("service '{}' not found", name))?;
+        svc.definition.enabled = true;
+        info!(service = name, "service enabled");
+        Ok(())
+    }
+
+    /// Disable a service from automatic startup.
+    ///
+    /// Sets `enabled = false` on the service definition. Does not stop
+    /// the service if it is currently running — call [`stop_service`]
+    /// separately if needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the service is not registered.
+    pub fn disable_service(&mut self, name: &str) -> Result<()> {
+        let svc = self
+            .services
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("service '{}' not found", name))?;
+        svc.definition.enabled = false;
+        info!(service = name, "service disabled");
+        Ok(())
+    }
+
     /// Record a service event in the audit log.
     pub fn record_event(&self, service: &str, event_type: ServiceEventType) -> ServiceEvent {
         let event = ServiceEvent {
@@ -554,9 +600,15 @@ impl super::ArgonautInit {
 
     /// Build a complete boot execution plan: resolve service order,
     /// create ProcessSpecs, and return the ordered list.
+    ///
+    /// Disabled services are excluded from the plan.
     pub fn boot_execution_plan(&self) -> Result<Vec<(String, ProcessSpec)>> {
-        let definitions: Vec<&ServiceDefinition> =
-            self.services.values().map(|s| &s.definition).collect();
+        let definitions: Vec<&ServiceDefinition> = self
+            .services
+            .values()
+            .filter(|s| s.definition.enabled)
+            .map(|s| &s.definition)
+            .collect();
         let order = Self::resolve_service_order(&definitions)?;
 
         let plan: Vec<(String, ProcessSpec)> = order

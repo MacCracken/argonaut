@@ -24,6 +24,10 @@ pub struct NotifyMessage {
     pub main_pid: Option<u32>,
     /// Whether WATCHDOG=1 was present (service keepalive ping).
     pub watchdog: bool,
+    /// Whether RELOADING=1 was present (service is reloading configuration).
+    pub reloading: bool,
+    /// Whether STOPPING=1 was present (service is beginning shutdown).
+    pub stopping: bool,
     /// All key=value pairs from the message.
     pub fields: HashMap<String, String>,
 }
@@ -44,6 +48,8 @@ impl NotifyMessage {
                     "STATUS" => msg.status = Some(value.to_string()),
                     "MAINPID" => msg.main_pid = value.parse().ok(),
                     "WATCHDOG" => msg.watchdog = value == "1",
+                    "RELOADING" => msg.reloading = value == "1",
+                    "STOPPING" => msg.stopping = value == "1",
                     _ => {}
                 }
             }
@@ -106,6 +112,8 @@ impl NotifyListener {
                     ready = msg.ready,
                     status = ?msg.status,
                     main_pid = ?msg.main_pid,
+                    reloading = msg.reloading,
+                    stopping = msg.stopping,
                     "received notify message"
                 );
                 Ok(Some(msg))
@@ -261,6 +269,43 @@ mod tests {
         }
         let msgs = listener.drain(3);
         assert_eq!(msgs.len(), 3);
+    }
+
+    #[test]
+    fn parse_reloading_message() {
+        let msg = NotifyMessage::parse(b"RELOADING=1\n");
+        assert!(msg.reloading);
+        assert!(!msg.ready);
+        assert!(!msg.stopping);
+    }
+
+    #[test]
+    fn parse_stopping_message() {
+        let msg = NotifyMessage::parse(b"STOPPING=1\n");
+        assert!(msg.stopping);
+        assert!(!msg.ready);
+        assert!(!msg.reloading);
+    }
+
+    #[test]
+    fn parse_reloading_and_stopping_combined() {
+        let msg = NotifyMessage::parse(b"RELOADING=1\nSTATUS=reloading config\n");
+        assert!(msg.reloading);
+        assert!(!msg.stopping);
+        assert_eq!(msg.status.as_deref(), Some("reloading config"));
+    }
+
+    #[test]
+    fn parse_all_lifecycle_fields() {
+        let msg = NotifyMessage::parse(
+            b"READY=1\nWATCHDOG=1\nRELOADING=1\nSTOPPING=1\nSTATUS=all\nMAINPID=99\n",
+        );
+        assert!(msg.ready);
+        assert!(msg.watchdog);
+        assert!(msg.reloading);
+        assert!(msg.stopping);
+        assert_eq!(msg.status.as_deref(), Some("all"));
+        assert_eq!(msg.main_pid, Some(99));
     }
 
     #[test]

@@ -50,6 +50,7 @@ fn dummy_service(name: &str, deps: Vec<&str>) -> ServiceDefinition {
         restart_config: RestartConfig::default(),
         health_check: None,
         ready_check: None,
+        enabled: true,
     }
 }
 
@@ -1301,6 +1302,7 @@ fn process_spec_from_service() {
         restart_config: RestartConfig::default(),
         health_check: None,
         ready_check: None,
+        enabled: true,
     };
     let spec = ProcessSpec::from_service(&def);
     assert_eq!(spec.binary, PathBuf::from("/usr/bin/test"));
@@ -2282,6 +2284,7 @@ fn config_with_service(name: &str, binary: &str, args: Vec<&str>) -> ArgonautCon
             restart_config: RestartConfig::default(),
             health_check: None,
             ready_check: None,
+            enabled: true,
         }],
         ..Default::default()
     }
@@ -2416,6 +2419,7 @@ fn stop_all_services_stops_everything() {
             restart_config: RestartConfig::default(),
             health_check: None,
             ready_check: None,
+            enabled: true,
         });
     }
 
@@ -2679,4 +2683,182 @@ fn edge_config_in_argonaut_config() {
     };
     assert!(config.edge_boot.tpm_attestation);
     assert_eq!(config.edge_boot.max_boot_time_ms, 2000);
+}
+
+// --- API response types ---
+
+#[test]
+fn list_services_returns_all() {
+    let init = ArgonautInit::new(ArgonautConfig {
+        boot_mode: BootMode::Server,
+        ..Default::default()
+    });
+    let list = init.list_services();
+    assert!(list.total > 0);
+    assert_eq!(list.total, list.services.len());
+}
+
+#[test]
+fn list_services_counts_correct() {
+    let init = ArgonautInit::new(minimal_config());
+    let list = init.list_services();
+    // All services start as Stopped
+    assert_eq!(list.stopped, list.total);
+    assert_eq!(list.running, 0);
+    assert_eq!(list.failed, 0);
+}
+
+#[test]
+fn list_services_sorted_by_name() {
+    let init = ArgonautInit::new(ArgonautConfig {
+        boot_mode: BootMode::Server,
+        ..Default::default()
+    });
+    let list = init.list_services();
+    let names: Vec<&str> = list.services.iter().map(|s| s.name.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted);
+}
+
+#[test]
+fn service_status_unknown_returns_none() {
+    let init = ArgonautInit::new(minimal_config());
+    assert!(init.service_status("nonexistent").is_none());
+}
+
+#[test]
+fn service_status_known_service() {
+    let init = ArgonautInit::new(minimal_config());
+    let status = init.service_status("daimon");
+    assert!(status.is_some());
+    let s = status.unwrap();
+    assert_eq!(s.name, "daimon");
+    assert_eq!(s.state, ServiceState::Stopped);
+    assert!(s.enabled);
+}
+
+#[test]
+fn system_status_includes_boot_info() {
+    let init = ArgonautInit::new(minimal_config());
+    let status = init.system_status();
+    assert_eq!(status.boot_mode, BootMode::Minimal);
+    assert!(!status.boot_complete);
+}
+
+#[test]
+fn boot_log_returns_all_steps() {
+    let init = ArgonautInit::new(minimal_config());
+    let log = init.boot_log();
+    assert_eq!(log.boot_mode, BootMode::Minimal);
+    assert_eq!(log.steps.len(), init.boot_sequence.len());
+}
+
+#[test]
+fn system_metrics_per_service() {
+    let init = ArgonautInit::new(minimal_config());
+    let metrics = init.system_metrics();
+    assert_eq!(metrics.service_metrics.len(), init.services.len());
+    assert_eq!(metrics.boot_mode, BootMode::Minimal);
+}
+
+#[test]
+fn create_service_from_request_valid() {
+    use super::api::ServiceCreateRequest;
+    let mut init = ArgonautInit::new(minimal_config());
+    let req = ServiceCreateRequest {
+        name: "test-svc".into(),
+        description: "A test service".into(),
+        binary_path: PathBuf::from("/usr/bin/test"),
+        args: vec![],
+        environment: HashMap::new(),
+        depends_on: vec![],
+        restart_policy: RestartPolicy::Never,
+        restart_config: None,
+        health_check: None,
+        ready_check: None,
+        enabled: true,
+    };
+    let status = init.create_service_from_request(req).unwrap();
+    assert_eq!(status.name, "test-svc");
+    assert_eq!(status.state, ServiceState::Stopped);
+    assert!(init.service_status("test-svc").is_some());
+}
+
+#[test]
+fn create_service_from_request_duplicate_fails() {
+    use super::api::ServiceCreateRequest;
+    let mut init = ArgonautInit::new(minimal_config());
+    let req = ServiceCreateRequest {
+        name: "daimon".into(),
+        description: "Duplicate".into(),
+        binary_path: PathBuf::from("/usr/bin/daimon"),
+        args: vec![],
+        environment: HashMap::new(),
+        depends_on: vec![],
+        restart_policy: RestartPolicy::Never,
+        restart_config: None,
+        health_check: None,
+        ready_check: None,
+        enabled: true,
+    };
+    assert!(init.create_service_from_request(req).is_err());
+}
+
+// --- Enable/Disable ---
+
+#[test]
+fn enable_service_sets_flag() {
+    let mut init = ArgonautInit::new(minimal_config());
+    init.disable_service("daimon").unwrap();
+    assert!(!init.get_service("daimon").unwrap().definition.enabled);
+    init.enable_service("daimon").unwrap();
+    assert!(init.get_service("daimon").unwrap().definition.enabled);
+}
+
+#[test]
+fn disable_service_sets_flag() {
+    let mut init = ArgonautInit::new(minimal_config());
+    init.disable_service("daimon").unwrap();
+    assert!(!init.get_service("daimon").unwrap().definition.enabled);
+}
+
+#[test]
+fn disable_unknown_service_returns_error() {
+    let mut init = ArgonautInit::new(minimal_config());
+    assert!(init.disable_service("nonexistent").is_err());
+}
+
+#[test]
+fn boot_execution_plan_skips_disabled() {
+    let mut init = ArgonautInit::new(minimal_config());
+    let plan_before = init.boot_execution_plan().unwrap();
+    let count_before = plan_before.len();
+    assert!(count_before > 0);
+
+    init.disable_service("daimon").unwrap();
+    let plan_after = init.boot_execution_plan().unwrap();
+    assert_eq!(plan_after.len(), count_before - 1);
+    assert!(!plan_after.iter().any(|(name, _)| name == "daimon"));
+}
+
+// --- systemd unit generation ---
+
+#[test]
+fn systemd_generate_unit_roundtrip() {
+    let svc = dummy_service("test-app", vec![]);
+    let unit = super::systemd::generate_unit(&svc);
+    assert!(unit.contains("[Unit]"));
+    assert!(unit.contains("[Service]"));
+    assert!(unit.contains("[Install]"));
+    assert!(unit.contains("ExecStart=/usr/bin/test-app"));
+}
+
+#[test]
+fn systemd_unit_filename() {
+    let svc = dummy_service("my-service", vec![]);
+    assert_eq!(
+        super::systemd::generate_unit_filename(&svc),
+        "my-service.service"
+    );
 }

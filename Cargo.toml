@@ -12,7 +12,12 @@ keywords = ["init", "service", "boot", "manager"]
 categories = ["os"]
 exclude = [".claude/", ".github/", "docs/", "scripts/"]
 
+[features]
+default = []
+audit = ["dep:libro"]
+
 [dependencies]
+libro = { version = "0.91", path = "../libro", optional = true }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 nix = { version = "0.31", features = ["signal", "process", "socket", "uio"] }

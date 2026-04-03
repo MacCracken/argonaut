@@ -31,6 +31,7 @@ fn make_chain(n: usize) -> Vec<ServiceDefinition> {
             restart_config: RestartConfig::default(),
             health_check: None,
             ready_check: None,
+            enabled: true,
         })
         .collect()
 }
