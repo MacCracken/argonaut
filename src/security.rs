@@ -14,8 +14,8 @@ use std::fmt::Write;
 use tracing::{debug, info, warn};
 
 use crate::types::{
-    CapabilityConfig, EmergencyShellConfig, LandlockAccess, LandlockConfig, SafeCommand,
-    SeccompAction, SeccompConfig, SocketActivationConfig,
+    CapabilityConfig, EmergencyShellConfig, LandlockConfig, SafeCommand, SeccompConfig,
+    SocketActivationConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -63,6 +63,7 @@ pub fn seccomp_description(config: &SeccompConfig) -> String {
 /// Only available with the `security` feature enabled.
 #[cfg(feature = "security")]
 pub fn apply_seccomp(config: &SeccompConfig) -> anyhow::Result<()> {
+    use crate::types::SeccompAction;
     use anyhow::Context;
 
     let filter = match config {
@@ -139,6 +140,7 @@ pub fn landlock_description(config: &LandlockConfig) -> String {
 /// Requires Linux kernel 5.13+. Gracefully degrades if unsupported.
 #[cfg(feature = "security")]
 pub fn apply_landlock(config: &LandlockConfig) -> anyhow::Result<()> {
+    use crate::types::LandlockAccess;
     use anyhow::Context;
 
     if config.rules.is_empty() {
