@@ -97,22 +97,22 @@ impl super::ArgonautInit {
         ]
     }
 
-    /// Return the Synapse LLM management and training service definition.
+    /// Return the ifran LLM inference, training, and fleet management service definition.
     #[must_use]
-    pub fn synapse_service() -> ServiceDefinition {
+    pub fn ifran_service() -> ServiceDefinition {
         ServiceDefinition {
-            name: "synapse".into(),
-            description: "Synapse LLM management and training service".into(),
-            binary_path: PathBuf::from("/usr/lib/synapse/bin/synapse"),
+            name: "ifran".into(),
+            description: "Ifran — local LLM inference, training, and fleet management".into(),
+            binary_path: PathBuf::from("/usr/lib/agnos/ifran"),
             args: vec![
                 "serve".into(),
                 "--config".into(),
-                "/etc/synapse/synapse.toml".into(),
+                "/etc/ifran/ifran.toml".into(),
             ],
             environment: {
                 let mut env = HashMap::new();
-                env.insert("SYNAPSE_DATA_DIR".into(), "/var/lib/synapse".into());
-                env.insert("SYNAPSE_MODEL_DIR".into(), "/var/lib/synapse/models".into());
+                env.insert("IFRAN_DATA_DIR".into(), "/var/lib/ifran".into());
+                env.insert("IFRAN_MODEL_DIR".into(), "/var/lib/ifran/models".into());
                 env
             },
             depends_on: vec!["daimon".into(), "llm-gateway".into()],
@@ -365,7 +365,7 @@ impl super::ArgonautInit {
                 landlock: None,
                 capabilities: None,
             });
-            services.push(Self::synapse_service());
+            services.push(Self::ifran_service());
         }
 
         if mode == BootMode::Desktop {

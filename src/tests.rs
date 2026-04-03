@@ -222,7 +222,7 @@ fn default_services_desktop() {
     let names: Vec<&str> = svcs.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"daimon"));
     assert!(names.contains(&"llm-gateway"));
-    assert!(names.contains(&"synapse"));
+    assert!(names.contains(&"ifran"));
     assert!(names.contains(&"aethersafha"));
     assert!(names.contains(&"agnoshi"));
 }
@@ -857,9 +857,9 @@ fn boot_sequence_minimal_excludes_database_stage() {
 // --- Synapse service ---
 
 #[test]
-fn synapse_service_definition() {
-    let svc = ArgonautInit::synapse_service();
-    assert_eq!(svc.name, "synapse");
+fn ifran_service_definition() {
+    let svc = ArgonautInit::ifran_service();
+    assert_eq!(svc.name, "ifran");
     assert!(svc.depends_on.contains(&"daimon".to_string()));
     assert!(svc.depends_on.contains(&"llm-gateway".to_string()));
     assert!(svc.health_check.is_some());
@@ -867,30 +867,30 @@ fn synapse_service_definition() {
 }
 
 #[test]
-fn server_mode_includes_synapse() {
+fn server_mode_includes_ifran() {
     let services = ArgonautInit::default_services(BootMode::Server);
-    assert!(services.iter().any(|s| s.name == "synapse"));
+    assert!(services.iter().any(|s| s.name == "ifran"));
 }
 
 #[test]
-fn desktop_mode_includes_synapse() {
+fn desktop_mode_includes_ifran() {
     let services = ArgonautInit::default_services(BootMode::Desktop);
-    assert!(services.iter().any(|s| s.name == "synapse"));
+    assert!(services.iter().any(|s| s.name == "ifran"));
 }
 
 #[test]
-fn minimal_mode_excludes_synapse() {
+fn minimal_mode_excludes_ifran() {
     let services = ArgonautInit::default_services(BootMode::Minimal);
-    assert!(!services.iter().any(|s| s.name == "synapse"));
+    assert!(!services.iter().any(|s| s.name == "ifran"));
 }
 
 #[test]
-fn synapse_starts_after_llm_gateway() {
+fn ifran_starts_after_llm_gateway() {
     let services = ArgonautInit::default_services(BootMode::Server);
     let refs: Vec<&ServiceDefinition> = services.iter().collect();
     let order = ArgonautInit::resolve_service_order(&refs).unwrap();
     let gw_pos = order.iter().position(|s| s == "llm-gateway").unwrap();
-    let syn_pos = order.iter().position(|s| s == "synapse").unwrap();
+    let syn_pos = order.iter().position(|s| s == "ifran").unwrap();
     assert!(syn_pos > gw_pos);
 }
 
@@ -921,16 +921,16 @@ fn model_services_stage_after_llm_gateway() {
 }
 
 #[test]
-fn server_service_count_with_synapse() {
+fn server_service_count_with_ifran() {
     let services = ArgonautInit::default_services(BootMode::Server);
-    // postgres, redis, agent-runtime, llm-gateway, synapse = 5
+    // postgres, redis, agent-runtime, llm-gateway, ifran = 5
     assert_eq!(services.len(), 5);
 }
 
 #[test]
-fn desktop_service_count_with_synapse() {
+fn desktop_service_count_with_ifran() {
     let services = ArgonautInit::default_services(BootMode::Desktop);
-    // postgres, redis, agent-runtime, llm-gateway, synapse, aethersafha, agnoshi = 7
+    // postgres, redis, agent-runtime, llm-gateway, ifran, aethersafha, agnoshi = 7
     assert_eq!(services.len(), 7);
 }
 
@@ -1586,7 +1586,7 @@ fn edge_services_no_databases() {
     assert!(!names.contains(&"postgres"));
     assert!(!names.contains(&"redis"));
     assert!(!names.contains(&"llm-gateway"));
-    assert!(!names.contains(&"synapse"));
+    assert!(!names.contains(&"ifran"));
     assert!(!names.contains(&"aethersafha"));
     assert!(!names.contains(&"agnoshi"));
 }
