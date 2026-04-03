@@ -83,15 +83,3 @@ jobs:
             argonaut-${{ github.ref_name }}.tar.gz
             argonaut-${{ github.ref_name }}-vendor.tar.gz
             SHA256SUMS
-
-  publish:
-    name: Publish to crates.io
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish --dry-run
-      - run: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
