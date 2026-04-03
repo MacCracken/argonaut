@@ -91,6 +91,8 @@ pub struct ServiceListResponse {
     pub services: Vec<ServiceStatus>,
     pub total: usize,
     pub running: usize,
+    pub starting: usize,
+    pub stopping: usize,
     pub failed: usize,
     pub stopped: usize,
 }
@@ -286,6 +288,14 @@ impl crate::ArgonautInit {
             .iter()
             .filter(|s| s.state == ServiceState::Running)
             .count();
+        let starting = services
+            .iter()
+            .filter(|s| s.state == ServiceState::Starting)
+            .count();
+        let stopping = services
+            .iter()
+            .filter(|s| s.state == ServiceState::Stopping)
+            .count();
         let failed = services
             .iter()
             .filter(|s| matches!(s.state, ServiceState::Failed(_)))
@@ -300,6 +310,8 @@ impl crate::ArgonautInit {
             services,
             total,
             running,
+            starting,
+            stopping,
             failed,
             stopped,
         }
@@ -411,6 +423,19 @@ impl crate::ArgonautInit {
             bail!(
                 "service name '{}' contains invalid characters (allowed: alphanumeric, -, _, .)",
                 req.name
+            );
+        }
+        if req.name.contains("..") {
+            bail!(
+                "service name '{}' contains path traversal sequence",
+                req.name
+            );
+        }
+        // Validate binary_path is absolute — prevent relative path exploits
+        if !req.binary_path.is_absolute() {
+            bail!(
+                "binary_path must be absolute, got '{}'",
+                req.binary_path.display()
             );
         }
         if self.services.contains_key(&req.name) {

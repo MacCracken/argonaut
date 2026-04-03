@@ -43,7 +43,7 @@ pub fn generate_unit(svc: &ServiceDefinition) -> String {
 
     // [Unit] section
     let _ = writeln!(out, "[Unit]");
-    let _ = writeln!(out, "Description={}", svc.description);
+    let _ = writeln!(out, "Description={}", sanitize_unit_value(&svc.description));
 
     if !svc.depends_on.is_empty() {
         let deps: Vec<String> = svc
@@ -62,9 +62,11 @@ pub fn generate_unit(svc: &ServiceDefinition) -> String {
     let _ = writeln!(out, "[Service]");
     let _ = writeln!(out, "Type=notify");
 
-    // ExecStart
+    // ExecStart — quote binary path if it contains spaces
+    let binary = svc.binary_path.display().to_string();
+    let binary_quoted = escape_systemd_value(&binary);
     let exec_start = if svc.args.is_empty() {
-        svc.binary_path.display().to_string()
+        binary_quoted
     } else {
         let args = svc
             .args
@@ -72,13 +74,17 @@ pub fn generate_unit(svc: &ServiceDefinition) -> String {
             .map(|a| escape_systemd_value(a))
             .collect::<Vec<_>>()
             .join(" ");
-        format!("{} {}", svc.binary_path.display(), args)
+        format!("{binary_quoted} {args}")
     };
     let _ = writeln!(out, "ExecStart={exec_start}");
 
-    // Environment
-    for (key, value) in &svc.environment {
-        let _ = writeln!(out, "Environment=\"{key}={value}\"");
+    // Environment — sorted for deterministic output
+    let mut env_pairs: Vec<(&String, &String)> = svc.environment.iter().collect();
+    env_pairs.sort_by_key(|(k, _)| *k);
+    for (key, value) in env_pairs {
+        let safe_key = sanitize_unit_value(key);
+        let safe_value = sanitize_unit_value(value);
+        let _ = writeln!(out, "Environment=\"{safe_key}={safe_value}\"");
     }
 
     // Restart policy
@@ -129,15 +135,32 @@ pub fn generate_unit_filename(svc: &ServiceDefinition) -> String {
     format!("{}.service", svc.name)
 }
 
-/// Escape a value for systemd unit files.
+/// Sanitize a string for use in a systemd unit file value.
+///
+/// Strips newlines and carriage returns to prevent unit file injection.
+/// Escapes `$` to `$$` to prevent systemd variable expansion.
+#[must_use]
+fn sanitize_unit_value(value: &str) -> String {
+    value
+        .replace('\n', " ")
+        .replace('\r', "")
+        .replace('$', "$$")
+}
+
+/// Escape a value for systemd ExecStart arguments.
 ///
 /// Wraps in quotes if the value contains spaces or special characters.
+/// Also sanitizes against injection and variable expansion.
 #[must_use]
 fn escape_systemd_value(value: &str) -> String {
-    if value.contains(' ') || value.contains('"') || value.contains('\\') {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    let sanitized = sanitize_unit_value(value);
+    if sanitized.contains(' ') || sanitized.contains('"') || sanitized.contains('\\') {
+        format!(
+            "\"{}\"",
+            sanitized.replace('\\', "\\\\").replace('"', "\\\"")
+        )
     } else {
-        value.to_string()
+        sanitized
     }
 }
 

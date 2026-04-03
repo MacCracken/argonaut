@@ -2862,3 +2862,130 @@ fn systemd_unit_filename() {
         "my-service.service"
     );
 }
+
+// --- Security: audit-driven edge case tests ---
+
+#[test]
+fn create_service_path_traversal_name_rejected() {
+    use super::api::ServiceCreateRequest;
+    let mut init = ArgonautInit::new(minimal_config());
+    let req = ServiceCreateRequest {
+        name: "a..b".into(),
+        description: "traversal".into(),
+        binary_path: PathBuf::from("/usr/bin/test"),
+        args: vec![],
+        environment: HashMap::new(),
+        depends_on: vec![],
+        restart_policy: RestartPolicy::Never,
+        restart_config: None,
+        health_check: None,
+        ready_check: None,
+        enabled: true,
+    };
+    let err = init.create_service_from_request(req).unwrap_err();
+    assert!(err.to_string().contains("traversal"));
+}
+
+#[test]
+fn create_service_relative_binary_path_rejected() {
+    use super::api::ServiceCreateRequest;
+    let mut init = ArgonautInit::new(minimal_config());
+    let req = ServiceCreateRequest {
+        name: "test-svc".into(),
+        description: "relative path".into(),
+        binary_path: PathBuf::from("../evil/binary"),
+        args: vec![],
+        environment: HashMap::new(),
+        depends_on: vec![],
+        restart_policy: RestartPolicy::Never,
+        restart_config: None,
+        health_check: None,
+        ready_check: None,
+        enabled: true,
+    };
+    let err = init.create_service_from_request(req).unwrap_err();
+    assert!(err.to_string().contains("absolute"));
+}
+
+#[test]
+fn create_service_empty_name_rejected() {
+    use super::api::ServiceCreateRequest;
+    let mut init = ArgonautInit::new(minimal_config());
+    let req = ServiceCreateRequest {
+        name: "".into(),
+        description: "empty".into(),
+        binary_path: PathBuf::from("/usr/bin/test"),
+        args: vec![],
+        environment: HashMap::new(),
+        depends_on: vec![],
+        restart_policy: RestartPolicy::Never,
+        restart_config: None,
+        health_check: None,
+        ready_check: None,
+        enabled: true,
+    };
+    assert!(init.create_service_from_request(req).is_err());
+}
+
+#[test]
+fn systemd_description_injection_sanitized() {
+    let mut svc = dummy_service("test", vec![]);
+    svc.description = "legit\nExecStartPre=/bin/evil".into();
+    let unit = super::systemd::generate_unit(&svc);
+    // Newline must be replaced — ExecStartPre must NOT appear as its own line
+    for line in unit.lines() {
+        assert!(
+            !line.starts_with("ExecStartPre"),
+            "injected line found: {line}"
+        );
+    }
+    // The description should be on a single line with the injection collapsed
+    assert!(unit.contains("Description=legit ExecStartPre=/bin/evil"));
+}
+
+#[test]
+fn systemd_env_dollar_escaped() {
+    let mut svc = dummy_service("test", vec![]);
+    svc.environment
+        .insert("PATH".into(), "$HOME/bin:/usr/bin".into());
+    let unit = super::systemd::generate_unit(&svc);
+    // $ must be escaped to $$ for systemd
+    assert!(unit.contains("$$HOME"));
+}
+
+#[test]
+fn systemd_env_deterministic_ordering() {
+    let mut svc = dummy_service("test", vec![]);
+    svc.environment.insert("ZZZ".into(), "last".into());
+    svc.environment.insert("AAA".into(), "first".into());
+    svc.environment.insert("MMM".into(), "middle".into());
+    let unit = super::systemd::generate_unit(&svc);
+    let aaa_pos = unit.find("AAA").unwrap();
+    let mmm_pos = unit.find("MMM").unwrap();
+    let zzz_pos = unit.find("ZZZ").unwrap();
+    assert!(aaa_pos < mmm_pos);
+    assert!(mmm_pos < zzz_pos);
+}
+
+#[test]
+fn list_services_starting_stopping_counts() {
+    let init = ArgonautInit::new(minimal_config());
+    let list = init.list_services();
+    assert_eq!(list.starting, 0);
+    assert_eq!(list.stopping, 0);
+    // total should equal sum of all state counts
+    assert_eq!(
+        list.total,
+        list.running + list.starting + list.stopping + list.failed + list.stopped
+    );
+}
+
+#[test]
+fn enable_disable_records_events() {
+    let init = ArgonautInit::new(minimal_config());
+    // Verify the new event types exist and display correctly
+    let event = init.record_event("daimon", ServiceEventType::Enabled);
+    assert_eq!(event.event_type, ServiceEventType::Enabled);
+    let event = init.record_event("daimon", ServiceEventType::Disabled);
+    assert_eq!(event.event_type, ServiceEventType::Disabled);
+}

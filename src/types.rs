@@ -689,6 +689,8 @@ pub enum ServiceEventType {
     DependencyMet { dependency: String },
     TimeoutKilled,
     CrashDetected { exit_status: ExitStatus },
+    Enabled,
+    Disabled,
 }
 
 impl fmt::Display for ServiceEventType {
@@ -709,6 +711,8 @@ impl fmt::Display for ServiceEventType {
             Self::DependencyMet { dependency } => write!(f, "dep-met({})", dependency),
             Self::TimeoutKilled => write!(f, "timeout-killed"),
             Self::CrashDetected { exit_status } => write!(f, "crash({})", exit_status),
+            Self::Enabled => write!(f, "enabled"),
+            Self::Disabled => write!(f, "disabled"),
         }
     }
 }

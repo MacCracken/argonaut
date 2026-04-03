@@ -142,7 +142,9 @@ pub fn event_severity(event_type: &ServiceEventType) -> EventSeverity {
         | ServiceEventType::Started { .. }
         | ServiceEventType::HealthCheckPassed
         | ServiceEventType::ReadyCheckPassed
-        | ServiceEventType::DependencyMet { .. } => EventSeverity::Info,
+        | ServiceEventType::DependencyMet { .. }
+        | ServiceEventType::Enabled
+        | ServiceEventType::Disabled => EventSeverity::Info,
 
         ServiceEventType::Stopped { exit_status } => match exit_status {
             ExitStatus::Code(0) => EventSeverity::Info,

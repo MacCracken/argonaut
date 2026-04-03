@@ -560,6 +560,7 @@ impl super::ArgonautInit {
             .ok_or_else(|| anyhow::anyhow!("service '{}' not found", name))?;
         svc.definition.enabled = true;
         info!(service = name, "service enabled");
+        self.record_event(name, ServiceEventType::Enabled);
         Ok(())
     }
 
@@ -579,6 +580,7 @@ impl super::ArgonautInit {
             .ok_or_else(|| anyhow::anyhow!("service '{}' not found", name))?;
         svc.definition.enabled = false;
         info!(service = name, "service disabled");
+        self.record_event(name, ServiceEventType::Disabled);
         Ok(())
     }
 
