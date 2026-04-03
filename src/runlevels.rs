@@ -255,7 +255,10 @@ impl super::ArgonautInit {
                 .collect();
             match Self::resolve_service_order(&defs) {
                 Ok(order) => order,
-                Err(_) => plan.services_to_start.clone(), // fallback to plan order
+                Err(e) => {
+                    warn!(error = %e, "dependency resolution failed during runlevel switch, using plan order");
+                    plan.services_to_start.clone()
+                }
             }
         };
 

@@ -377,12 +377,15 @@ pub fn execute_edge_boot(
 /// Validate that the system meets the minimal edge boot profile.
 ///
 /// Checks:
-/// - Total memory usage is under the given limit
+/// - Total system memory is under the given hardware limit
 /// - Boot time is within budget
 ///
 /// Returns a list of violations (empty = pass).
 #[must_use]
-pub fn validate_edge_profile(boot_result: &EdgeBootResult, max_memory_mb: u64) -> Vec<String> {
+pub fn validate_edge_profile(
+    boot_result: &EdgeBootResult,
+    max_total_memory_mb: u64,
+) -> Vec<String> {
     let mut violations = Vec::new();
 
     if !boot_result.within_budget {
@@ -410,14 +413,14 @@ pub fn validate_edge_profile(boot_result: &EdgeBootResult, max_memory_mb: u64) -
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         let mb = kb / 1024;
-        if mb > max_memory_mb {
+        if mb > max_total_memory_mb {
             violations.push(format!(
-                "total memory {mb}MB exceeds limit {max_memory_mb}MB"
+                "total system memory {mb}MB exceeds hardware limit {max_total_memory_mb}MB"
             ));
         }
         debug!(
             total_memory_mb = mb,
-            limit_mb = max_memory_mb,
+            limit_mb = max_total_memory_mb,
             "edge profile memory check"
         );
     }

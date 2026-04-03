@@ -417,6 +417,18 @@ impl super::ArgonautInit {
     /// (state, pid, restart_count, etc.) is preserved.
     pub fn register_service(&mut self, definition: ServiceDefinition) {
         let name = definition.name.clone();
+        // Validate service name — must be alphanumeric, hyphens, underscores only
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            warn!(service = %name, "rejecting service with invalid name characters");
+            return;
+        }
+        if name.is_empty() || name.contains("..") {
+            warn!(service = %name, "rejecting service with empty or traversal name");
+            return;
+        }
         if let Some(existing) = self.services.get_mut(&name) {
             warn!(service = %name, "service already registered — updating definition, preserving state");
             existing.definition = definition;

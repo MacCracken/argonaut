@@ -283,6 +283,8 @@ pub enum HealthCheckType {
     /// TCP connect to host:port.
     TcpConnect(String, u16),
     /// Run a shell command — 0 exit = healthy.
+    /// The command string is split on whitespace. For arguments containing
+    /// spaces, use a wrapper script instead.
     Command(String),
     /// Simply check if the PID is still alive.
     ProcessAlive,

@@ -313,8 +313,12 @@ impl ArgonautInit {
                         }
                         // Kill the process since it never became ready
                         if let Some(mut proc) = self.processes.remove(name) {
-                            let _ = proc.kill();
-                            let _ = proc.wait();
+                            if let Err(e) = proc.kill() {
+                                warn!(service = name, error = %e, "failed to kill process after ready check failure");
+                            }
+                            if let Err(e) = proc.wait() {
+                                warn!(service = name, error = %e, "failed to wait for process after ready check failure");
+                            }
                         }
                         bail!(
                             "service '{}' failed ready check after {} retries",
@@ -422,11 +426,7 @@ impl ArgonautInit {
         let mut results = Vec::new();
 
         for (name, code) in exited {
-            let exit_status = if code == 0 {
-                ExitStatus::Code(0)
-            } else {
-                ExitStatus::Code(code)
-            };
+            let exit_status = ExitStatus::Code(code);
 
             // Update state
             if let Some(svc) = self.services.get_mut(&name) {
@@ -530,7 +530,13 @@ impl ArgonautInit {
                         let elapsed = Utc::now()
                             .signed_duration_since(last_pass)
                             .to_std()
-                            .unwrap_or(Duration::ZERO);
+                            .unwrap_or_else(|_| {
+                                warn!(
+                                    service = name,
+                                    "negative duration in watchdog check — possible clock skew"
+                                );
+                                Duration::ZERO
+                            });
                         elapsed > watchdog
                     }
                 };

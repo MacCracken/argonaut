@@ -329,6 +329,8 @@ pub fn run_command(cmd: &SafeCommand) -> Result<i32> {
         .spawn()
         .with_context(|| format!("failed to execute command: {}", cmd))?;
 
+    // Note: stderr is read best-effort after wait(). The pipe buffer
+    // may be incomplete if the process wrote more than the OS buffer size.
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for command: {}", cmd))?;
@@ -401,11 +403,15 @@ impl ProcessTable {
     /// replaced (caller should have stopped it first).
     pub fn insert(&mut self, process: SpawnedProcess) {
         let name = process.service_name.clone();
-        if self.processes.contains_key(&name) {
+        if let Some(mut old) = self.processes.remove(&name) {
             warn!(
                 service = %name,
-                "replacing existing process table entry"
+                old_pid = old.pid,
+                new_pid = process.pid,
+                "replacing process table entry — killing old process"
             );
+            let _ = old.kill();
+            let _ = old.wait();
         }
         self.processes.insert(name, process);
     }

@@ -150,6 +150,15 @@ fn execute_http_get(url: &str, timeout: Duration) -> (bool, Option<String>) {
     use std::io::{BufRead, BufReader, Write};
 
     // Parse URL: http://host:port/path
+    if url.starts_with("https://") {
+        return (
+            false,
+            Some(
+                "HTTPS health checks are not supported — use http://, TCP, or command checks"
+                    .to_string(),
+            ),
+        );
+    }
     let url = url.strip_prefix("http://").unwrap_or(url);
     let (host_port, path) = match url.find('/') {
         Some(i) => (&url[..i], &url[i..]),
