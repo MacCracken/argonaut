@@ -1,22 +1,40 @@
+# Rust build artifacts
 /target/
 **/*.rs.bk
 Cargo.lock
 !Cargo.lock
+
+# Rust-old (preserved source only — no build artifacts)
+rust-old/target/
+rust-old/Cargo.lock
+
+# Cyrius build artifacts
+/build/
+
+# IDE / editor
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Coverage / profiling
 /coverage/
 *.profraw
 *.profdata
 lcov.info
 tarpaulin-report.*
-.claude/
 /target/criterion/
+
+# Secrets
 .env
 .env.*
 *.pem
 *.key
+
+# Claude
+.claude/
