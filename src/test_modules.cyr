@@ -1,0 +1,202 @@
+# test_modules.cyr — Tests for health, notify, security, systemd, tmpfiles, edge
+include "src/test_header.cyr"
+
+fn main() {
+    alloc_init();
+    println("=== Test Suite 3: Health, Notify, Security, Systemd, Tmpfiles, Edge ===");
+
+    # --- Health tracker ---
+    var t = health_tracker_new();
+    assert_eq(health_tracker_record(t, "s1", 1, 3), 0, "pass no restart");
+    assert_eq(health_tracker_count(t, "s1"), 0, "pass count 0");
+    health_tracker_record(t, "s1", 0, 3);
+    assert_eq(health_tracker_count(t, "s1"), 1, "fail count 1");
+    health_tracker_record(t, "s1", 0, 3);
+    assert(health_tracker_record(t, "s1", 0, 3), "3rd fail restart");
+    assert_eq(health_tracker_count(t, "s1"), 3, "fail count 3");
+    health_tracker_record(t, "s1", 1, 3);
+    assert_eq(health_tracker_count(t, "s1"), 0, "pass resets");
+    health_tracker_record(t, "s2", 0, 3);
+    health_tracker_record(t, "s2", 0, 3);
+    health_tracker_reset(t, "s2");
+    assert_eq(health_tracker_count(t, "s2"), 0, "manual reset");
+
+    # Independent services
+    var t2 = health_tracker_new();
+    health_tracker_record(t2, "a", 0, 2);
+    health_tracker_record(t2, "b", 0, 2);
+    assert(health_tracker_record(t2, "a", 0, 2), "a threshold");
+    assert(1 - health_tracker_record(t2, "b", 1, 2), "b pass ok");
+
+    # --- Health history ---
+    var hh = health_history_new(10);
+    assert_eq(health_history_state(hh), HS_UNKNOWN, "hh unknown");
+    assert_eq(health_history_len(hh), 0, "hh empty");
+
+    var r_pass = alloc(48);
+    store64(r_pass + 16, 1);
+    health_history_record(hh, r_pass, 3);
+    assert_eq(health_history_state(hh), HS_HEALTHY, "hh healthy");
+    assert_eq(health_history_failures(hh), 0, "hh 0 fail");
+
+    var r_fail = alloc(48);
+    store64(r_fail + 16, 0);
+    health_history_record(hh, r_fail, 3);
+    assert_eq(health_history_state(hh), HS_DEGRADED, "hh degraded");
+    health_history_record(hh, r_fail, 3);
+    health_history_record(hh, r_fail, 3);
+    assert_eq(health_history_state(hh), HS_UNHEALTHY, "hh unhealthy");
+
+    health_history_record(hh, r_pass, 3);
+    assert_eq(health_history_state(hh), HS_HEALTHY, "hh reset healthy");
+
+    var hh2 = health_history_new(3);
+    for (var i = 0; i < 5; i = i + 1) { health_history_record(hh2, r_pass, 3); }
+    assert_eq(health_history_len(hh2), 3, "ring capped");
+    assert_eq(health_history_total(hh2), 5, "total 5");
+
+    health_history_reset(hh);
+    assert_eq(health_history_state(hh), HS_UNKNOWN, "reset unknown");
+    assert_eq(health_history_len(hh), 0, "reset empty");
+
+    # --- Health state display ---
+    assert(streq(health_state_str(HS_UNKNOWN), "unknown"), "hs unknown");
+    assert(streq(health_state_str(HS_HEALTHY), "healthy"), "hs healthy");
+    assert(streq(health_state_str(HS_DEGRADED), "degraded"), "hs degraded");
+    assert(streq(health_state_str(HS_UNHEALTHY), "unhealthy"), "hs unhealthy");
+
+    # --- Notify parsing ---
+    var d1 = "READY=1\nSTATUS=running\n";
+    var m1 = notify_parse(d1, strlen(d1));
+    assert_eq(load64(m1), 1, "n ready");
+    assert(load64(m1 + 8) != 0, "n status set");
+
+    var d2 = "WATCHDOG=1\n";
+    var m2 = notify_parse(d2, strlen(d2));
+    assert_eq(load64(m2 + 24), 1, "n watchdog");
+    assert_eq(load64(m2), 0, "n not ready");
+
+    var d3 = "READY=1\nMAINPID=42\n";
+    var m3 = notify_parse(d3, strlen(d3));
+    assert_eq(load64(m3 + 16), 42, "n mainpid 42");
+
+    var m4 = notify_parse("", 0);
+    assert_eq(load64(m4), 0, "n empty not ready");
+
+    var d5 = "RELOADING=1\n";
+    var m5 = notify_parse(d5, strlen(d5));
+    assert_eq(load64(m5 + 32), 1, "n reloading");
+
+    var d6 = "STOPPING=1\n";
+    var m6 = notify_parse(d6, strlen(d6));
+    assert_eq(load64(m6 + 40), 1, "n stopping");
+
+    # --- Security ---
+    var bd = seccomp_description(0, 0, 0);
+    assert(str_contains(bd, str_from("basic")), "seccomp basic");
+    var cd = seccomp_description(1, 2, 1);
+    assert(str_contains(cd, str_from("2 syscalls")), "seccomp custom");
+
+    assert(streq(landlock_access_str(LL_NO_ACCESS), "none"), "ll none");
+    assert(streq(landlock_access_str(LL_READ_ONLY), "ro"), "ll ro");
+    assert(streq(landlock_access_str(LL_READ_WRITE), "rw"), "ll rw");
+
+    assert(streq(capability_str(CAP_SYS_ADMIN), "cap_sys_admin"), "cap admin");
+    assert(streq(capability_str(CAP_KILL), "cap_kill"), "cap kill");
+
+    assert(constant_time_eq("hello", 5, "hello", 5), "ct eq");
+    assert(1 - constant_time_eq("hello", 5, "world", 5), "ct neq");
+    assert(1 - constant_time_eq("short", 5, "longer", 6), "ct len");
+
+    var esc = emergency_shell_default();
+    assert(verify_emergency_auth(esc, str_from("any")), "auth skip");
+
+    # --- Systemd unit gen ---
+    var sd = svc_def_new(str_from("myapp"), str_from("Test myapp"), str_from("/usr/bin/myapp"));
+    vec_push(svc_def_modes(sd), BOOT_SERVER);
+    var unit = generate_unit(sd);
+    assert(str_contains(unit, str_from("[Unit]")), "u [Unit]");
+    assert(str_contains(unit, str_from("[Service]")), "u [Service]");
+    assert(str_contains(unit, str_from("Type=notify")), "u Type");
+    assert(str_contains(unit, str_from("ExecStart=/usr/bin/myapp")), "u Exec");
+    assert(str_contains(unit, str_from("Restart=on-failure")), "u Restart");
+    assert(str_contains(unit, str_from("multi-user.target")), "u target");
+
+    var sd2 = svc_def_new(str_from("gui"), str_from("GUI"), str_from("/usr/bin/gui"));
+    vec_push(svc_def_modes(sd2), BOOT_DESKTOP);
+    assert(str_contains(generate_unit(sd2), str_from("graphical.target")), "u gfx tgt");
+
+    var sd3 = svc_def_new(str_from("a"), str_from("A"), str_from("/usr/bin/a"));
+    store64(sd3 + 56, RESTART_ALWAYS);
+    assert(str_contains(generate_unit(sd3), str_from("Restart=always")), "u always");
+
+    var sd4 = svc_def_new(str_from("n"), str_from("N"), str_from("/usr/bin/n"));
+    store64(sd4 + 56, RESTART_NEVER);
+    assert(str_contains(generate_unit(sd4), str_from("Restart=no")), "u no");
+
+    # --- Tmpfiles ---
+    var entries = vec_new();
+    var de = alloc(72);
+    store64(de, TMP_DIRECTORY);
+    store64(de + 8, str_from("/run/myapp"));
+    store64(de + 24, 755);
+    store64(de + 32, 0 - 1);
+    store64(de + 40, 0 - 1);
+    vec_push(entries, de);
+    assert_eq(vec_len(generate_tmpfile_commands(entries)), 1, "dir 1 cmd");
+
+    # Validation
+    var bad = vec_new();
+    var be = alloc(72);
+    store64(be, TMP_DIRECTORY);
+    store64(be + 8, str_from("relative"));
+    store64(be + 24, 755);
+    vec_push(bad, be);
+    assert_eq(validate_tmpfile_entries(bad), 0 - 1, "rel path bad");
+
+    var ok = vec_new();
+    var oe = alloc(72);
+    store64(oe, TMP_DIRECTORY);
+    store64(oe + 8, str_from("/run/ok"));
+    store64(oe + 24, 755);
+    vec_push(ok, oe);
+    assert_eq(validate_tmpfile_entries(ok), 0, "abs path ok");
+
+    # --- Edge boot ---
+    var cmds = configure_readonly_rootfs();
+    assert_eq(vec_len(cmds), 5, "rootfs 5 cmds");
+
+    var hash = str_from("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    var vcmds = verify_rootfs_integrity(str_from("/dev/sda1"), str_from("/dev/sda2"), hash);
+    assert(vcmds != 0, "verity ok");
+    assert_eq(vec_len(vcmds), 2, "verity 2 cmds");
+
+    assert_eq(verify_rootfs_integrity(str_from(""), str_from("/dev/x"), hash), 0, "verity empty dev");
+    assert_eq(verify_rootfs_integrity(str_from("/dev/x"), str_from("/dev/y"), str_from("short")), 0, "verity short hash");
+    assert_eq(verify_rootfs_integrity(str_from("/tmp/x"), str_from("/dev/y"), hash), 0, "verity bad dev");
+
+    assert(validate_device_path(str_from("/dev/sda1")), "devpath ok");
+    assert(1 - validate_device_path(str_from("")), "devpath empty");
+    assert(1 - validate_device_path(str_from("/tmp/x")), "devpath nodev");
+
+    var lcmds = unlock_luks(str_from("/dev/sda3"), str_from("agnos-data"));
+    assert(lcmds != 0, "luks ok");
+    assert_eq(unlock_luks(str_from("/tmp/x"), str_from("y")), 0, "luks bad dev");
+    assert_eq(unlock_luks(str_from("/dev/x"), str_from("")), 0, "luks empty name");
+
+    # --- Service name validation ---
+    assert(validate_service_name(str_from("daimon")), "name ok");
+    assert(validate_service_name(str_from("llm-gateway")), "name hyphen");
+    assert(1 - validate_service_name(str_from("")), "name empty");
+    assert(1 - validate_service_name(str_from("a..b")), "name traversal");
+
+    # --- Edge init ---
+    var einit = edge_init_fn();
+    assert_eq(map_count(load64(einit + 16)), 1, "edge 1 svc");
+    assert(map_has(load64(einit + 16), "daimon"), "edge daimon");
+
+    var failures = assert_summary();
+    return failures;
+}
+var r = main();
+syscall(SYS_EXIT, r);

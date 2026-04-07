@@ -1,0 +1,163 @@
+# notify.cyr — sd_notify compatible readiness notification
+# Implements server side of the systemd notification protocol.
+# Ported from rust-old/src/notify.rs
+
+# =========================================================================
+# NotifyMessage — parsed sd_notify fields
+# =========================================================================
+
+struct NotifyMessage {
+    ready;          # 1/0
+    status;         # Str ptr (0 = none)
+    main_pid;       # i64 (0 = not set)
+    watchdog;       # 1/0
+    reloading;      # 1/0
+    stopping;       # 1/0
+    fields;         # map of key -> value
+}
+
+fn notify_msg_new() {
+    var msg = alloc(56);
+    store64(msg, 0);          # ready
+    store64(msg + 8, 0);      # status
+    store64(msg + 16, 0);     # main_pid
+    store64(msg + 24, 0);     # watchdog
+    store64(msg + 32, 0);     # reloading
+    store64(msg + 40, 0);     # stopping
+    store64(msg + 48, map_new());  # fields
+    return msg;
+}
+
+# Parse an sd_notify message (newline-separated KEY=VALUE pairs)
+fn notify_parse(data, len) {
+    var msg = notify_msg_new();
+    var fields = load64(msg + 48);
+
+    var line_start = 0;
+    for (var i = 0; i <= len; i = i + 1) {
+        var c = 0;
+        if (i < len) { c = load8(data + i); }
+
+        if (c == 10 || i == len) {
+            var line_len = i - line_start;
+            if (line_len > 0) {
+                # Find '=' in line
+                var eq_pos = 0 - 1;
+                for (var j = line_start; j < i; j = j + 1) {
+                    if (load8(data + j) == 61) {  # '='
+                        eq_pos = j;
+                        break;
+                    }
+                }
+                if (eq_pos > line_start) {
+                    var key = str_new(data + line_start, eq_pos - line_start);
+                    var val = str_new(data + eq_pos + 1, i - eq_pos - 1);
+
+                    map_set(fields, str_data(key), val);
+
+                    # Match known keys
+                    if (str_eq(key, str_from("READY"))) {
+                        store64(msg, str_eq(val, str_from("1")));
+                    } elif (str_eq(key, str_from("STATUS"))) {
+                        store64(msg + 8, val);
+                    } elif (str_eq(key, str_from("MAINPID"))) {
+                        store64(msg + 16, str_to_int(val));
+                    } elif (str_eq(key, str_from("WATCHDOG"))) {
+                        store64(msg + 24, str_eq(val, str_from("1")));
+                    } elif (str_eq(key, str_from("RELOADING"))) {
+                        store64(msg + 32, str_eq(val, str_from("1")));
+                    } elif (str_eq(key, str_from("STOPPING"))) {
+                        store64(msg + 40, str_eq(val, str_from("1")));
+                    }
+                }
+            }
+            line_start = i + 1;
+        }
+    }
+
+    return msg;
+}
+
+# =========================================================================
+# NotifyListener — Unix datagram socket listener
+# =========================================================================
+
+# Create a notify listener bound to a socket path.
+# Returns socket fd or -1 on error.
+fn notify_bind(path) {
+    # Remove stale socket
+    sys_unlink(str_data(path));
+
+    # Ensure parent directory exists
+    sys_mkdir("/run/argonaut", 493);  # 0o755
+
+    # socket(AF_UNIX=1, SOCK_DGRAM=2, 0)
+    var fd = syscall(41, 1, 2, 0);
+    if (fd < 0) { return 0 - 1; }
+
+    # Build sockaddr_un
+    var addr[110];
+    memset(&addr, 0, 110);
+    store16(&addr, 1);  # AF_UNIX
+    var path_data = str_data(path);
+    var path_len = str_len(path);
+    if (path_len > 107) { path_len = 107; }
+    memcpy(&addr + 2, path_data, path_len);
+
+    # bind(fd, &addr, sizeof(sa_family) + path_len + 1)
+    var ret = syscall(49, fd, &addr, 2 + path_len + 1);
+    if (ret < 0) {
+        sys_close(fd);
+        return 0 - 1;
+    }
+
+    # Set non-blocking
+    syscall(72, fd, 4, 2048);  # fcntl F_SETFL O_NONBLOCK
+
+    return fd;
+}
+
+# Try to receive a notification without blocking.
+# Returns a NotifyMessage ptr, or 0 if no message available.
+fn notify_try_recv(fd) {
+    var buf[4096];
+    var n = sys_read(fd, &buf, 4096);
+    if (n <= 0) { return 0; }
+    return notify_parse(&buf, n);
+}
+
+# Drain pending notifications, up to limit.
+# Returns vec of NotifyMessage ptrs.
+fn notify_drain(fd, limit) {
+    var messages = vec_new();
+    for (var i = 0; i < limit; i = i + 1) {
+        var msg = notify_try_recv(fd);
+        if (msg == 0) { break; }
+        vec_push(messages, msg);
+    }
+    return messages;
+}
+
+# Send an sd_notify message to a socket path (client side).
+fn send_notify(socket_path, message) {
+    var fd = syscall(41, 1, 2, 0);  # AF_UNIX, SOCK_DGRAM
+    if (fd < 0) { return 0 - 1; }
+
+    var addr[110];
+    memset(&addr, 0, 110);
+    store16(&addr, 1);  # AF_UNIX
+    var path_data = str_data(socket_path);
+    var path_len = str_len(socket_path);
+    if (path_len > 107) { path_len = 107; }
+    memcpy(&addr + 2, path_data, path_len);
+
+    var msg_data = str_data(message);
+    var msg_len = str_len(message);
+
+    # sendto(fd, msg, len, 0, &addr, addrlen)
+    var ret = syscall(44, fd, msg_data, msg_len, 0, &addr, 2 + path_len + 1);
+    sys_close(fd);
+
+    if (ret < 0) { return 0 - 1; }
+    return 0;
+}

@@ -1,0 +1,126 @@
+# tmpfiles.cyr — Boot-time filesystem setup
+# Generates SafeCommands for directories, symlinks, and device nodes.
+# Ported from rust-old/src/tmpfiles.rs
+
+# =========================================================================
+# Generate tmpfile commands
+# =========================================================================
+
+fn generate_tmpfile_commands(entries) {
+    var cmds = vec_new();
+
+    for (var i = 0; i < vec_len(entries); i = i + 1) {
+        var entry = vec_get(entries, i);
+        var etype = load64(entry);       # TmpfileType
+        var path = load64(entry + 8);    # Str ptr
+
+        if (etype == TMP_DIRECTORY) {
+            var dir_mode = load64(entry + 24);
+            var uid = load64(entry + 32);
+            var gid = load64(entry + 40);
+
+            var mode_sb = str_builder_new();
+            str_builder_add_int(mode_sb, dir_mode);
+
+            var mkdir_cmd = safe_cmd_new(str_from("mkdir"));
+            safe_cmd_add_arg(mkdir_cmd, str_from("-p"));
+            safe_cmd_add_arg(mkdir_cmd, str_from("-m"));
+            safe_cmd_add_arg(mkdir_cmd, str_builder_build(mode_sb));
+            safe_cmd_add_arg(mkdir_cmd, path);
+            vec_push(cmds, mkdir_cmd);
+
+            if (uid >= 0 || gid >= 0) {
+                var owner_sb = str_builder_new();
+                if (uid >= 0) { str_builder_add_int(owner_sb, uid); }
+                str_builder_add_cstr(owner_sb, ":");
+                if (gid >= 0) { str_builder_add_int(owner_sb, gid); }
+
+                var chown_cmd = safe_cmd_new(str_from("chown"));
+                safe_cmd_add_arg(chown_cmd, str_builder_build(owner_sb));
+                safe_cmd_add_arg(chown_cmd, path);
+                vec_push(cmds, chown_cmd);
+            }
+        } elif (etype == TMP_SYMLINK) {
+            var sym_target = load64(entry + 16);
+
+            var ln_cmd = safe_cmd_new(str_from("ln"));
+            safe_cmd_add_arg(ln_cmd, str_from("-sf"));
+            safe_cmd_add_arg(ln_cmd, sym_target);
+            safe_cmd_add_arg(ln_cmd, path);
+            vec_push(cmds, ln_cmd);
+        } elif (etype == TMP_DEVICE) {
+            var dev_mode = load64(entry + 24);
+            var dev_type_char = load64(entry + 48);
+            var dev_major = load64(entry + 56);
+            var dev_minor = load64(entry + 64);
+
+            var mknod_cmd = safe_cmd_new(str_from("mknod"));
+            safe_cmd_add_arg(mknod_cmd, path);
+
+            # dev_type: 'b' or 'c'
+            var type_buf[2];
+            store8(&type_buf, dev_type_char);
+            store8(&type_buf + 1, 0);
+            safe_cmd_add_arg(mknod_cmd, str_from(&type_buf));
+
+            safe_cmd_add_arg(mknod_cmd, str_from_int(dev_major));
+            safe_cmd_add_arg(mknod_cmd, str_from_int(dev_minor));
+            vec_push(cmds, mknod_cmd);
+
+            var chmod_cmd = safe_cmd_new(str_from("chmod"));
+            safe_cmd_add_arg(chmod_cmd, str_from_int(dev_mode));
+            safe_cmd_add_arg(chmod_cmd, path);
+            vec_push(cmds, chmod_cmd);
+        }
+    }
+
+    return cmds;
+}
+
+# =========================================================================
+# Validate tmpfile entries
+# =========================================================================
+
+fn validate_tmpfile_entries(entries) {
+    for (var i = 0; i < vec_len(entries); i = i + 1) {
+        var entry = vec_get(entries, i);
+        var etype = load64(entry);
+        var path = load64(entry + 8);
+
+        # Check absolute path
+        if (str_starts_with(path, "/") == 0) {
+            return 0 - 1;
+        }
+
+        # Check no path traversal
+        if (str_contains(path, str_from(".."))) {
+            return 0 - 1;
+        }
+
+        if (etype == TMP_DIRECTORY || etype == TMP_DEVICE) {
+            var vmode = load64(entry + 24);
+            if (vmode > 4095) {  # 0o7777
+                return 0 - 1;
+            }
+        }
+
+        if (etype == TMP_DEVICE) {
+            var vdt = load64(entry + 48);
+            if (vdt != 98 && vdt != 99) {  # 'b' or 'c'
+                return 0 - 1;
+            }
+        }
+
+        if (etype == TMP_SYMLINK) {
+            var vtarget = load64(entry + 16);
+            if (str_starts_with(vtarget, "/") == 0) {
+                return 0 - 1;
+            }
+            if (str_contains(vtarget, str_from(".."))) {
+                return 0 - 1;
+            }
+        }
+    }
+
+    return 0;  # valid
+}

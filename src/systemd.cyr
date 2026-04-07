@@ -1,0 +1,197 @@
+# systemd.cyr — systemd unit file generation
+# Generates .service unit files from argonaut service definitions.
+# Ported from rust-old/src/systemd.rs
+
+# =========================================================================
+# Sanitization helpers
+# =========================================================================
+
+# Strip newlines and escape $ to $$ for systemd
+fn sanitize_unit_value(value) {
+    var data = str_data(value);
+    var len = str_len(value);
+    var sb = str_builder_new();
+
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(data + i);
+        if (c == 10) {       # \n -> space
+            str_builder_add_cstr(sb, " ");
+        } elif (c == 13) {   # \r -> skip
+            # do nothing
+        } elif (c == 36) {   # $ -> $$
+            str_builder_add_cstr(sb, "$$");
+        } else {
+            # Single char append
+            var buf[2];
+            store8(&buf, c);
+            store8(&buf + 1, 0);
+            str_builder_add_cstr(sb, &buf);
+        }
+    }
+
+    return str_builder_build(sb);
+}
+
+# Quote value if it contains spaces or special chars
+fn escape_systemd_value(value) {
+    var sanitized = sanitize_unit_value(value);
+    var data = str_data(sanitized);
+    var len = str_len(sanitized);
+    var needs_quote = 0;
+
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(data + i);
+        if (c == 32 || c == 34 || c == 92) {  # space, ", backslash
+            needs_quote = 1;
+            break;
+        }
+    }
+
+    if (needs_quote == 0) { return sanitized; }
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\"");
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(data + i);
+        if (c == 92) {       # backslash
+            str_builder_add_cstr(sb, "\\\\");
+        } elif (c == 34) {   # quote
+            str_builder_add_cstr(sb, "\\\"");
+        } else {
+            var buf[2];
+            store8(&buf, c);
+            store8(&buf + 1, 0);
+            str_builder_add_cstr(sb, &buf);
+        }
+    }
+    str_builder_add_cstr(sb, "\"");
+    return str_builder_build(sb);
+}
+
+# =========================================================================
+# Unit file generation
+# =========================================================================
+
+fn generate_unit(svc) {
+    var sb = str_builder_new();
+
+    # [Unit] section
+    str_builder_add_cstr(sb, "[Unit]\n");
+    str_builder_add_cstr(sb, "Description=");
+    str_builder_add(sb, sanitize_unit_value(svc_def_desc(svc)));
+    str_builder_add_cstr(sb, "\n");
+
+    var deps = svc_def_deps(svc);
+    if (vec_len(deps) > 0) {
+        # Build dependency string
+        var dep_sb = str_builder_new();
+        for (var i = 0; i < vec_len(deps); i = i + 1) {
+            if (i > 0) { str_builder_add_cstr(dep_sb, " "); }
+            str_builder_add(dep_sb, vec_get(deps, i));
+            str_builder_add_cstr(dep_sb, ".service");
+        }
+        var dep_str = str_builder_build(dep_sb);
+        str_builder_add_cstr(sb, "After=");
+        str_builder_add(sb, dep_str);
+        str_builder_add_cstr(sb, "\n");
+        str_builder_add_cstr(sb, "Requires=");
+        str_builder_add(sb, dep_str);
+        str_builder_add_cstr(sb, "\n");
+    }
+
+    str_builder_add_cstr(sb, "\n");
+
+    # [Service] section
+    str_builder_add_cstr(sb, "[Service]\n");
+    str_builder_add_cstr(sb, "Type=notify\n");
+
+    # ExecStart
+    str_builder_add_cstr(sb, "ExecStart=");
+    str_builder_add(sb, escape_systemd_value(svc_def_binary(svc)));
+    var args = svc_def_args(svc);
+    for (var i = 0; i < vec_len(args); i = i + 1) {
+        str_builder_add_cstr(sb, " ");
+        str_builder_add(sb, escape_systemd_value(vec_get(args, i)));
+    }
+    str_builder_add_cstr(sb, "\n");
+
+    # Environment — sorted keys for deterministic output
+    var env = svc_def_env(svc);
+    var env_keys = map_keys(env);
+    # TODO: sort keys
+    for (var i = 0; i < vec_len(env_keys); i = i + 1) {
+        var key = vec_get(env_keys, i);
+        var val = map_get(env, key);
+        str_builder_add_cstr(sb, "Environment=\"");
+        str_builder_add_cstr(sb, key);
+        str_builder_add_cstr(sb, "=");
+        str_builder_add(sb, sanitize_unit_value(val));
+        str_builder_add_cstr(sb, "\"\n");
+    }
+
+    # Restart policy
+    var policy = svc_def_restart_policy(svc);
+    str_builder_add_cstr(sb, "Restart=");
+    if (policy == RESTART_ALWAYS) {
+        str_builder_add_cstr(sb, "always");
+    } elif (policy == RESTART_ON_FAILURE) {
+        str_builder_add_cstr(sb, "on-failure");
+    } else {
+        str_builder_add_cstr(sb, "no");
+    }
+    str_builder_add_cstr(sb, "\n");
+
+    # RestartSec
+    var rc = svc_def_restart_config(svc);
+    var restart_sec = load64(rc + 8) / 1000;  # base_delay_ms to seconds
+    if (restart_sec < 1) { restart_sec = 1; }
+    str_builder_add_cstr(sb, "RestartSec=");
+    str_builder_add_int(sb, restart_sec);
+    str_builder_add_cstr(sb, "\n");
+
+    # StartLimitBurst
+    var max_restarts = load64(rc);
+    if (max_restarts > 0) {
+        str_builder_add_cstr(sb, "StartLimitBurst=");
+        str_builder_add_int(sb, max_restarts);
+        str_builder_add_cstr(sb, "\n");
+    }
+
+    # WatchdogSec from health check
+    var hc = svc_def_health_check(svc);
+    if (hc != 0) {
+        var interval = load64(hc + 24);  # interval_ms
+        var retries = load64(hc + 40);   # retries
+        var watchdog_sec = (interval * retries) / 1000;
+        if (watchdog_sec > 0) {
+            str_builder_add_cstr(sb, "WatchdogSec=");
+            str_builder_add_int(sb, watchdog_sec);
+            str_builder_add_cstr(sb, "\n");
+        }
+    }
+
+    str_builder_add_cstr(sb, "NotifyAccess=main\n");
+    str_builder_add_cstr(sb, "\n");
+
+    # [Install] section
+    str_builder_add_cstr(sb, "[Install]\n");
+    var modes = svc_def_modes(svc);
+    var has_graphical = 0;
+    for (var i = 0; i < vec_len(modes); i = i + 1) {
+        if (vec_get(modes, i) == BOOT_DESKTOP) { has_graphical = 1; }
+    }
+    if (has_graphical) {
+        str_builder_add_cstr(sb, "WantedBy=graphical.target\n");
+    } else {
+        str_builder_add_cstr(sb, "WantedBy=multi-user.target\n");
+    }
+
+    return str_builder_build(sb);
+}
+
+fn generate_unit_filename(svc) {
+    var sb = str_builder_new();
+    str_builder_add(sb, svc_def_name(svc));
+    str_builder_add_cstr(sb, ".service");
+    return str_builder_build(sb);
+}

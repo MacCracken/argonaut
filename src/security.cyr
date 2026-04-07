@@ -1,0 +1,132 @@
+# security.cyr — Security config descriptions and helpers
+# Ported from rust-old/src/security.rs
+
+# =========================================================================
+# Socket activation env vars
+# =========================================================================
+
+fn socket_env_listen_fds(socket_count, pid) {
+    var env = vec_new();
+    # Return pairs as alternating key, value in vec
+    vec_push(env, str_from("LISTEN_FDS"));
+    vec_push(env, str_from_int(socket_count));
+    vec_push(env, str_from("LISTEN_PID"));
+    vec_push(env, str_from_int(pid));
+    return env;
+}
+
+# =========================================================================
+# Seccomp description
+# =========================================================================
+
+fn seccomp_description(config_type, allow_count, deny_count) {
+    if (config_type == 0) {  # Basic
+        return str_from("seccomp: basic filter (20 safe syscalls allowed, all others killed)");
+    }
+    # Custom
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "seccomp: custom filter — allow ");
+    str_builder_add_int(sb, allow_count);
+    str_builder_add_cstr(sb, " syscalls");
+    if (deny_count > 0) {
+        str_builder_add_cstr(sb, ", ");
+        str_builder_add_int(sb, deny_count);
+        str_builder_add_cstr(sb, " explicit denials");
+    }
+    return str_builder_build(sb);
+}
+
+# =========================================================================
+# Landlock description
+# =========================================================================
+
+fn landlock_description(rules) {
+    var count = vec_len(rules);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "landlock: ");
+    str_builder_add_int(sb, count);
+    str_builder_add_cstr(sb, " filesystem rules");
+
+    for (var i = 0; i < count; i = i + 1) {
+        var rule = vec_get(rules, i);
+        var path = load64(rule);       # Str ptr
+        var access = load64(rule + 8); # LandlockAccess
+        str_builder_add_cstr(sb, "\n  ");
+        str_builder_add(sb, path);
+        str_builder_add_cstr(sb, " -> ");
+        str_builder_add_cstr(sb, landlock_access_str(access));
+    }
+
+    return str_builder_build(sb);
+}
+
+# =========================================================================
+# Capability setpriv command generation
+# =========================================================================
+
+fn capability_setpriv_cmd(caps_to_drop, binary, args) {
+    var cmd = safe_cmd_new(str_from("setpriv"));
+    safe_cmd_add_arg(cmd, str_from("--no-new-privs"));
+
+    if (vec_len(caps_to_drop) > 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "--bounding-set=-");
+        for (var i = 0; i < vec_len(caps_to_drop); i = i + 1) {
+            if (i > 0) { str_builder_add_cstr(sb, ",-"); }
+            str_builder_add_cstr(sb, capability_str(vec_get(caps_to_drop, i)));
+        }
+        safe_cmd_add_arg(cmd, str_builder_build(sb));
+    }
+
+    safe_cmd_add_arg(cmd, binary);
+    for (var i = 0; i < vec_len(args); i = i + 1) {
+        safe_cmd_add_arg(cmd, vec_get(args, i));
+    }
+
+    return cmd;
+}
+
+# =========================================================================
+# Emergency shell authentication
+# =========================================================================
+
+# Simple non-cryptographic hash (SipHash-like) for password verification.
+# WARNING: Not cryptographically secure. Production should use proper crypto.
+fn password_hash(data, len) {
+    var h = 2166136261;  # FNV-1a 32-bit offset basis
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(data + i);
+        h = h ^ c;
+        h = h * 16777619;  # FNV-1a 32-bit prime
+    }
+    return h;
+}
+
+# Constant-time comparison to prevent timing attacks
+fn constant_time_eq(a, a_len, b, b_len) {
+    if (a_len != b_len) { return 0; }
+    var diff = 0;
+    for (var i = 0; i < a_len; i = i + 1) {
+        diff = diff | (load8(a + i) ^ load8(b + i));
+    }
+    return diff == 0;
+}
+
+fn verify_emergency_auth(config, password_input) {
+    var require_auth = load64(config + 24);  # EmergencyShellConfig.require_auth
+    if (require_auth == 0) { return 1; }
+
+    var stored_hash = load64(config + 32);   # auth_password_hash
+    if (stored_hash == 0) { return 1; }
+
+    var input_data = str_data(password_input);
+    var input_len = str_len(password_input);
+    var input_hash = password_hash(input_data, input_len);
+
+    # Compare hash values
+    var stored_data = str_data(stored_hash);
+    var stored_len = str_len(stored_hash);
+
+    var hash_str = str_from_int(input_hash);
+    return str_eq(hash_str, stored_hash);
+}

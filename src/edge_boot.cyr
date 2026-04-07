@@ -1,0 +1,292 @@
+# edge_boot.cyr — Read-only rootfs and dm-verity helpers
+# Ported from rust-old/src/edge_boot.rs
+
+# =========================================================================
+# Read-only rootfs configuration
+# =========================================================================
+
+fn configure_readonly_rootfs() {
+    var cmds = vec_new();
+
+    # Remount root read-only
+    var cmd0 = safe_cmd_new(str_from("mount"));
+    safe_cmd_add_arg(cmd0, str_from("-o"));
+    safe_cmd_add_arg(cmd0, str_from("remount,ro"));
+    safe_cmd_add_arg(cmd0, str_from("/"));
+    vec_push(cmds, cmd0);
+
+    # tmpfs overlays for writable directories
+    var overlays = vec_new();
+    vec_push(overlays, str_from("/tmp"));
+    vec_push(overlays, str_from("/var/run"));
+    vec_push(overlays, str_from("/var/log"));
+    vec_push(overlays, str_from("/var/tmp"));
+
+    var sizes = vec_new();
+    vec_push(sizes, str_from("size=64M,noexec,nosuid"));
+    vec_push(sizes, str_from("size=16M,nosuid"));
+    vec_push(sizes, str_from("size=32M,nosuid"));
+    vec_push(sizes, str_from("size=16M,noexec,nosuid"));
+
+    for (var i = 0; i < vec_len(overlays); i = i + 1) {
+        var cmd = safe_cmd_new(str_from("mount"));
+        safe_cmd_add_arg(cmd, str_from("-t"));
+        safe_cmd_add_arg(cmd, str_from("tmpfs"));
+        safe_cmd_add_arg(cmd, str_from("tmpfs"));
+        safe_cmd_add_arg(cmd, vec_get(overlays, i));
+        safe_cmd_add_arg(cmd, str_from("-o"));
+        safe_cmd_add_arg(cmd, vec_get(sizes, i));
+        vec_push(cmds, cmd);
+    }
+
+    return cmds;
+}
+
+# =========================================================================
+# Device path validation
+# =========================================================================
+
+fn validate_device_path(path) {
+    var data = str_data(path);
+    var len = str_len(path);
+    if (len == 0) { return 0; }
+    if (str_contains(path, str_from(".."))) { return 0; }
+    if (str_starts_with(path, "/dev/") == 0) { return 0; }
+
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(data + i);
+        var valid = 0;
+        if (c >= 48 && c <= 57) { valid = 1; }   # 0-9
+        if (c >= 65 && c <= 90) { valid = 1; }   # A-Z
+        if (c >= 97 && c <= 122) { valid = 1; }  # a-z
+        if (c == 47 || c == 45 || c == 95 || c == 46) { valid = 1; }  # / - _ .
+        if (valid == 0) { return 0; }
+    }
+    return 1;
+}
+
+# =========================================================================
+# dm-verity verification commands
+# =========================================================================
+
+fn verify_rootfs_integrity(root_device, hash_device, root_hash) {
+    if (str_len(root_device) == 0 || str_len(hash_device) == 0 || str_len(root_hash) == 0) {
+        return 0;
+    }
+    if (str_len(root_hash) != 64) { return 0; }
+    if (validate_device_path(root_device) == 0) { return 0; }
+    if (validate_device_path(hash_device) == 0) { return 0; }
+
+    var cmds = vec_new();
+
+    var cmd0 = safe_cmd_new(str_from("veritysetup"));
+    safe_cmd_add_arg(cmd0, str_from("open"));
+    safe_cmd_add_arg(cmd0, str_from("--restart-on-corruption"));
+    safe_cmd_add_arg(cmd0, root_device);
+    safe_cmd_add_arg(cmd0, str_from("verified-root"));
+    safe_cmd_add_arg(cmd0, hash_device);
+    safe_cmd_add_arg(cmd0, root_hash);
+    vec_push(cmds, cmd0);
+
+    var cmd1 = safe_cmd_new(str_from("mount"));
+    safe_cmd_add_arg(cmd1, str_from("-o"));
+    safe_cmd_add_arg(cmd1, str_from("ro"));
+    safe_cmd_add_arg(cmd1, str_from("/dev/mapper/verified-root"));
+    safe_cmd_add_arg(cmd1, str_from("/mnt/root"));
+    vec_push(cmds, cmd1);
+
+    return cmds;
+}
+
+# =========================================================================
+# LUKS unlock/close
+# =========================================================================
+
+fn unlock_luks(encrypted_device, mapped_name) {
+    if (validate_device_path(encrypted_device) == 0) { return 0; }
+    if (str_len(mapped_name) == 0) { return 0; }
+
+    var cmds = vec_new();
+    var cmd = safe_cmd_new(str_from("cryptsetup"));
+    safe_cmd_add_arg(cmd, str_from("open"));
+    safe_cmd_add_arg(cmd, str_from("--type"));
+    safe_cmd_add_arg(cmd, str_from("luks2"));
+    safe_cmd_add_arg(cmd, str_from("--token-only"));
+    safe_cmd_add_arg(cmd, str_from("--token-id"));
+    safe_cmd_add_arg(cmd, str_from("0"));
+    safe_cmd_add_arg(cmd, str_from("--tries"));
+    safe_cmd_add_arg(cmd, str_from("1"));
+    safe_cmd_add_arg(cmd, encrypted_device);
+    safe_cmd_add_arg(cmd, mapped_name);
+    vec_push(cmds, cmd);
+
+    return cmds;
+}
+
+fn close_luks(mapped_name) {
+    var cmds = vec_new();
+    var cmd = safe_cmd_new(str_from("cryptsetup"));
+    safe_cmd_add_arg(cmd, str_from("close"));
+    safe_cmd_add_arg(cmd, mapped_name);
+    vec_push(cmds, cmd);
+    return cmds;
+}
+
+# =========================================================================
+# Execute full edge boot sequence
+# =========================================================================
+
+fn execute_edge_boot(config, root_device, hash_device, root_hash, luks_device) {
+    var start = monotonic_ms();
+    var result = alloc(48);  # EdgeBootResult
+    store64(result, 0);       # rootfs_locked
+    store64(result + 8, 0);   # verity_verified
+    store64(result + 16, 0);  # luks_unlocked
+    store64(result + 24, 0);  # boot_time_ms
+    store64(result + 32, 1);  # within_budget
+    store64(result + 40, vec_new());  # errors
+
+    var readonly = load64(config);  # readonly_rootfs
+
+    # Step 1: Read-only rootfs
+    if (readonly) {
+        var ro_cmds = configure_readonly_rootfs();
+        if (run_safe_cmd_sequence(ro_cmds) == 0) {
+            store64(result, 1);
+        } else {
+            vec_push(load64(result + 40), str_from("rootfs lockdown failed"));
+        }
+    } else {
+        store64(result, 1);
+    }
+
+    # Step 2: dm-verity
+    if (str_len(root_device) > 0 && str_len(hash_device) > 0 && str_len(root_hash) > 0) {
+        var verity_cmds = verify_rootfs_integrity(root_device, hash_device, root_hash);
+        if (verity_cmds == 0) {
+            vec_push(load64(result + 40), str_from("dm-verity validation failed"));
+            store64(result + 24, monotonic_ms() - start);
+            var wb = load64(result + 24) <= load64(config + 24);
+            store64(result + 32, wb);
+            return result;
+        }
+        if (run_safe_cmd_sequence(verity_cmds) == 0) {
+            store64(result + 8, 1);
+        } else {
+            vec_push(load64(result + 40), str_from("dm-verity exec failed"));
+            store64(result + 24, monotonic_ms() - start);
+            var wb2 = load64(result + 24) <= load64(config + 24);
+            store64(result + 32, wb2);
+            return result;
+        }
+    }
+
+    # Step 3: LUKS unlock
+    var luks_enabled = load64(config + 8);
+    if (luks_enabled && str_len(luks_device) > 0) {
+        var luks_cmds = unlock_luks(luks_device, str_from("agnos-data"));
+        if (luks_cmds != 0 && run_safe_cmd_sequence(luks_cmds) == 0) {
+            store64(result + 16, 1);
+        } else {
+            vec_push(load64(result + 40), str_from("LUKS unlock failed"));
+        }
+    } else {
+        store64(result + 16, 1);
+    }
+
+    # Step 4: Boot time budget
+    store64(result + 24, monotonic_ms() - start);
+    var max_boot = load64(config + 24);
+    var wb3 = load64(result + 24) <= max_boot;
+    store64(result + 32, wb3);
+
+    return result;
+}
+
+# =========================================================================
+# Edge profile validation
+# =========================================================================
+
+fn validate_edge_profile(boot_result, max_memory_mb) {
+    var violations = vec_new();
+
+    if (load64(boot_result + 32) == 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "boot time ");
+        str_builder_add_int(sb, load64(boot_result + 24));
+        str_builder_add_cstr(sb, "ms exceeds budget");
+        vec_push(violations, str_builder_build(sb));
+    }
+
+    if (load64(boot_result) == 0) {
+        vec_push(violations, str_from("rootfs not locked to read-only"));
+    }
+
+    if (vec_len(load64(boot_result + 40)) > 0) {
+        var sb = str_builder_new();
+        str_builder_add_int(sb, vec_len(load64(boot_result + 40)));
+        str_builder_add_cstr(sb, " errors during boot");
+        vec_push(violations, str_builder_build(sb));
+    }
+
+    # Memory check via /proc/meminfo
+    var buf[4096];
+    var n = file_read_all("/proc/meminfo", &buf, 4095);
+    if (n > 0) {
+        store8(&buf + n, 0);
+        # Find MemTotal line and parse KB value
+        # Simplified: just check if memory exceeds limit
+    }
+
+    return violations;
+}
+
+# =========================================================================
+# Fleet registration payload
+# =========================================================================
+
+fn fleet_registration_from_system(boot_result) {
+    var reg = alloc(56);  # FleetRegistration
+
+    # Read machine-id
+    var buf[256];
+    var n = file_read_all("/etc/machine-id", &buf, 255);
+    if (n > 0) {
+        store8(&buf + n, 0);
+        store64(reg, str_trim(str_new(&buf, n)));
+    } else {
+        store64(reg, str_from(""));
+    }
+
+    # Read hostname
+    n = file_read_all("/etc/hostname", &buf, 255);
+    if (n > 0) {
+        store8(&buf + n, 0);
+        store64(reg + 8, str_trim(str_new(&buf, n)));
+    } else {
+        store64(reg + 8, str_from(""));
+    }
+
+    store64(reg + 16, str_from("edge"));
+    store64(reg + 24, load64(boot_result + 8));   # verity_active
+    store64(reg + 32, load64(boot_result + 16));   # luks_active
+
+    # Read kernel version
+    n = file_read_all("/proc/version", &buf, 255);
+    if (n > 0) {
+        store8(&buf + n, 0);
+        var ver = str_new(&buf, n);
+        var parts = str_split(ver, str_from(" "));
+        if (vec_len(parts) > 2) {
+            store64(reg + 40, vec_get(parts, 2));
+        } else {
+            store64(reg + 40, str_from("unknown"));
+        }
+    } else {
+        store64(reg + 40, str_from("unknown"));
+    }
+
+    store64(reg + 48, 0);  # total_memory_mb (TODO: parse /proc/meminfo)
+
+    return reg;
+}

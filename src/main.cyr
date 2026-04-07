@@ -1,16 +1,120 @@
-# argonaut — Cyrius port
+# argonaut — Init system and service manager for AGNOS
 # Ported from 13577 lines of Rust
+#
+# Boot sequencing, service lifecycle, health checks,
+# runlevel switching, shutdown orchestration.
 
+# Standard library
 include "lib/string.cyr"
 include "lib/fmt.cyr"
 include "lib/alloc.cyr"
 include "lib/vec.cyr"
 include "lib/str.cyr"
 include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/process.cyr"
+include "lib/hashmap.cyr"
+include "lib/tagged.cyr"
+include "lib/args.cyr"
+
+# Argonaut modules
+include "src/types.cyr"
+include "src/boot.cyr"
+include "src/services.cyr"
+include "src/process_mgmt.cyr"
+include "src/health.cyr"
+include "src/edge_boot.cyr"
+include "src/notify.cyr"
+include "src/security.cyr"
+include "src/systemd.cyr"
+include "src/tmpfiles.cyr"
+include "src/init.cyr"
+
+# =========================================================================
+# Entry point — verify the port compiles and runs
+# =========================================================================
 
 fn main() {
     alloc_init();
-    println("argonaut ready");
+
+    println("argonaut: init system ready");
+
+    # Create default config and init system
+    var config = argonaut_config_default();
+    var init = argonaut_init_new(config);
+
+    # Report boot sequence
+    var steps = load64(init + 8);
+    var svc_map = load64(init + 16);
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "  mode: ");
+    str_builder_add_cstr(sb, boot_mode_str(config_boot_mode(config)));
+    str_builder_add_cstr(sb, ", ");
+    str_builder_add_int(sb, vec_len(steps));
+    str_builder_add_cstr(sb, " boot steps, ");
+    str_builder_add_int(sb, map_count(svc_map));
+    str_builder_add_cstr(sb, " services");
+    str_println(str_builder_build(sb));
+
+    # List services
+    var keys = map_keys(svc_map);
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        var name = vec_get(keys, i);
+        var ms = map_get(svc_map, name);
+        var sd = managed_svc_def(ms);
+        var sb2 = str_builder_new();
+        str_builder_add_cstr(sb2, "  [");
+        str_builder_add_cstr(sb2, service_state_str(managed_svc_state(ms)));
+        str_builder_add_cstr(sb2, "] ");
+        str_builder_add_cstr(sb2, name);
+        str_builder_add_cstr(sb2, " — ");
+        str_builder_add(sb2, svc_def_desc(sd));
+        str_println(str_builder_build(sb2));
+    }
+
+    # Test dependency resolution
+    var defs = vec_new();
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        var ms = map_get(svc_map, vec_get(keys, i));
+        vec_push(defs, managed_svc_def(ms));
+    }
+    var order = resolve_service_order(defs);
+    if (order != 0) {
+        var sb3 = str_builder_new();
+        str_builder_add_cstr(sb3, "  startup order: ");
+        for (var i = 0; i < vec_len(order); i = i + 1) {
+            if (i > 0) { str_builder_add_cstr(sb3, " -> "); }
+            str_builder_add(sb3, vec_get(order, i));
+        }
+        str_println(str_builder_build(sb3));
+    }
+
+    # Test shutdown plan
+    var plan = init_plan_shutdown(init, SHUTDOWN_REBOOT);
+    var plan_steps = load64(plan + 8);
+    var sb4 = str_builder_new();
+    str_builder_add_cstr(sb4, "  shutdown plan: ");
+    str_builder_add_int(sb4, vec_len(plan_steps));
+    str_builder_add_cstr(sb4, " steps (");
+    str_builder_add_cstr(sb4, shutdown_type_str(load64(plan)));
+    str_builder_add_cstr(sb4, ")");
+    str_println(str_builder_build(sb4));
+
+    # Test stats
+    var stats = init_stats(init);
+    var sb5 = str_builder_new();
+    str_builder_add_cstr(sb5, "  stats: ");
+    str_builder_add_int(sb5, load64(stats + 16));
+    str_builder_add_cstr(sb5, " running, ");
+    str_builder_add_int(sb5, load64(stats + 24));
+    str_builder_add_cstr(sb5, " failed, boot_complete=");
+    str_builder_add_int(sb5, load64(stats + 40));
+    str_println(str_builder_build(sb5));
+
+    println("argonaut: all systems nominal");
+
     return 0;
 }
 

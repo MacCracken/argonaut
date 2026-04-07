@@ -1,6 +1,29 @@
 #!/bin/sh
-CC="${1:-./build/cc2}"
-echo "=== argonaut tests ==="
-cat src/main.cyr | "$CC" > /tmp/argonaut_test && chmod +x /tmp/argonaut_test && /tmp/argonaut_test
-echo "exit: $?"
-rm -f /tmp/argonaut_test
+# Argonaut test + benchmark runner
+set -e
+
+CC="${1:-$HOME/.cyrius/bin/cc2}"
+BUILD="build"
+mkdir -p "$BUILD"
+
+TOTAL_PASS=0
+TOTAL_FAIL=0
+
+for suite in test_types test_init test_lifecycle test_modules; do
+    echo "--- Compiling $suite ---"
+    cat "src/${suite}.cyr" | "$CC" > "$BUILD/$suite" 2>/dev/null
+    chmod +x "$BUILD/$suite"
+    echo "--- Running $suite ---"
+    "./$BUILD/$suite"
+    RESULT=$?
+    TOTAL_FAIL=$((TOTAL_FAIL + RESULT))
+    echo ""
+done
+
+echo "=== Compiling benchmarks ==="
+cat src/bench_main.cyr | "$CC" > "$BUILD/argonaut_bench" 2>/dev/null
+chmod +x "$BUILD/argonaut_bench"
+echo "=== Running benchmarks ==="
+"./$BUILD/argonaut_bench"
+
+exit $TOTAL_FAIL
