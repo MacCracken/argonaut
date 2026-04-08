@@ -4,9 +4,9 @@
 
 **Argonaut** (Greek: sailors of the Argo — one letter off from AGNOS) — Init system and service manager for AGNOS — boot sequencing, service lifecycle, health checks, runlevel switching, shutdown orchestration
 
-- **Type**: Library crate (binary lives in a separate crate)
+- **Type**: Cyrius application (ported from Rust library crate)
+- **Language**: Cyrius (compiled via `cc2`), original Rust preserved in `rust-old/`
 - **License**: GPL-3.0-only
-- **MSRV**: 1.89
 - **Version**: SemVer 0.D.M pre-1.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
@@ -23,10 +23,10 @@ AGNOS boot (PID 1 / systemd delegate), stiva, sutra, daimon
 
 0. Read roadmap, CHANGELOG, and open issues — know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`
+2. Build check: `cat src/main.cyr | cc2 > build/argonaut && chmod +x build/argonaut`
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Initial refactor + audit (performance, memory, security, edge cases)
-5. Cleanliness check — must be clean after audit
+5. Build check — must compile clean after audit
 6. Additional tests/benchmarks from observations
 7. Post-audit benchmarks — prove the wins
 8. Repeat audit if heavy
@@ -35,16 +35,16 @@ AGNOS boot (PID 1 / systemd delegate), stiva, sutra, daimon
 ### Development Loop (continuous)
 
 1. Work phase — new features, roadmap items, bug fixes
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`
+2. Build check: `cat src/main.cyr | cc2 > build/argonaut && chmod +x build/argonaut`
 3. Test + benchmark additions for new code
 4. Run benchmarks (`./scripts/bench-history.sh`)
 5. Audit phase — review performance, memory, security, throughput, correctness
-6. Cleanliness check — must be clean after audit
+6. Build check — must compile clean after audit
 7. Deeper tests/benchmarks from audit observations
 8. Run benchmarks again — prove the wins
 9. If audit heavy → return to step 5
 10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, source citations for algorithms/formulas, update docs/sources.md, guides and examples for new API surface, verify recipe version in zugot
-11. Version check — VERSION, Cargo.toml, recipe (in zugot) all in sync
+11. Version check — VERSION, cyrb.toml, recipe (in zugot) all in sync
 12. Return to step 1
 
 ### Key Principles
@@ -53,16 +53,11 @@ AGNOS boot (PID 1 / systemd delegate), stiva, sutra, daimon
 - **Tests + benchmarks are the way.** Minimum 80%+ coverage target.
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
-- **`#[non_exhaustive]`** on all public enums.
-- **`#[must_use]`** on all pure functions.
-- **`#[inline]`** on hot-path functions.
-- **`write!` over `format!`** — avoid temporary allocations.
-- **Cow over clone** — borrow when you can, allocate only when you must.
 - **Vec arena over HashMap** — when indices are known, direct access beats hashing.
-- **Feature-gate optional deps** — consumers pull only what they need.
-- **tracing on all operations** — structured logging for audit trail.
-- **No `unwrap()` or `panic!()` in library code** — this is a library crate; propagate errors.
+- **str_builder over string concat** — avoid temporary allocations.
+- **Packed Result type** — zero-alloc on success path, heap-allocate errors only on cold path.
 - **SafeCommand for all process execution** — prevent shell injection.
+- **Cyrius language reference**: see `vidya/content/cyrius/` for canonical syntax, idioms, and porting patterns.
 
 ## Documentation Structure
 
@@ -91,6 +86,6 @@ Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST 
 - **Do not commit or push** — the user handles all git operations (commit, push, tag)
 - **NEVER use `gh` CLI** — use `curl` to GitHub API only
 - Do not add unnecessary dependencies — keep it lean
-- Do not `unwrap()` or `panic!()` in library code
 - Do not skip benchmarks before claiming performance improvements
-- Do not commit `target/` or `Cargo.lock` (library crate)
+- Do not commit `build/` directory (compiled binaries)
+- Do not commit `rust-old/target/`

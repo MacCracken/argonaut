@@ -1,0 +1,327 @@
+# audit.cyr — Audit logging for service lifecycle events
+# Shim implementation of libro's AuditChain for argonaut.
+# Designed for drop-in replacement when libro is ported to Cyrius.
+# Dependency chain: majra -> libro -> replace this file.
+#
+# API surface mirrors libro:
+#   audit_log_new()          ↔ AuditLog::new()
+#   audit_log_record()       ↔ AuditLog::record_service_event()
+#   audit_log_query()        ↔ AuditLog::query()
+#   audit_log_len()          ↔ AuditLog::len()
+#   audit_log_is_empty()     ↔ AuditLog::is_empty()
+#   audit_log_verify()       ↔ AuditLog::verify()
+#   audit_log_by_source()    ↔ AuditLog::entries_by_source()
+#   audit_log_by_severity()  ↔ AuditLog::entries_by_severity()
+#   audit_event_severity()   ↔ event_severity()
+
+# =========================================================================
+# Event severity — matches libro::EventSeverity
+# =========================================================================
+
+enum AuditSeverity {
+    SEV_DEBUG;
+    SEV_INFO;
+    SEV_WARNING;
+    SEV_ERROR;
+    SEV_CRITICAL;
+    SEV_SECURITY;
+}
+
+fn severity_str(s) {
+    if (s == SEV_DEBUG)    { return "debug"; }
+    if (s == SEV_INFO)     { return "info"; }
+    if (s == SEV_WARNING)  { return "warning"; }
+    if (s == SEV_ERROR)    { return "error"; }
+    if (s == SEV_CRITICAL) { return "critical"; }
+    if (s == SEV_SECURITY) { return "security"; }
+    return "unknown";
+}
+
+fn severity_level(s) {
+    # Numeric ordering for >= comparisons
+    if (s == SEV_DEBUG)    { return 0; }
+    if (s == SEV_INFO)     { return 1; }
+    if (s == SEV_WARNING)  { return 2; }
+    if (s == SEV_ERROR)    { return 3; }
+    if (s == SEV_CRITICAL) { return 4; }
+    if (s == SEV_SECURITY) { return 5; }
+    return 0;
+}
+
+# =========================================================================
+# Service event types — for severity mapping
+# =========================================================================
+
+enum ServiceEventType {
+    EVT_STARTING;
+    EVT_STARTED;
+    EVT_STOPPING;
+    EVT_STOPPED_OK;
+    EVT_STOPPED_FAIL;
+    EVT_RESTARTING;
+    EVT_HEALTH_PASSED;
+    EVT_HEALTH_FAILED;
+    EVT_READY_PASSED;
+    EVT_READY_FAILED;
+    EVT_DEP_MET;
+    EVT_DEP_WAITING;
+    EVT_TIMEOUT_KILLED;
+    EVT_CRASH_DETECTED;
+    EVT_ENABLED;
+    EVT_DISABLED;
+}
+
+fn event_type_str(t) {
+    if (t == EVT_STARTING)       { return "Starting"; }
+    if (t == EVT_STARTED)        { return "Started"; }
+    if (t == EVT_STOPPING)       { return "Stopping"; }
+    if (t == EVT_STOPPED_OK)     { return "Stopped(0)"; }
+    if (t == EVT_STOPPED_FAIL)   { return "Stopped(fail)"; }
+    if (t == EVT_RESTARTING)     { return "Restarting"; }
+    if (t == EVT_HEALTH_PASSED)  { return "HealthCheckPassed"; }
+    if (t == EVT_HEALTH_FAILED)  { return "HealthCheckFailed"; }
+    if (t == EVT_READY_PASSED)   { return "ReadyCheckPassed"; }
+    if (t == EVT_READY_FAILED)   { return "ReadyCheckFailed"; }
+    if (t == EVT_DEP_MET)        { return "DependencyMet"; }
+    if (t == EVT_DEP_WAITING)    { return "DependencyWaiting"; }
+    if (t == EVT_TIMEOUT_KILLED) { return "TimeoutKilled"; }
+    if (t == EVT_CRASH_DETECTED) { return "CrashDetected"; }
+    if (t == EVT_ENABLED)        { return "Enabled"; }
+    if (t == EVT_DISABLED)       { return "Disabled"; }
+    return "Unknown";
+}
+
+# =========================================================================
+# Severity mapping — matches Rust audit.rs event_severity()
+# =========================================================================
+
+fn audit_event_severity(event_type) {
+    # Info: Starting, Started, HealthPassed, ReadyPassed, DepMet,
+    #       Enabled, Disabled, Stopped(0)
+    if (event_type == EVT_STARTING)      { return SEV_INFO; }
+    if (event_type == EVT_STARTED)       { return SEV_INFO; }
+    if (event_type == EVT_HEALTH_PASSED) { return SEV_INFO; }
+    if (event_type == EVT_READY_PASSED)  { return SEV_INFO; }
+    if (event_type == EVT_DEP_MET)       { return SEV_INFO; }
+    if (event_type == EVT_ENABLED)       { return SEV_INFO; }
+    if (event_type == EVT_DISABLED)      { return SEV_INFO; }
+    if (event_type == EVT_STOPPED_OK)    { return SEV_INFO; }
+
+    # Warning: Stopping, Restarting, DepWaiting, HealthFailed, ReadyFailed
+    if (event_type == EVT_STOPPING)      { return SEV_WARNING; }
+    if (event_type == EVT_RESTARTING)    { return SEV_WARNING; }
+    if (event_type == EVT_DEP_WAITING)   { return SEV_WARNING; }
+    if (event_type == EVT_HEALTH_FAILED) { return SEV_WARNING; }
+    if (event_type == EVT_READY_FAILED)  { return SEV_WARNING; }
+
+    # Error: TimeoutKilled, CrashDetected, Stopped(non-zero)
+    if (event_type == EVT_TIMEOUT_KILLED) { return SEV_ERROR; }
+    if (event_type == EVT_CRASH_DETECTED) { return SEV_ERROR; }
+    if (event_type == EVT_STOPPED_FAIL)   { return SEV_ERROR; }
+
+    # Default: Warning for unknown/future variants
+    return SEV_WARNING;
+}
+
+# =========================================================================
+# Audit entry — matches libro::AuditEntry (simplified)
+# =========================================================================
+
+struct AuditEntry {
+    timestamp;       # epoch ms
+    severity;        # AuditSeverity enum
+    source;          # Str ptr (always "argonaut")
+    action;          # Str ptr (event type string)
+    service;         # Str ptr (service name)
+    prev_hash;       # i64 hash of previous entry (0 for genesis)
+    hash;            # i64 hash of this entry
+}
+
+fn audit_entry_new(severity, source, action, service, prev_hash) {
+    var e = alloc(56);  # 7 fields * 8 bytes
+    store64(e, now_ms());
+    store64(e + 8, severity);
+    store64(e + 16, source);
+    store64(e + 24, action);
+    store64(e + 32, service);
+    store64(e + 40, prev_hash);
+
+    # Compute hash: FNV-1a over (timestamp, severity, source, action, prev_hash)
+    var h = audit_entry_compute_hash(e);
+    store64(e + 48, h);
+
+    return e;
+}
+
+fn audit_entry_compute_hash(e) {
+    var h = 2166136261;  # FNV-1a offset basis
+    # Mix in timestamp
+    var ts = load64(e);
+    h = h ^ (ts & 255);         h = h * 16777619;
+    h = h ^ ((ts >> 8) & 255);  h = h * 16777619;
+    h = h ^ ((ts >> 16) & 255); h = h * 16777619;
+    h = h ^ ((ts >> 24) & 255); h = h * 16777619;
+    # Mix in severity
+    h = h ^ load64(e + 8);      h = h * 16777619;
+    # Mix in source string
+    var src = str_data(load64(e + 16));
+    while (load8(src) != 0) {
+        h = h ^ load8(src);     h = h * 16777619;
+        src = src + 1;
+    }
+    # Mix in action string
+    var act = str_data(load64(e + 24));
+    while (load8(act) != 0) {
+        h = h ^ load8(act);     h = h * 16777619;
+        act = act + 1;
+    }
+    # Mix in service string
+    var svc = str_data(load64(e + 32));
+    while (load8(svc) != 0) {
+        h = h ^ load8(svc);     h = h * 16777619;
+        svc = svc + 1;
+    }
+    # Mix in prev_hash
+    var ph = load64(e + 40);
+    h = h ^ (ph & 255);         h = h * 16777619;
+    h = h ^ ((ph >> 8) & 255);  h = h * 16777619;
+    h = h ^ ((ph >> 16) & 255); h = h * 16777619;
+    h = h ^ ((ph >> 24) & 255); h = h * 16777619;
+    return h;
+}
+
+# Accessors
+fn audit_entry_timestamp(e) { return load64(e); }
+fn audit_entry_severity(e)  { return load64(e + 8); }
+fn audit_entry_source(e)    { return load64(e + 16); }
+fn audit_entry_action(e)    { return load64(e + 24); }
+fn audit_entry_service(e)   { return load64(e + 32); }
+fn audit_entry_prev_hash(e) { return load64(e + 40); }
+fn audit_entry_hash(e)      { return load64(e + 48); }
+
+fn audit_entry_verify(e) {
+    var computed = audit_entry_compute_hash(e);
+    return computed == load64(e + 48);
+}
+
+# =========================================================================
+# Audit log — matches libro-backed AuditLog
+# =========================================================================
+
+struct AuditLog {
+    entries;        # vec of AuditEntry ptrs
+}
+
+fn audit_log_new() {
+    var log = alloc(8);
+    store64(log, vec_new());
+    return log;
+}
+
+fn audit_log_entries(log) { return load64(log); }
+
+fn audit_log_record(log, service, event_type) {
+    var entries = load64(log);
+    var severity = audit_event_severity(event_type);
+    var source = str_from("argonaut");
+    var action = str_from(event_type_str(event_type));
+
+    var prev_hash = 0;
+    if (vec_len(entries) > 0) {
+        var last = vec_get(entries, vec_len(entries) - 1);
+        prev_hash = audit_entry_hash(last);
+    }
+
+    var entry = audit_entry_new(severity, source, action, str_from(service), prev_hash);
+    vec_push(entries, entry);
+    return entry;
+}
+
+fn audit_log_len(log) {
+    return vec_len(load64(log));
+}
+
+fn audit_log_is_empty(log) {
+    return vec_len(load64(log)) == 0;
+}
+
+# Verify chain integrity: each entry's hash matches recomputation,
+# and each prev_hash links to the previous entry's hash.
+fn audit_log_verify(log) {
+    var entries = load64(log);
+    var n = vec_len(entries);
+    for (var i = 0; i < n; i = i + 1) {
+        var e = vec_get(entries, i);
+        # Verify entry hash
+        if (audit_entry_verify(e) == 0) { return 0; }
+        # Verify chain linkage
+        if (i == 0) {
+            if (audit_entry_prev_hash(e) != 0) { return 0; }
+        } else {
+            var prev = vec_get(entries, i - 1);
+            if (audit_entry_prev_hash(e) != audit_entry_hash(prev)) { return 0; }
+        }
+    }
+    return 1;
+}
+
+# Query by source string
+fn audit_log_by_source(log, source) {
+    var entries = load64(log);
+    var result = vec_new();
+    for (var i = 0; i < vec_len(entries); i = i + 1) {
+        var e = vec_get(entries, i);
+        if (streq(str_data(audit_entry_source(e)), source)) {
+            vec_push(result, e);
+        }
+    }
+    return result;
+}
+
+# Query by exact severity
+fn audit_log_by_severity(log, severity) {
+    var entries = load64(log);
+    var result = vec_new();
+    for (var i = 0; i < vec_len(entries); i = i + 1) {
+        var e = vec_get(entries, i);
+        if (audit_entry_severity(e) == severity) {
+            vec_push(result, e);
+        }
+    }
+    return result;
+}
+
+# Query by minimum severity (severity >= min)
+fn audit_log_by_min_severity(log, min_severity) {
+    var entries = load64(log);
+    var result = vec_new();
+    var min_level = severity_level(min_severity);
+    for (var i = 0; i < vec_len(entries); i = i + 1) {
+        var e = vec_get(entries, i);
+        if (severity_level(audit_entry_severity(e)) >= min_level) {
+            vec_push(result, e);
+        }
+    }
+    return result;
+}
+
+# Composite query: source + min_severity (matches libro QueryFilter)
+fn audit_log_query(log, source, min_severity) {
+    var entries = load64(log);
+    var result = vec_new();
+    var min_level = severity_level(min_severity);
+    var has_source = 0;
+    if (source != 0) { has_source = 1; }
+    for (var i = 0; i < vec_len(entries); i = i + 1) {
+        var e = vec_get(entries, i);
+        if (has_source) {
+            if (streq(str_data(audit_entry_source(e)), source) == 0) {
+                continue;
+            }
+        }
+        if (severity_level(audit_entry_severity(e)) >= min_level) {
+            vec_push(result, e);
+        }
+    }
+    return result;
+}

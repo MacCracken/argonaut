@@ -11,6 +11,17 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ### Added
 
+#### Cyrius Port
+- Full rewrite from Rust (13,577 lines) to Cyrius (~5,400 lines application + ~4,600 lines stdlib)
+- Original Rust source preserved in `rust-old/`
+- 22 source modules: types, boot, services, process_mgmt, health, edge_boot, notify, security, systemd, tmpfiles, init + 10 test/bench files
+- 28 stdlib modules shipped in `lib/`: alloc, vec, hashmap, string, str, fmt, io, fs, process, syscalls, json, regex, net, thread, async, tagged, bench, assert, args, bounds, callback, fnptr, freelist, math, matrix, toml, trait, vidya
+- 8 test suites with 348 assertions (test_serde blocked on cc2 bug #12)
+- 18 benchmarks (parity with Rust Criterion suite)
+- Statically linked ELF x86_64 binaries (~210KB)
+- Build via `cyrb.toml` / `cc2` compiler
+- `tests/test.sh` — unified test + benchmark runner
+
 #### v0.2.0 scope — Hardening
 - `#![forbid(unsafe_code)]` — no unsafe in the crate
 - `BootMode::Recovery` — emergency shell only, no services, maps to `Runlevel::Emergency`

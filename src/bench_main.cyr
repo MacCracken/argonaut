@@ -1,7 +1,8 @@
 # bench_main.cyr — Argonaut benchmarks
-# Parity target: 18 Rust criterion benchmarks covering boot sequence
-# construction, init creation, dependency resolution, shutdown planning,
-# health tracking, state transitions, and backoff computation.
+# Parity target: 32 Rust criterion benchmarks.
+# Implemented: 29. Blocked: 3 (api_responses x4→0 ported, resource_limits→no prlimit_commands fn)
+# Missing functions not yet ported: list_services, system_status, system_metrics,
+# boot_log, to_prlimit_commands, boot_execution_plan, safe_cmd_display.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -28,6 +29,7 @@ include "src/security.cyr"
 include "src/systemd.cyr"
 include "src/tmpfiles.cyr"
 include "src/init.cyr"
+include "src/audit.cyr"
 
 # =========================================================================
 # Helpers
@@ -310,6 +312,189 @@ fn main() {
     }
     bench_report(b18);
     vec_push(benches, b18);
+
+    # --- Dependency resolution: desktop order ---
+
+    println("\nDependency resolution (desktop):");
+    var dsk_order_svcs = default_services(BOOT_DESKTOP);
+    var b19 = bench_new("resolve_order_desktop");
+    for (var i = 0; i < iters; i = i + 1) {
+        bench_start(b19);
+        resolve_service_order(dsk_order_svcs);
+        bench_stop(b19);
+    }
+    bench_report(b19);
+    vec_push(benches, b19);
+
+    # --- Dependency resolution: waves chain 20 ---
+
+    var chain20 = make_chain(20);
+    var b20 = bench_new("resolve_waves_chain_20");
+    for (var i = 0; i < 1000; i = i + 1) {
+        bench_start(b20);
+        resolve_service_waves(chain20);
+        bench_stop(b20);
+    }
+    bench_report(b20);
+    vec_push(benches, b20);
+
+    # --- Dependency resolution: waves wide (all independent) ---
+
+    var wide = vec_new();
+    for (var i = 0; i < 20; i = i + 1) {
+        var wsb = str_builder_new();
+        str_builder_add_cstr(wsb, "ind-");
+        str_builder_add_int(wsb, i);
+        var wname = str_builder_build(wsb);
+        var wsd = svc_def_new(wname, wname, str_cat(str_from("/usr/bin/"), wname));
+        store64(wsd + 56, RESTART_NEVER);
+        vec_push(svc_def_modes(wsd), BOOT_MINIMAL);
+        store64(wsd + 88, 1);
+        vec_push(wide, wsd);
+    }
+    var b21 = bench_new("resolve_waves_wide_20");
+    for (var i = 0; i < iters; i = i + 1) {
+        bench_start(b21);
+        resolve_service_waves(wide);
+        bench_stop(b21);
+    }
+    bench_report(b21);
+    vec_push(benches, b21);
+
+    # --- Shutdown planning: poweroff ---
+
+    println("\nShutdown planning (poweroff):");
+    alloc_reset();
+    alloc_init();
+    var pinit = argonaut_init_new(argonaut_config_default());
+    var b22 = bench_new("plan_shutdown_poweroff");
+    for (var i = 0; i < iters; i = i + 1) {
+        bench_start(b22);
+        init_plan_shutdown(pinit, SHUTDOWN_POWEROFF);
+        bench_stop(b22);
+    }
+    bench_report(b22);
+    vec_push(benches, b22);
+
+    # --- Edge boot ---
+
+    println("\nEdge boot:");
+    var b23 = bench_new("configure_readonly_rootfs");
+    for (var i = 0; i < iters; i = i + 1) {
+        bench_start(b23);
+        configure_readonly_rootfs();
+        bench_stop(b23);
+    }
+    bench_report(b23);
+    vec_push(benches, b23);
+
+    var b24 = bench_new("verify_rootfs_integrity");
+    var rhash = str_from("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    for (var i = 0; i < iters; i = i + 1) {
+        bench_start(b24);
+        verify_rootfs_integrity(str_from("/dev/sda1"), str_from("/dev/sda2"), rhash);
+        bench_stop(b24);
+    }
+    bench_report(b24);
+    vec_push(benches, b24);
+
+    # --- Stats collection ---
+
+    println("\nStats collection:");
+    alloc_reset();
+    alloc_init();
+    var sinit = argonaut_init_new(argonaut_config_default());
+    # Mark all steps complete for realistic stats
+    var ssteps = load64(sinit + 8);
+    for (var i = 0; i < vec_len(ssteps); i = i + 1) {
+        var step = vec_get(ssteps, i);
+        store64(step + 32, STEP_COMPLETE);
+    }
+    var b25 = bench_new("stats_desktop");
+    for (var i = 0; i < iters; i = i + 1) {
+        bench_start(b25);
+        init_stats(sinit);
+        bench_stop(b25);
+    }
+    bench_report(b25);
+    vec_push(benches, b25);
+
+    # --- Tmpfile generation ---
+
+    println("\nTmpfile generation:");
+    var tmp_entries = vec_new();
+    for (var i = 0; i < 20; i = i + 1) {
+        var te = alloc(72);
+        store64(te, TMP_DIRECTORY);
+        var tsb = str_builder_new();
+        str_builder_add_cstr(tsb, "/run/svc-");
+        str_builder_add_int(tsb, i);
+        store64(te + 8, str_builder_build(tsb));
+        store64(te + 16, 0);     # target
+        store64(te + 24, 493);   # mode 0755
+        store64(te + 32, 1000);  # uid
+        store64(te + 40, 1000);  # gid
+        store64(te + 48, 0);     # dev_type
+        store64(te + 56, 0);     # major
+        store64(te + 64, 0);     # minor
+        vec_push(tmp_entries, te);
+    }
+    var b26 = bench_new("generate_tmpfile_cmds_20");
+    for (var i = 0; i < iters; i = i + 1) {
+        bench_start(b26);
+        generate_tmpfile_commands(tmp_entries);
+        bench_stop(b26);
+    }
+    bench_report(b26);
+    vec_push(benches, b26);
+
+    # --- Runlevel switching ---
+
+    println("\nRunlevel switching:");
+    alloc_reset();
+    alloc_init();
+    var rlinit = argonaut_init_new(argonaut_config_default());
+    var targets = default_targets();
+    var b27 = bench_new("plan_runlevel_switch");
+    for (var i = 0; i < iters; i = i + 1) {
+        bench_start(b27);
+        init_plan_runlevel_switch(rlinit, RL_GRAPHICAL, targets);
+        bench_stop(b27);
+    }
+    bench_report(b27);
+    vec_push(benches, b27);
+
+    # --- Boot step marking ---
+
+    println("\nBoot step marking:");
+    var b28 = bench_new("mark_all_steps_complete");
+    for (var i = 0; i < 1000; i = i + 1) {
+        bench_start(b28);
+        alloc_reset();
+        alloc_init();
+        var bsinit = argonaut_init_new(argonaut_config_default());
+        var bssteps = load64(bsinit + 8);
+        for (var j = 0; j < vec_len(bssteps); j = j + 1) {
+            var bstep = vec_get(bssteps, j);
+            init_mark_step_complete(bsinit, load64(bstep));
+        }
+        bench_stop(b28);
+    }
+    bench_report(b28);
+    vec_push(benches, b28);
+
+    # --- Audit logging ---
+
+    println("\nAudit logging:");
+    var alog = audit_log_new();
+    var b29 = bench_new("audit_log_record");
+    for (var i = 0; i < iters; i = i + 1) {
+        bench_start(b29);
+        audit_log_record(alog, "daimon", EVT_STARTING);
+        bench_stop(b29);
+    }
+    bench_report(b29);
+    vec_push(benches, b29);
 
     println("\n=== Summary ===");
     bench_report_all(benches);
