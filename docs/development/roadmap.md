@@ -1,98 +1,104 @@
 # Argonaut Roadmap
 
 Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
-Feature gap analysis: [docs/architecture/feature-gaps.md](../architecture/feature-gaps.md).
 
 ---
 
-## v0.7.0 — Research-Driven Hardening
+## Current — v0.95.0
 
-Fixes identified by external research into init system best practices, protocol specs, and security standards.
-
-### dm-verity / LUKS corrections
-- [x] Remove redundant `veritysetup verify` from boot path (halved I/O)
-- [x] Add `--restart-on-corruption` to `veritysetup open` for edge mode
-- [x] Make dm-verity failure fatal in edge mode (early return, no LUKS/services)
-- [x] Add `--token-id=0` and `--tries=1` to LUKS unlock for deterministic TPM2
-- [x] Default `tpm_attestation` to `true` for edge mode
-- [x] Add PCR binding configuration (`pcr_bindings: "7+14"`) to `EdgeBootConfig`
-
-### sd_notify protocol completion
-- [x] Handle `WATCHDOG=1` keepalive messages
-- [x] `SO_PASSCRED` via `enable_credentials()` for sender verification
-- [x] Drain limit on `NotifyListener::drain(limit)` to prevent DoS
-- [x] Support `RELOADING=1` and `STOPPING=1` lifecycle fields
-
-### Integration items
-- [x] systemd unit generation (for hybrid installs)
-- [x] agnoshi commands: `service start/stop/restart/status/enable/disable`
-- [x] MCP tools: `argonaut_services`, `argonaut_status`, `argonaut_boot_log`
-- [x] Audit logging via libro (service state transitions)
-- [x] daimon API: `/v1/services` CRUD endpoints backed by argonaut
-- [x] Integration with nazar (expose `/v1/services` metrics endpoint)
+Cyrius port complete. 12 test suites (395 assertions), 29 benchmarks, 207KB binary.
+All v0.7–v0.9 features ported. Audit module (libro shim) in place.
 
 ---
 
-## v0.8.0 — Production Init Features (P0 gaps)
+## v0.96.0 — Test Coverage & Hardening
 
-Items required before argonaut can be trusted as PID 1. These are implemented in the binary crate but the library must provide the primitives.
+### Test gaps (from audit)
+- [ ] Process management tests: fork_exec_service, process_stop, process_kill, proc_table_reap
+- [ ] Init service lifecycle tests: start_simple, start_oneshot, start_forking, stop, restart
+- [ ] Health check execution tests: TCP connect, command check, ready check retries, HTTP parsing
+- [ ] Edge boot execution tests: execute_edge_boot, close_luks full path
+- [ ] Notify I/O tests: bind, try_recv, drain, send
+- [ ] Security tests: landlock_description, capability_setpriv_cmd
 
-- [x] Parallel service startup (wave-based executor from toposort)
-- [x] Forking service type support (track child PID via sd_notify MAINPID or PID file)
-- [x] Resource limits per service (RLIMIT_NOFILE, RLIMIT_AS, RLIMIT_NPROC fields on ProcessSpec)
-- [x] Environment file loading (`/etc/argonaut/env.d/<service>`)
-- [x] Log rotation (size-capped or time-rotated service logs)
-- [x] Oneshot service type (run-to-completion, no supervision)
+### Code quality
+- [ ] HTTP health check: validate HTTP status line (currently TCP connect only)
+- [ ] API response builders: list_services, system_status, system_metrics, boot_log
+- [ ] Resource limit command generation: to_prlimit_commands
+- [ ] boot_execution_plan / boot_execution_plan_waves
+- [ ] safe_cmd_display (SafeCommand Display)
+
+### Missing benchmarks (3 blocked on above)
+- [ ] api_responses (4 benchmarks — needs response builders)
+- [ ] resource_limits_prlimit (1 benchmark — needs prlimit command gen)
 
 ---
 
-## v0.9.0 — Security Enforcement (P1 gaps)
+## v0.97.0 — Sakshi Integration
 
-- [x] Socket activation (LISTEN_FDS / LISTEN_PID protocol)
-- [x] Seccomp filter generation and application per service
-- [x] Landlock filesystem restrictions per service
-- [x] Capability bounding set management
-- [x] tmpfiles.d equivalent (directory/symlink/device creation at boot)
-- [x] Emergency shell authentication (`require_auth` enforcement)
-- [x] Core dump restriction (RLIMIT_CORE = 0 by default)
+- [ ] Integrate sakshi (structured tracing/logging) for service state transitions
+- [ ] Trace: boot step completion/failure
+- [ ] Trace: health check results
+- [ ] Trace: shutdown orchestration steps
+- [ ] Trace: watchdog enforcement actions
+- [ ] Replace audit.cyr println-based logging with sakshi spans
+
+---
+
+## v0.98.0 — Libro Integration
+
+Blocked on: majra Cyrius port -> libro Cyrius port.
+
+- [ ] Replace audit.cyr shim with real libro includes
+- [ ] Swap FNV-1a hash for libro's BLAKE3/SHA-256
+- [ ] Wire AuditChain persistence (write to disk)
+- [ ] QueryFilter full support (time range, action, agent_id)
 
 ---
 
 ## v1.0.0 Criteria
 
-- [x] QEMU boot: minimal < 3s (2.98s) ✓
-- [x] QEMU boot: desktop < 3s (2.9s with real daimon) ✓
+- [x] All P0 library gaps closed
+- [x] All P1 library gaps closed
+- [x] API stable — pre-1.0 with documented stability plan (ADR-012)
+- [x] 12 ADRs for major design decisions
+- [x] Security posture documented and reviewed
+- [x] QEMU boot: minimal < 3s (2.98s)
+- [x] QEMU boot: desktop < 3s (2.9s with real daimon)
+- [x] Crash recovery tested (exponential backoff, restart limit, GiveUp)
+- [x] Shutdown ordering tested (clean stop -> sync -> poweroff)
 - [ ] Edge boot < 1s
-- [x] Crash recovery tested (exponential backoff, restart limit, GiveUp) ✓
-- [x] Shutdown ordering tested (clean stop → sync → poweroff) ✓
-- [x] API stable — pre-1.0 with documented stability plan (ADR-012) ✓
-- [x] 80%+ code coverage (80.78%) ✓
-- [x] Benchmark history: 18 benchmarks tracked across v0.7–v0.9 ✓
-- [x] All P0 library gaps closed ✓
-- [x] All P1 library gaps closed ✓
-- [x] Security posture documented and reviewed ✓
-- [x] ADRs for all major design decisions (12 ADRs) ✓
+- [ ] Real hardware testing (RPi4, NUC)
+- [ ] Sakshi tracing integrated
+- [ ] Libro audit chain (real, not shim)
+- [ ] Kybernet using argonaut library (not hand-rolled PID 1)
+- [ ] 95%+ function test coverage
+
+---
+
+## Kybernet Integration (separate repo)
+
+PID 1 helmsman — https://github.com/MacCracken/kybernet
+
+Currently uses hand-rolled init logic. Goal: replace with argonaut library calls.
+Blocked on: libro Cyrius port (for audit chain).
+
+- [ ] Wire kybernet to argonaut's init_start_service / init_stop_service
+- [ ] Wire kybernet to argonaut's boot_execution_plan_waves
+- [ ] Wire kybernet to argonaut's init_plan_shutdown
+- [ ] Seccomp/Landlock application in pre_exec
+- [ ] Control socket for agnoshi runtime commands
 - [ ] Real hardware testing (RPi4, NUC)
 
 ---
 
-## Binary Crate: kybernet (separate repo)
+## Known Compiler Issues (cc2)
 
-PID 1 helmsman — https://github.com/MacCracken/kybernet
-
-- [x] Zombie reaping via `signalfd` + `waitpid(-1, WNOHANG)` loop ✓
-- [x] Signal forwarding (SIGTERM, SIGINT, SIGHUP, SIGPWR) ✓
-- [x] Cgroup v2 per-service setup (`/sys/fs/cgroup/kybernet.slice/<service>/`) ✓
-- [x] Privilege drop (`setuid`/`setgid`/`setgroups` in `Command::pre_exec`) ✓
-- [x] Essential filesystem mounting (`/proc`, `/sys`, `/dev`, `/run`, cgroups) ✓
-- [x] `epoll` event loop (signalfd, timerfd, notify socket) ✓
-- [x] Console I/O setup (`/dev/console`, `/dev/null`) ✓
-- [x] QEMU boot tested: minimal (2.98s), desktop with real daimon (2.9s) ✓
-- [x] Crash recovery: exponential backoff + restart limit ✓
-- [x] Clean shutdown: SIGTERM → plan → stop → sync → poweroff ✓
-- [ ] Seccomp/Landlock application in pre_exec
-- [ ] Control socket for agnoshi runtime commands
-- [ ] Real hardware testing (RPi4, NUC)
+| # | Issue | Impact | Workaround |
+|---|-------|--------|------------|
+| 16 | Adding includes shifts global addresses | Test string corruption in large compilation units | Split large .tcyr files to stay under string buffer |
+| — | System stdlib cross-includes exceed token limit | Can't use `~/.cyrius/lib/` symlink | Use local `lib/` copy with updated assert.cyr |
+| — | String data buffer 8192 bytes | Large test files overflow silently | Keep test files < ~500 string literals |
 
 ---
 
@@ -102,5 +108,5 @@ PID 1 helmsman — https://github.com/MacCracken/kybernet
 - **Package installation** — that's ark
 - **Agent lifecycle** — that's daimon (argonaut manages the process, daimon manages the agent)
 - **Scheduling** — that's samay (argonaut starts/stops, samay decides when)
-- **D-Bus interface** — only if AGNOS desktop requires it (P2)
+- **D-Bus interface** — only if AGNOS desktop requires it
 - **Timer-based services** — that's samay's domain
