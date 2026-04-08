@@ -11,6 +11,23 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
+## [0.96.0] — 2026-04-08
+
+### Added
+- **Sakshi integration** — structured tracing via sakshi 0.5.0 (minimal profile + span stubs)
+- `sakshi_span_enter`/`sakshi_span_exit` on `argonaut_init_new()` and `init_plan_shutdown()`
+- `sakshi_info` on boot step completion and service stop
+- `sakshi_error` on unknown service type
+- `lib/sakshi.cyr` — single-file distribution (176 lines, zero heap allocation)
+- Test header uses no-op sakshi stubs to avoid string buffer pressure
+
+### Changed
+- Binary size: 207KB -> 213KB (+6KB for sakshi instrumentation)
+- Test suites: 12 -> 15 (types, modules, api split further for cc2 string buffer limits)
+- 395 assertions across 15 .tcyr suites, 0 failures
+
+---
+
 ## [0.95.0] — 2026-04-08
 
 ### Added

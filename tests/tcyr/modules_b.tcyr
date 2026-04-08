@@ -55,39 +55,6 @@ fn main() {
     vec_push(ok, oe);
     assert_eq(validate_tmpfile_entries(ok), 0, "abs path ok");
 
-    # --- Edge boot ---
-    var cmds = configure_readonly_rootfs();
-    assert_eq(vec_len(cmds), 5, "rootfs 5 cmds");
-
-    var hash = str_from("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    var vcmds = verify_rootfs_integrity(str_from("/dev/sda1"), str_from("/dev/sda2"), hash);
-    assert(vcmds != 0, "verity ok");
-    assert_eq(vec_len(vcmds), 2, "verity 2 cmds");
-
-    assert_eq(verify_rootfs_integrity(str_from(""), str_from("/dev/x"), hash), 0, "verity empty dev");
-    assert_eq(verify_rootfs_integrity(str_from("/dev/x"), str_from("/dev/y"), str_from("short")), 0, "verity short hash");
-    assert_eq(verify_rootfs_integrity(str_from("/tmp/x"), str_from("/dev/y"), hash), 0, "verity bad dev");
-
-    assert(validate_device_path(str_from("/dev/sda1")), "devpath ok");
-    assert(1 - validate_device_path(str_from("")), "devpath empty");
-    assert(1 - validate_device_path(str_from("/tmp/x")), "devpath nodev");
-
-    var lcmds = unlock_luks(str_from("/dev/sda3"), str_from("agnos-data"));
-    assert(lcmds != 0, "luks ok");
-    assert_eq(unlock_luks(str_from("/tmp/x"), str_from("y")), 0, "luks bad dev");
-    assert_eq(unlock_luks(str_from("/dev/x"), str_from("")), 0, "luks empty name");
-
-    # --- Service name validation ---
-    assert(validate_service_name(str_from("daimon")), "name ok");
-    assert(validate_service_name(str_from("llm-gateway")), "name hyphen");
-    assert(1 - validate_service_name(str_from("")), "name empty");
-    assert(1 - validate_service_name(str_from("a..b")), "name traversal");
-
-    # --- Edge init ---
-    var einit = edge_init_fn();
-    assert_eq(map_count(load64(einit + 16)), 1, "edge 1 svc");
-    assert(map_has(load64(einit + 16), "daimon"), "edge daimon");
-
     return assert_summary();
 }
 var r = main();

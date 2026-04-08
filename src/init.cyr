@@ -15,6 +15,7 @@ struct ArgonautInit {
 }
 
 fn argonaut_init_new(config) {
+    sakshi_span_enter("init_new", 8);
     var init = alloc(sizeof(ArgonautInit));
     var mode = config_boot_mode(config);
 
@@ -46,6 +47,7 @@ fn argonaut_init_new(config) {
 
     proc_table_init();
 
+    sakshi_span_exit();
     return init;
 }
 
@@ -58,20 +60,21 @@ fn init_mark_step_complete(init, stage) {
     for (var i = 0; i < vec_len(steps); i = i + 1) {
         var step = vec_get(steps, i);
         if (load64(step) == stage) {
-            # Set started_at if not set
             if (load64(step + 40) == 0) {
                 store64(step + 40, now_ms());
             }
-            # Set boot_started on first step
             if (load64(init + 24) == 0) {
                 store64(init + 24, load64(step + 40));
             }
             store64(step + 32, STEP_COMPLETE);
             store64(step + 48, now_ms());
 
-            # If BootComplete stage, mark overall boot time
+            var sname = boot_stage_str(stage);
+            sakshi_info(sname, strlen(sname));
+
             if (stage == STAGE_BOOT_COMPLETE) {
                 store64(init + 32, now_ms());
+                sakshi_info("boot complete", 13);
             }
             return 1;
         }
@@ -191,11 +194,12 @@ fn init_set_service_state(init, name, state) {
 # =========================================================================
 
 fn init_start_service(init, name) {
+    sakshi_span_enter(name, strlen(name));
     var ms = init_get_service(init, name);
-    if (ms == 0) { return 0 - 1; }
+    if (ms == 0) { sakshi_span_exit(); return 0 - 1; }
 
     var sd = managed_svc_def(ms);
-    if (svc_def_enabled(sd) == 0) { return 0 - 1; }
+    if (svc_def_enabled(sd) == 0) { sakshi_span_exit(); return 0 - 1; }
 
     if (init_set_service_state(init, name, STATE_STARTING) == 0) {
         return 0 - 1;
@@ -203,17 +207,20 @@ fn init_start_service(init, name) {
 
     var svc_type = svc_def_service_type(sd);
 
+    var result = 0 - 1;
     if (svc_type == SVC_SIMPLE) {
-        return init_start_simple(init, name, ms, sd);
+        result = init_start_simple(init, name, ms, sd);
     } elif (svc_type == SVC_ONESHOT) {
-        return init_start_oneshot(init, name, ms, sd);
+        result = init_start_oneshot(init, name, ms, sd);
     } elif (svc_type == SVC_FORKING) {
-        return init_start_forking(init, name, ms, sd);
+        result = init_start_forking(init, name, ms, sd);
+    } else {
+        managed_svc_set_state(ms, STATE_FAILED);
+        sakshi_error("unknown svc type", 16);
     }
 
-    # Unknown service type — don't leave in STATE_STARTING
-    managed_svc_set_state(ms, STATE_FAILED);
-    return 0 - 1;
+    sakshi_span_exit();
+    return result;
 }
 
 fn init_start_simple(init, name, ms, sd) {
@@ -317,6 +324,7 @@ fn init_start_forking(init, name, ms, sd) {
 }
 
 fn init_stop_service(init, name, timeout_ms) {
+    sakshi_info(name, strlen(name));
     if (init_set_service_state(init, name, STATE_STOPPING) == 0) {
         return 0 - 1;
     }
@@ -553,6 +561,7 @@ fn init_poll_health(init, tracker) {
 # =========================================================================
 
 fn init_plan_shutdown(init, shutdown_type) {
+    sakshi_span_enter("shutdown", 8);
     var steps = vec_new();
     var config = load64(init);
 
@@ -609,6 +618,7 @@ fn init_plan_shutdown(init, shutdown_type) {
     store64(plan + 16, config_shutdown_timeout(config));
     store64(plan + 24, wall_msg);
 
+    sakshi_span_exit();
     return plan;
 }
 

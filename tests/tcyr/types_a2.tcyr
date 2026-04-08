@@ -1,0 +1,37 @@
+# types_a2.tcyr - Boot sequences, stage presence
+include "tests/test_header.cyr"
+fn main() {
+    alloc_init();
+test_group("boot-seq");
+# --- Boot sequence counts ---
+assert_eq(vec_len(build_boot_sequence(BOOT_MINIMAL)), 6, "min 6 steps");
+assert_eq(vec_len(build_boot_sequence(BOOT_SERVER)), 9, "srv 9 steps");
+assert_eq(vec_len(build_boot_sequence(BOOT_DESKTOP)), 11, "dsk 11 steps");
+assert_eq(vec_len(build_boot_sequence(BOOT_EDGE)), 6, "edge 6 steps");
+assert_eq(vec_len(build_boot_sequence(BOOT_RECOVERY)), 5, "rec 5 steps");
+
+# --- Stage presence ---
+var min_s = build_boot_sequence(BOOT_MINIMAL);
+assert(steps_has_stage(min_s, STAGE_AGENT_RUNTIME), "min has agent");
+assert(steps_has_stage(min_s, STAGE_BOOT_COMPLETE), "min has done");
+assert(1 - steps_has_stage(min_s, STAGE_COMPOSITOR), "min no comp");
+assert(1 - steps_has_stage(min_s, STAGE_LLM_GATEWAY), "min no llm");
+assert(1 - steps_has_stage(min_s, STAGE_DATABASE), "min no db");
+
+var srv_s = build_boot_sequence(BOOT_SERVER);
+assert(steps_has_stage(srv_s, STAGE_DATABASE), "srv has db");
+assert(steps_has_stage(srv_s, STAGE_LLM_GATEWAY), "srv has llm");
+assert(1 - steps_has_stage(srv_s, STAGE_COMPOSITOR), "srv no comp");
+
+var dsk_s = build_boot_sequence(BOOT_DESKTOP);
+assert(steps_has_stage(dsk_s, STAGE_COMPOSITOR), "dsk has comp");
+assert(steps_has_stage(dsk_s, STAGE_SHELL), "dsk has shell");
+
+var edge_s = build_boot_sequence(BOOT_EDGE);
+assert(1 - steps_has_stage(edge_s, STAGE_DATABASE), "edge no db");
+assert(1 - steps_has_stage(edge_s, STAGE_COMPOSITOR), "edge no comp");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

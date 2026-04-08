@@ -1,0 +1,55 @@
+# types.tcyr - Tests for types, boot sequences, default services, config
+include "tests/test_header.cyr"
+fn main() {
+    alloc_init();
+
+test_group("types-boot-services");
+
+# --- BootMode ---
+assert(streq(boot_mode_str(BOOT_SERVER), "server"), "mode server");
+assert(streq(boot_mode_str(BOOT_DESKTOP), "desktop"), "mode desktop");
+assert(streq(boot_mode_str(BOOT_MINIMAL), "minimal"), "mode minimal");
+assert(streq(boot_mode_str(BOOT_EDGE), "edge"), "mode edge");
+assert(streq(boot_mode_str(BOOT_RECOVERY), "recovery"), "mode recovery");
+
+# --- BootStage ordering ---
+assert(STAGE_MOUNT_FS < STAGE_DEVICE_MGR, "stage mount<device");
+assert(STAGE_DEVICE_MGR < STAGE_VERIFY_ROOTFS, "stage dev<verify");
+assert(STAGE_SECURITY < STAGE_DATABASE, "stage sec<db");
+assert(STAGE_DATABASE < STAGE_AGENT_RUNTIME, "stage db<agent");
+assert(STAGE_LLM_GATEWAY < STAGE_MODEL_SERVICES, "stage llm<model");
+assert(STAGE_COMPOSITOR < STAGE_SHELL, "stage comp<shell");
+assert(STAGE_SHELL < STAGE_BOOT_COMPLETE, "stage shell<done");
+
+# --- BootStage display ---
+assert(streq(boot_stage_str(STAGE_MOUNT_FS), "mount-filesystems"), "stage str mount");
+assert(streq(boot_stage_str(STAGE_BOOT_COMPLETE), "boot-complete"), "stage str done");
+assert(streq(boot_stage_str(STAGE_DATABASE), "start-database-services"), "stage str db");
+
+# --- BootStepStatus ---
+assert(streq(step_status_str(STEP_PENDING), "pending"), "step pending");
+assert(streq(step_status_str(STEP_RUNNING), "running"), "step running");
+assert(streq(step_status_str(STEP_COMPLETE), "complete"), "step complete");
+assert(streq(step_status_str(STEP_FAILED), "failed"), "step failed");
+assert(streq(step_status_str(STEP_SKIPPED), "skipped"), "step skipped");
+
+# --- RestartPolicy ---
+assert(streq(restart_policy_str(RESTART_ALWAYS), "always"), "pol always");
+assert(streq(restart_policy_str(RESTART_ON_FAILURE), "on-failure"), "pol onfail");
+assert(streq(restart_policy_str(RESTART_NEVER), "never"), "pol never");
+
+# --- ServiceType ---
+assert(streq(service_type_str(SVC_SIMPLE), "simple"), "type simple");
+assert(streq(service_type_str(SVC_FORKING), "forking"), "type forking");
+assert(streq(service_type_str(SVC_ONESHOT), "oneshot"), "type oneshot");
+
+# --- ShutdownType ---
+assert(streq(shutdown_type_str(SHUTDOWN_POWEROFF), "poweroff"), "sd poweroff");
+assert(streq(shutdown_type_str(SHUTDOWN_REBOOT), "reboot"), "sd reboot");
+assert(streq(shutdown_type_str(SHUTDOWN_HALT), "halt"), "sd halt");
+assert(streq(shutdown_type_str(SHUTDOWN_KEXEC), "kexec"), "sd kexec");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

@@ -15,6 +15,7 @@ include "lib/hashmap.cyr"
 include "lib/tagged.cyr"
 include "lib/args.cyr"
 include "lib/bench.cyr"
+include "lib/sakshi.cyr"
 
 include "src/types.cyr"
 include "src/boot.cyr"
