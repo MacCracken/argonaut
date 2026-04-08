@@ -1,111 +1,183 @@
 name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
   workflow_call:
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
 env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+  CYRIUS_VERSION: "2.1.0"
+
 jobs:
-  check:
-    name: Check & Lint
+  # ── Build ──
+  build:
+    name: Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Cyrius toolchain
+        run: |
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          export CYRIUS_HOME="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p build
+          cp "$CYRIUS_HOME/bin/cc2" ./build/cc2
+          cp "$CYRIUS_HOME/bin/cyrb" ./build/cyrb
+          chmod +x ./build/cc2 ./build/cyrb
+          echo "Cyrius $CYRIUS_VERSION installed"
+
+      - name: Build argonaut
+        run: |
+          ./build/cyrb build src/main.cyr build/argonaut
+          echo "argonaut: $(wc -c < build/argonaut) bytes"
+
+      - name: Smoke test
+        run: |
+          ./build/argonaut | tee /tmp/smoke_output
+          grep -q "all systems nominal" /tmp/smoke_output
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-features --all-targets -- -D warnings
-      - run: cargo check --all-features
+          name: build-x86_64
+          path: build/argonaut
+          retention-days: 5
+
+  # ── Check & Format ──
+  check:
+    name: Check & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        run: |
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          export CYRIUS_HOME="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p build
+          cp "$CYRIUS_HOME/bin/cc2" ./build/cc2
+          cp "$CYRIUS_HOME/bin/cyrb" ./build/cyrb
+          chmod +x ./build/cc2 ./build/cyrb
+
+      - name: Syntax check (entry point)
+        run: |
+          ./build/cyrb check src/main.cyr
+          echo "PASS: src/main.cyr"
+
+  # ── Security ──
   security:
-    name: Security Audit
+    name: Security Scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cargo-audit
-      - run: cargo audit
-  deny:
-    name: Supply Chain
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+
+      - name: Scan for dangerous patterns
+        run: |
+          WARN=0
+          # Check for raw execve outside process_mgmt.cyr
+          if grep -rn 'syscall(59' src/ 2>/dev/null | grep -v "# " | grep -v process_mgmt; then
+            echo "WARN: raw execve outside process_mgmt"
+            WARN=1
+          fi
+          # Check for hardcoded paths that bypass validation
+          if grep -rn '"/etc/shadow"' src/ 2>/dev/null; then
+            echo "WARN: direct shadow file access"
+            WARN=1
+          fi
+          # Check for unwrapped shell commands
+          if grep -rn 'system(' src/ 2>/dev/null | grep -v "# "; then
+            echo "WARN: raw system() call (use SafeCommand)"
+            WARN=1
+          fi
+          echo "security scan complete (warnings: $WARN)"
+
+  # ── Tests ──
   test:
     name: Test
-    needs: [check]
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-features
-      - run: cargo test --doc
-  test-minimal:
-    name: Test (minimal features)
-    needs: [check]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --no-default-features
-      - run: cargo test --no-default-features --features audit
-      - run: cargo test --no-default-features --features security
-  msrv:
-    name: MSRV (1.89)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.89"
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-features
-      - run: cargo test --all-features
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-    needs: [check]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-llvm-cov
-      - run: cargo llvm-cov --all-features --lcov --output-path lcov.info
-      - uses: codecov/codecov-action@v4
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        with:
-          files: lcov.info
-          fail_ci_if_error: false
-  semver:
-    name: SemVer Checks
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-semver-checks
-      - name: Run semver checks (non-blocking)
+
+      - name: Install Cyrius toolchain
         run: |
-          # Use latest tag as baseline if available, otherwise HEAD~1.
-          # Falls back gracefully when baseline deps can't resolve
-          # (e.g., upstream dep version bumped between commits).
-          BASELINE=$(git describe --tags --abbrev=0 2>/dev/null || echo "HEAD~1")
-          echo "Baseline: $BASELINE"
-          cargo semver-checks check-release --all-features --baseline-rev "$BASELINE" || {
-            echo "::warning::semver-checks failed (may be due to upstream dep version change)"
-            true
-          }
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          export CYRIUS_HOME="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p build
+          cp "$CYRIUS_HOME/bin/cc2" ./build/cc2
+          cp "$CYRIUS_HOME/bin/cyrb" ./build/cyrb
+          chmod +x ./build/cc2 ./build/cyrb
+
+      - name: Run test suite
+        run: ./build/cyrb test
+
+  # ── Benchmarks ──
+  benchmarks:
+    name: Benchmarks
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        run: |
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          export CYRIUS_HOME="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p build
+          cp "$CYRIUS_HOME/bin/cc2" ./build/cc2
+          cp "$CYRIUS_HOME/bin/cyrb" ./build/cyrb
+          chmod +x ./build/cc2 ./build/cyrb
+
+      - name: Run benchmarks
+        run: ./build/cyrb bench
+        continue-on-error: true
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmarks
+          path: bench-history.csv
+          retention-days: 90
+
+  # ── Documentation ──
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required docs exist
+        run: |
+          MISSING=0
+          for doc in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md LICENSE; do
+            if [ -f "$doc" ]; then
+              echo "  OK: $doc"
+            else
+              echo "  MISSING: $doc"
+              MISSING=1
+            fi
+          done
+          exit $MISSING
+
+      - name: Verify version consistency
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          CYRB_VERSION=$(grep '^version' cyrb.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "VERSION file: $VERSION"
+          echo "cyrb.toml:    $CYRB_VERSION"
+          if [ "$VERSION" != "$CYRB_VERSION" ]; then
+            echo "FAIL: VERSION != cyrb.toml"
+            exit 1
+          fi
+          echo "Version consistent"

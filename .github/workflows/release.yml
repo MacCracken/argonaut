@@ -2,40 +2,63 @@ name: Release
 
 on:
   push:
-    tags:
-      - "[0-9]*.[0-9]*.[0-9]*"
+    tags: ['[0-9]*']
 
 permissions:
   contents: write
 
+env:
+  CYRIUS_VERSION: "2.1.0"
+
 jobs:
+  # ── CI Gate (must pass before release) ──
   ci:
     name: CI Gate
     uses: ./.github/workflows/ci.yml
 
-  release:
-    name: Create GitHub Release
-    runs-on: ubuntu-latest
+  # ── Build release binary ──
+  build:
+    name: Build Release
     needs: [ci]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
 
       - name: Verify version consistency
         run: |
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          CYRB_VERSION=$(grep '^version' cyrb.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           TAG_VERSION="${GITHUB_REF_NAME}"
           if [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
             echo "ERROR: VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"
             exit 1
           fi
-          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
-            echo "ERROR: Cargo.toml ($CARGO_VERSION) != tag ($TAG_VERSION)"
+          if [ "$CYRB_VERSION" != "$TAG_VERSION" ]; then
+            echo "ERROR: cyrb.toml ($CYRB_VERSION) != tag ($TAG_VERSION)"
             exit 1
           fi
           echo "Version verified: $TAG_VERSION"
+
+      - name: Install Cyrius toolchain
+        run: |
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          export CYRIUS_HOME="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p build
+          cp "$CYRIUS_HOME/bin/cc2" ./build/cc2
+          cp "$CYRIUS_HOME/bin/cyrb" ./build/cyrb
+          chmod +x ./build/cc2 ./build/cyrb
+
+      - name: Build x86_64 binary
+        run: |
+          ./build/cyrb build src/main.cyr build/argonaut
+          echo "argonaut: $(wc -c < build/argonaut) bytes"
+          cp build/argonaut argonaut-x86_64
+
+      - name: Smoke test
+        run: |
+          ./argonaut-x86_64 | grep -q "all systems nominal"
+          echo "PASS: smoke test"
 
       - name: Extract changelog
         id: changelog
@@ -43,43 +66,51 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           BODY=$(awk "/^## \\[$VERSION\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md)
           if [ -z "$BODY" ]; then
-            echo "WARNING: No CHANGELOG entry found for $VERSION"
             BODY="No changelog entry for this release."
           fi
           echo "$BODY" > /tmp/release-body.md
 
-      - name: Build release
-        run: cargo build --release --all-features
-
-      - name: Run benchmarks
-        run: |
-          cargo install cargo-criterion --locked 2>/dev/null || true
-          ./scripts/bench-history.sh "release-${GITHUB_REF_NAME}" || true
-
-      - name: Build source tarball
+      - name: Create source archive
         run: |
           TAG="${GITHUB_REF_NAME}"
-          git archive --format=tar.gz --prefix="argonaut-${TAG}/" -o "argonaut-${TAG}.tar.gz" HEAD
-
-      - name: Vendor dependencies
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          cargo vendor vendor/
-          tar czf "argonaut-${TAG}-vendor.tar.gz" vendor/
-          rm -rf vendor/
+          git archive --format=tar.gz --prefix="argonaut-${TAG}/" -o "argonaut-${TAG}-src.tar.gz" HEAD
 
       - name: Generate checksums
         run: |
           TAG="${GITHUB_REF_NAME}"
-          sha256sum argonaut-${TAG}.tar.gz argonaut-${TAG}-vendor.tar.gz > SHA256SUMS
+          sha256sum argonaut-x86_64 "argonaut-${TAG}-src.tar.gz" > SHA256SUMS
+          cat SHA256SUMS
 
-      - name: Create GitHub Release
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: |
+            argonaut-x86_64
+            argonaut-*-src.tar.gz
+            SHA256SUMS
+          retention-days: 5
+
+  # ── Create GitHub Release ──
+  release:
+    name: Create GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-binaries
+
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           name: "argonaut ${{ github.ref_name }}"
           body_path: /tmp/release-body.md
           prerelease: ${{ startsWith(github.ref_name, '0.') }}
           files: |
-            argonaut-${{ github.ref_name }}.tar.gz
-            argonaut-${{ github.ref_name }}-vendor.tar.gz
+            argonaut-x86_64
+            argonaut-${{ github.ref_name }}-src.tar.gz
             SHA256SUMS
