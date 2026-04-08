@@ -138,7 +138,7 @@ struct AuditEntry {
 }
 
 fn audit_entry_new(severity, source, action, service, prev_hash) {
-    var e = alloc(56);  # 7 fields * 8 bytes
+    var e = alloc(sizeof(AuditEntry));
     store64(e, now_ms());
     store64(e + 8, severity);
     store64(e + 16, source);
@@ -157,10 +157,10 @@ fn audit_entry_compute_hash(e) {
     var h = 2166136261;  # FNV-1a offset basis
     # Mix in timestamp
     var ts = load64(e);
-    h = h ^ (ts & 255);         h = h * 16777619;
-    h = h ^ ((ts >> 8) & 255);  h = h * 16777619;
-    h = h ^ ((ts >> 16) & 255); h = h * 16777619;
-    h = h ^ ((ts >> 24) & 255); h = h * 16777619;
+    h = h ^ bitget(ts, 0, 8);   h = h * 16777619;
+    h = h ^ bitget(ts, 8, 8);   h = h * 16777619;
+    h = h ^ bitget(ts, 16, 8);  h = h * 16777619;
+    h = h ^ bitget(ts, 24, 8);  h = h * 16777619;
     # Mix in severity
     h = h ^ load64(e + 8);      h = h * 16777619;
     # Mix in source string
@@ -183,10 +183,10 @@ fn audit_entry_compute_hash(e) {
     }
     # Mix in prev_hash
     var ph = load64(e + 40);
-    h = h ^ (ph & 255);         h = h * 16777619;
-    h = h ^ ((ph >> 8) & 255);  h = h * 16777619;
-    h = h ^ ((ph >> 16) & 255); h = h * 16777619;
-    h = h ^ ((ph >> 24) & 255); h = h * 16777619;
+    h = h ^ bitget(ph, 0, 8);   h = h * 16777619;
+    h = h ^ bitget(ph, 8, 8);   h = h * 16777619;
+    h = h ^ bitget(ph, 16, 8);  h = h * 16777619;
+    h = h ^ bitget(ph, 24, 8);  h = h * 16777619;
     return h;
 }
 
@@ -213,7 +213,7 @@ struct AuditLog {
 }
 
 fn audit_log_new() {
-    var log = alloc(8);
+    var log = alloc(sizeof(AuditLog));
     store64(log, vec_new());
     return log;
 }

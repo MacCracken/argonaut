@@ -1,0 +1,97 @@
+# lifecycle.tcyr — Boot steps, crash, shutdown, emergency, runlevels
+include "tests/test_header.cyr"
+alloc_init();
+
+test_group("lifecycle-crash-shutdown");
+
+# --- Boot step marking ---
+var init3 = minimal_init();
+assert(init_mark_step_complete(init3, STAGE_MOUNT_FS), "mark mount done");
+assert(load64(init3 + 24) > 0, "boot_started set");
+assert(1 - init_mark_step_complete(init3, STAGE_COMPOSITOR), "comp not in min");
+
+var init4 = minimal_init();
+init_mark_step_failed(init4, STAGE_VERIFY_ROOTFS, str_from("bad hash"));
+var failed = init_failed_steps(init4);
+assert_eq(vec_len(failed), 1, "1 failed step");
+
+# --- Boot complete ---
+var init5 = minimal_init();
+var steps5 = load64(init5 + 8);
+for (var i = 0; i < vec_len(steps5); i = i + 1) {
+    store64(vec_get(steps5, i) + 32, STEP_COMPLETE);
+}
+assert(init_is_boot_complete(init5), "all done = complete");
+
+# --- Boot duration ---
+var init6 = minimal_init();
+store64(init6 + 24, 1000);
+store64(init6 + 32, 2234);
+assert_eq(init_boot_duration_ms(init6), 1234, "dur 1234ms");
+
+# --- Stats ---
+var sinit2 = server_init();
+init_set_service_state(sinit2, "postgres", STATE_STARTING);
+init_set_service_state(sinit2, "postgres", STATE_RUNNING);
+init_set_service_state(sinit2, "redis", STATE_STARTING);
+init_set_service_state(sinit2, "redis", STATE_RUNNING);
+init_set_service_state(sinit2, "daimon", STATE_STARTING);
+init_set_service_state(sinit2, "daimon", STATE_RUNNING);
+var st = init_stats(sinit2);
+assert_eq(load64(st + 16), 3, "3 running");
+
+# --- Crash actions ---
+var cinit = minimal_init();
+var cms = init_get_service(cinit, "daimon");
+assert_eq(load64(on_service_crash(cms, 1)), CRASH_RESTART, "always restarts");
+
+var sinit3 = server_init();
+var pg = init_get_service(sinit3, "postgres");
+assert_eq(load64(on_service_crash(pg, 0)), CRASH_IGNORE, "onfail clean=ign");
+assert_eq(load64(on_service_crash(pg, 1)), CRASH_RESTART, "onfail err=rest");
+
+var cinit2 = minimal_init();
+var cms2 = init_get_service(cinit2, "daimon");
+managed_svc_set_restarts(cms2, 5);
+assert_eq(load64(on_service_crash(cms2, 11)), CRASH_GIVE_UP, "limit=giveup");
+
+# --- Shutdown plan ---
+var dinit = desktop_init();
+var plan = init_plan_shutdown(dinit, SHUTDOWN_REBOOT);
+assert_eq(load64(plan), SHUTDOWN_REBOOT, "plan reboot");
+var psteps = load64(plan + 8);
+assert(vec_len(psteps) > 0, "plan has steps");
+var last_step = vec_get(psteps, vec_len(psteps) - 1);
+assert_eq(load64(last_step + 8), SA_KERNEL_ACTION, "last=kernel");
+assert(load64(plan + 24) != 0, "has wall msg");
+
+# --- Emergency shell ---
+var esc = emergency_shell_default();
+assert_eq(load64(esc + 24), 0, "no auth req");
+assert(str_contains(load64(esc + 16), str_from("Emergency")), "banner");
+
+var einit = server_init();
+init_mark_step_failed(einit, STAGE_MOUNT_FS, str_from("disk err"));
+assert(init_should_drop_to_emergency(einit), "drop on fail");
+assert(1 - init_should_drop_to_emergency(desktop_init()), "no drop ok");
+
+# --- Runlevel switch ---
+var minit = minimal_init();
+init_set_service_state(minit, "daimon", STATE_STARTING);
+init_set_service_state(minit, "daimon", STATE_RUNNING);
+var targets = default_targets();
+var eplan = init_plan_runlevel_switch(minit, RL_EMERGENCY, targets);
+assert(load64(eplan + 32), "em drops shell");
+assert_eq(vec_len(load64(eplan + 16)), 0, "em starts 0");
+assert(vec_len(load64(eplan + 24)) > 0, "em stops svcs");
+
+# --- Edge init ---
+var ei = edge_init_fn();
+assert_eq(map_count(load64(ei + 16)), 1, "edge 1 svc");
+var esteps = load64(ei + 8);
+for (var i = 0; i < vec_len(esteps); i = i + 1) {
+    store64(vec_get(esteps, i) + 32, STEP_COMPLETE);
+}
+assert(init_is_boot_complete(ei), "edge completes");
+
+var r = assert_summary();

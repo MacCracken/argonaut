@@ -174,7 +174,7 @@ fn execute_health_check(service_name, hc, pid) {
 
     var latency = monotonic_ms() - start;
 
-    var result = alloc(48);  # HealthCheckResult
+    var result = alloc(sizeof(HealthCheckResult));
     store64(result, service_name);
     store64(result + 8, str_from(boot_stage_str(0)));  # placeholder
     store64(result + 16, passed);
@@ -199,11 +199,19 @@ fn execute_ready_check(service_name, rc, pid) {
 
     var overall_start = monotonic_ms();
 
+    # Pre-allocate temporary HealthCheck outside retry loop
+    var hc = alloc(sizeof(HealthCheck));
+    store64(hc, check_type);
+    store64(hc + 8, target);
+    store64(hc + 16, port);
+    store64(hc + 24, 0);        # interval (unused)
+    store64(hc + 40, 0);        # retries (unused)
+
     for (var attempt = 0; attempt <= retries; attempt = attempt + 1) {
         var remaining = timeout - (monotonic_ms() - overall_start);
         if (remaining <= 0) {
             # Timed out
-            var result = alloc(48);
+            var result = alloc(sizeof(HealthCheckResult));
             store64(result, service_name);
             store64(result + 8, 0);
             store64(result + 16, 0);  # not passed
@@ -213,14 +221,8 @@ fn execute_ready_check(service_name, rc, pid) {
             return result;
         }
 
-        # Build a temporary HealthCheck for execute_health_check
-        var hc = alloc(48);
-        store64(hc, check_type);
-        store64(hc + 8, target);
-        store64(hc + 16, port);
-        store64(hc + 24, 0);        # interval (unused)
-        store64(hc + 32, remaining); # timeout
-        store64(hc + 40, 0);        # retries (unused)
+        # Update remaining timeout for this attempt
+        store64(hc + 32, remaining);
 
         var result = execute_health_check(service_name, hc, pid);
         if (load64(result + 16)) {  # passed
@@ -237,7 +239,7 @@ fn execute_ready_check(service_name, rc, pid) {
     }
 
     # All retries exhausted
-    var result = alloc(48);
+    var result = alloc(sizeof(HealthCheckResult));
     store64(result, service_name);
     store64(result + 8, 0);
     store64(result + 16, 0);
@@ -266,7 +268,7 @@ struct HealthHistory {
 
 fn health_history_new(capacity) {
     if (capacity < 1) { capacity = 1; }
-    var hh = alloc(48);
+    var hh = alloc(sizeof(HealthHistory));
     store64(hh, vec_new());
     store64(hh + 8, capacity);
     store64(hh + 16, 0);  # write_pos

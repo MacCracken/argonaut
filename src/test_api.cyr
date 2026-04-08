@@ -117,6 +117,30 @@ fn main() {
     proc_table_remove(str_from("svc-a"));
     assert_eq(proc_table_count(), 0, "pt removed");
 
+    # --- Process table: multi-entry + keys ---
+    proc_table_init();
+    proc_table_insert(str_from("alpha"), 100);
+    proc_table_insert(str_from("beta"), 200);
+    proc_table_insert(str_from("gamma"), 300);
+    assert_eq(proc_table_count(), 3, "pt multi count");
+    assert(proc_table_has(str_from("beta")), "pt has beta");
+    assert_eq(proc_table_pid(str_from("gamma")), 300, "pt gamma pid");
+    assert_eq(proc_table_has(str_from("nonexistent")), 0, "pt no ghost");
+    assert_eq(proc_table_pid(str_from("nonexistent")), 0, "pt ghost pid 0");
+
+    var keys = proc_table_keys();
+    assert_eq(vec_len(keys), 3, "pt keys len 3");
+
+    proc_table_remove(str_from("beta"));
+    assert_eq(proc_table_count(), 2, "pt after remove");
+    assert_eq(proc_table_has(str_from("beta")), 0, "pt beta gone");
+    assert(proc_table_has(str_from("alpha")), "pt alpha still");
+    assert(proc_table_has(str_from("gamma")), "pt gamma still");
+
+    # Reinit clears everything
+    proc_table_init();
+    assert_eq(proc_table_count(), 0, "pt reinit empty");
+
     # --- Notify: socket env ---
     var nenv = socket_env_listen_fds(3, 42);
     assert_eq(vec_len(nenv), 4, "nenv 4 items");

@@ -1,0 +1,121 @@
+# advanced.tcyr — Service waves, edge profile, env files, API, creation
+include "tests/test_header.cyr"
+alloc_init();
+
+test_group("waves-edge-env-api");
+
+# --- Service waves ---
+# No deps = 1 wave with all services
+var indep = vec_new();
+vec_push(indep, dummy_svc(str_from("a"), 0));
+vec_push(indep, dummy_svc(str_from("b"), 0));
+vec_push(indep, dummy_svc(str_from("c"), 0));
+var w1 = resolve_service_waves(indep);
+assert(w1 != 0, "indep waves ok");
+assert_eq(vec_len(w1), 1, "indep 1 wave");
+assert_eq(vec_len(vec_get(w1, 0)), 3, "indep wave has 3");
+
+# Linear chain = N waves of 1
+var linear = vec_new();
+vec_push(linear, dummy_svc(str_from("x"), 0));
+var dy = vec_new();
+vec_push(dy, str_from("x"));
+vec_push(linear, dummy_svc(str_from("y"), dy));
+var dz = vec_new();
+vec_push(dz, str_from("y"));
+vec_push(linear, dummy_svc(str_from("z"), dz));
+var w2 = resolve_service_waves(linear);
+assert(w2 != 0, "linear waves ok");
+assert_eq(vec_len(w2), 3, "linear 3 waves");
+
+# Diamond: a -> b,c -> d
+var diamond = vec_new();
+vec_push(diamond, dummy_svc(str_from("a"), 0));
+var db2 = vec_new();
+vec_push(db2, str_from("a"));
+vec_push(diamond, dummy_svc(str_from("b"), db2));
+var dc2 = vec_new();
+vec_push(dc2, str_from("a"));
+vec_push(diamond, dummy_svc(str_from("c"), dc2));
+var dd2 = vec_new();
+vec_push(dd2, str_from("b"));
+vec_push(dd2, str_from("c"));
+vec_push(diamond, dummy_svc(str_from("d"), dd2));
+var w3 = resolve_service_waves(diamond);
+assert(w3 != 0, "diamond waves ok");
+assert_eq(vec_len(w3), 3, "diamond 3 waves");
+assert_eq(vec_len(vec_get(w3, 0)), 1, "diamond w0=1");
+assert_eq(vec_len(vec_get(w3, 1)), 2, "diamond w1=2");
+assert_eq(vec_len(vec_get(w3, 2)), 1, "diamond w2=1");
+
+# Wave cycle detection
+var cyc = vec_new();
+var da3 = vec_new();
+vec_push(da3, str_from("b"));
+vec_push(cyc, dummy_svc(str_from("a"), da3));
+var db3 = vec_new();
+vec_push(db3, str_from("a"));
+vec_push(cyc, dummy_svc(str_from("b"), db3));
+assert_eq(resolve_service_waves(cyc), 0, "wave cycle=0");
+
+# Desktop waves
+var dsk = default_services(BOOT_DESKTOP);
+var dw = resolve_service_waves(dsk);
+assert(dw != 0, "dsk waves ok");
+assert(vec_len(dw) > 1, "dsk multi waves");
+
+# Single service = 1 wave
+var single = vec_new();
+vec_push(single, dummy_svc(str_from("solo"), 0));
+var sw = resolve_service_waves(single);
+assert_eq(vec_len(sw), 1, "single 1 wave");
+
+# --- Edge profile validation ---
+var good_result = alloc(48);
+store64(good_result, 1);       # rootfs_locked
+store64(good_result + 8, 1);   # verity_verified
+store64(good_result + 16, 1);  # luks_unlocked
+store64(good_result + 24, 500); # boot_time_ms
+store64(good_result + 32, 1);  # within_budget
+store64(good_result + 40, vec_new());  # no errors
+var violations = validate_edge_profile(good_result, 0);  # 0 = skip memory check
+assert_eq(vec_len(violations), 0, "good profile ok");
+
+# Budget exceeded
+var bad_budget = alloc(48);
+store64(bad_budget, 1);
+store64(bad_budget + 8, 1);
+store64(bad_budget + 16, 1);
+store64(bad_budget + 24, 5000);
+store64(bad_budget + 32, 0);  # NOT within budget
+store64(bad_budget + 40, vec_new());
+var bv = validate_edge_profile(bad_budget, 256);
+assert(vec_len(bv) > 0, "budget exceeded flagged");
+
+# Rootfs not locked
+var bad_rootfs = alloc(48);
+store64(bad_rootfs, 0);  # NOT locked
+store64(bad_rootfs + 8, 1);
+store64(bad_rootfs + 16, 1);
+store64(bad_rootfs + 24, 500);
+store64(bad_rootfs + 32, 1);
+store64(bad_rootfs + 40, vec_new());
+var rv = validate_edge_profile(bad_rootfs, 256);
+assert(vec_len(rv) > 0, "rootfs unlocked flagged");
+
+# Multiple violations
+var bad_multi = alloc(48);
+store64(bad_multi, 0);
+store64(bad_multi + 8, 0);
+store64(bad_multi + 16, 0);
+store64(bad_multi + 24, 9000);
+store64(bad_multi + 32, 0);
+var errs = vec_new();
+vec_push(errs, str_from("error1"));
+store64(bad_multi + 40, errs);
+var mv = validate_edge_profile(bad_multi, 256);
+assert(vec_len(mv) >= 2, "multiple violations");
+
+# (LUKS, dm-verity, env files, name validation, runlevel, stage tests in other suites)
+
+var r = assert_summary();

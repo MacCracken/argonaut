@@ -1,30 +1,33 @@
 #!/bin/sh
-# Argonaut test + benchmark runner
-set -e
+# Argonaut test + benchmark runner (v2.0 — .tcyr/.bcyr format)
 
 CC="${1:-$HOME/.cyrius/bin/cc2}"
 BUILD="build"
 mkdir -p "$BUILD"
 
-TOTAL_PASS=0
 TOTAL_FAIL=0
 
-# test_serde unblocked — cc2 bug #12 fixed (v1.11.1+)
-for suite in test_types test_init test_lifecycle test_modules test_display test_advanced test_api test_audit test_serde; do
+# Run .tcyr test suites from tests/tcyr/
+for tcyr in tests/tcyr/*.tcyr; do
+    suite=$(basename "$tcyr" .tcyr)
     echo "--- Compiling $suite ---"
-    cat "src/${suite}.cyr" | "$CC" > "$BUILD/$suite" 2>/dev/null
-    chmod +x "$BUILD/$suite"
+    cat "$tcyr" | "$CC" > "$BUILD/test_$suite" 2>/dev/null
+    chmod +x "$BUILD/test_$suite"
     echo "--- Running $suite ---"
-    "./$BUILD/$suite"
-    RESULT=$?
-    TOTAL_FAIL=$((TOTAL_FAIL + RESULT))
+    "./$BUILD/test_$suite"
+    TOTAL_FAIL=$((TOTAL_FAIL + $?))
     echo ""
 done
 
-echo "=== Compiling benchmarks ==="
-cat src/bench_main.cyr | "$CC" > "$BUILD/argonaut_bench" 2>/dev/null
-chmod +x "$BUILD/argonaut_bench"
-echo "=== Running benchmarks ==="
-"./$BUILD/argonaut_bench"
+# Run .bcyr benchmarks from tests/bcyr/
+for bcyr in tests/bcyr/*.bcyr; do
+    bench=$(basename "$bcyr" .bcyr)
+    echo "=== Compiling benchmark: $bench ==="
+    cat "$bcyr" | "$CC" > "$BUILD/${bench}_bench" 2>/dev/null
+    chmod +x "$BUILD/${bench}_bench"
+    echo "=== Running benchmark: $bench ==="
+    "./$BUILD/${bench}_bench"
+    echo ""
+done
 
 exit $TOTAL_FAIL

@@ -17,7 +17,7 @@ struct NotifyMessage {
 }
 
 fn notify_msg_new() {
-    var msg = alloc(56);
+    var msg = alloc(sizeof(NotifyMessage));
     store64(msg, 0);          # ready
     store64(msg + 8, 0);      # status
     store64(msg + 16, 0);     # main_pid

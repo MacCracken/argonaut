@@ -231,17 +231,11 @@ fn default_services(mode) {
 # Dependency resolution — topological sort (Kahn's algorithm)
 # =========================================================================
 
-# Resolve startup order for services. Returns vec of service name Strs.
-# Returns 0 on error (cycle or missing dependency).
-fn resolve_service_order(svc_defs) {
-    var count = vec_len(svc_defs);
-    if (count == 0) { return vec_new(); }
-
-    # Build in-degree map and dependents map
-    var in_degree = map_new();   # name -> count
-    var dependents = map_new();  # name -> vec of dependent names
-
-    for (var i = 0; i < count; i = i + 1) {
+# Build in-degree and dependents maps from service definitions.
+# Returns in_degree map via first arg, dependents map via second.
+# Both are map_new() maps: name -> count, name -> vec of dependent names.
+fn build_dep_graph(svc_defs, in_degree, dependents) {
+    for (var i = 0; i < vec_len(svc_defs); i = i + 1) {
         var sd = vec_get(svc_defs, i);
         var name = str_data(svc_def_name(sd));
         if (map_has(in_degree, name) == 0) {
@@ -251,12 +245,9 @@ fn resolve_service_order(svc_defs) {
         var deps = svc_def_deps(sd);
         for (var j = 0; j < vec_len(deps); j = j + 1) {
             var dep = str_data(vec_get(deps, j));
-
-            # Increment in-degree for this service
             var deg = map_get(in_degree, name);
             map_set(in_degree, name, deg + 1);
 
-            # Add to dependents list
             var dep_list = map_get(dependents, dep);
             if (dep_list == 0) {
                 dep_list = vec_new();
@@ -265,6 +256,17 @@ fn resolve_service_order(svc_defs) {
             vec_push(dep_list, str_from(name));
         }
     }
+}
+
+# Resolve startup order for services. Returns vec of service name Strs.
+# Returns 0 on error (cycle or missing dependency).
+fn resolve_service_order(svc_defs) {
+    var count = vec_len(svc_defs);
+    if (count == 0) { return vec_new(); }
+
+    var in_degree = map_new();
+    var dependents = map_new();
+    build_dep_graph(svc_defs, in_degree, dependents);
 
     # BFS: start with in-degree 0 nodes
     var queue = vec_new();
@@ -314,28 +316,7 @@ fn resolve_service_waves(svc_defs) {
 
     var in_degree = map_new();
     var dependents = map_new();
-
-    for (var i = 0; i < count; i = i + 1) {
-        var sd = vec_get(svc_defs, i);
-        var name = str_data(svc_def_name(sd));
-        if (map_has(in_degree, name) == 0) {
-            map_set(in_degree, name, 0);
-        }
-
-        var deps = svc_def_deps(sd);
-        for (var j = 0; j < vec_len(deps); j = j + 1) {
-            var dep = str_data(vec_get(deps, j));
-            var deg = map_get(in_degree, name);
-            map_set(in_degree, name, deg + 1);
-
-            var dep_list = map_get(dependents, dep);
-            if (dep_list == 0) {
-                dep_list = vec_new();
-                map_set(dependents, dep, dep_list);
-            }
-            vec_push(dep_list, str_from(name));
-        }
-    }
+    build_dep_graph(svc_defs, in_degree, dependents);
 
     var waves = vec_new();
     var resolved = 0;
@@ -389,7 +370,7 @@ fn on_service_crash(ms, exit_code) {
     var rc = svc_def_restart_config(sd);
     var restarts = managed_svc_restarts(ms);
 
-    var action = alloc(24);  # CrashAction
+    var action = alloc(sizeof(CrashAction));
 
     if (policy == RESTART_NEVER) {
         store64(action, CRASH_IGNORE);
@@ -456,7 +437,7 @@ fn default_targets() {
     var targets = vec_new();
 
     # Basic system services
-    var basic = alloc(40);
+    var basic = alloc(sizeof(ServiceTarget));
     store64(basic, str_from("basic"));
     store64(basic + 8, str_from("Basic system services"));
     var req = vec_new();
@@ -474,7 +455,7 @@ fn default_targets() {
     vec_push(targets, basic);
 
     # Network
-    var net = alloc(40);
+    var net = alloc(sizeof(ServiceTarget));
     store64(net, str_from("network"));
     store64(net + 8, str_from("Network connectivity"));
     var net_req = vec_new();
@@ -491,7 +472,7 @@ fn default_targets() {
     vec_push(targets, net);
 
     # AGNOS core
-    var core = alloc(40);
+    var core = alloc(sizeof(ServiceTarget));
     store64(core, str_from("agnos-core"));
     store64(core + 8, str_from("AGNOS agent runtime and LLM gateway"));
     var core_req = vec_new();
@@ -509,7 +490,7 @@ fn default_targets() {
     vec_push(targets, core);
 
     # Graphical
-    var gfx = alloc(40);
+    var gfx = alloc(sizeof(ServiceTarget));
     store64(gfx, str_from("graphical"));
     store64(gfx + 8, str_from("Desktop environment"));
     var gfx_req = vec_new();
@@ -525,7 +506,7 @@ fn default_targets() {
     vec_push(targets, gfx);
 
     # Edge
-    var edge = alloc(40);
+    var edge = alloc(sizeof(ServiceTarget));
     store64(edge, str_from("edge"));
     store64(edge + 8, str_from("Edge device — minimal agent runtime"));
     var edge_req = vec_new();

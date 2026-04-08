@@ -1,0 +1,148 @@
+# serde.tcyr — JSON serialization tests
+# New API (v1.10.3+): _to_json(ptr) returns Str, no str_builder arg.
+# Deserialize tested via manual json_parse + json_get (derive(Deserialize)
+# has duplicate-variable conflict when combined with Serialize).
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/json.cyr"
+include "lib/assert.cyr"
+
+#derive(Serialize)
+struct TStats { boot_mode; dur_ms; running; failed; restarts; complete; }
+
+#derive(Serialize)
+struct TRestart { max_restarts; base_delay; max_delay; }
+
+#derive(Serialize)
+struct TEdgeCfg { readonly; luks; tpm; max_boot_ms; pcr; }
+
+#derive(Serialize)
+struct TFleet { machine_id; hostname; mode_str; verity; luks; kernel_ver; mem_mb; }
+
+#derive(Serialize)
+struct THcResult { service; check_type; passed; latency_ms; message; checked_at; }
+
+alloc_init();
+test_group("serde-roundtrips");
+
+# --- TStats serialize ---
+var s = alloc(48);
+store64(s, 1);
+store64(s + 8, 1234);
+store64(s + 16, 3);
+store64(s + 24, 1);
+store64(s + 32, 7);
+store64(s + 40, 1);
+var json = TStats_to_json(s);
+assert(str_contains(json, str_from("boot_mode")), "st has mode");
+assert(str_contains(json, str_from("dur_ms")), "st has dur");
+assert(str_contains(json, str_from("restarts")), "st has rest");
+assert(str_contains(json, str_from("complete")), "st has done");
+assert(str_contains(json, str_from("1234")), "st has 1234");
+
+# --- TStats round-trip via json_parse ---
+var p1 = json_parse(json);
+assert_eq(json_get_int(p1, str_from("boot_mode")), 1, "st rt mode");
+assert_eq(json_get_int(p1, str_from("dur_ms")), 1234, "st rt dur");
+assert_eq(json_get_int(p1, str_from("running")), 3, "st rt run");
+assert_eq(json_get_int(p1, str_from("failed")), 1, "st rt fail");
+assert_eq(json_get_int(p1, str_from("restarts")), 7, "st rt rest");
+assert_eq(json_get_int(p1, str_from("complete")), 1, "st rt done");
+
+# --- TRestart serialize + round-trip ---
+var rc = alloc(24);
+store64(rc, 5);
+store64(rc + 8, 1000);
+store64(rc + 16, 30000);
+var rcj = TRestart_to_json(rc);
+assert(str_contains(rcj, str_from("max_restarts")), "rc has max");
+assert(str_contains(rcj, str_from("base_delay")), "rc has base");
+var p2 = json_parse(rcj);
+assert_eq(json_get_int(p2, str_from("max_restarts")), 5, "rc rt max");
+assert_eq(json_get_int(p2, str_from("base_delay")), 1000, "rc rt base");
+assert_eq(json_get_int(p2, str_from("max_delay")), 30000, "rc rt maxd");
+
+# --- TEdgeCfg serialize + round-trip ---
+var ec = alloc(40);
+store64(ec, 1);
+store64(ec + 8, 1);
+store64(ec + 16, 1);
+store64(ec + 24, 3000);
+store64(ec + 32, 0);
+var ecj = TEdgeCfg_to_json(ec);
+assert(str_contains(ecj, str_from("readonly")), "ec has ro");
+assert(str_contains(ecj, str_from("luks")), "ec has luks");
+assert(str_contains(ecj, str_from("3000")), "ec has 3k");
+var p3 = json_parse(ecj);
+assert_eq(json_get_int(p3, str_from("readonly")), 1, "ec rt ro");
+assert_eq(json_get_int(p3, str_from("luks")), 1, "ec rt luks");
+assert_eq(json_get_int(p3, str_from("max_boot_ms")), 3000, "ec rt boot");
+
+# --- TFleet serialize + round-trip ---
+var fr = alloc(56);
+store64(fr, 100);
+store64(fr + 8, 200);
+store64(fr + 16, 300);
+store64(fr + 24, 1);
+store64(fr + 32, 1);
+store64(fr + 40, 400);
+store64(fr + 48, 128);
+var frj = TFleet_to_json(fr);
+assert(str_contains(frj, str_from("machine_id")), "fr has mid");
+assert(str_contains(frj, str_from("hostname")), "fr has host");
+assert(str_contains(frj, str_from("128")), "fr has 128");
+var p4 = json_parse(frj);
+assert_eq(json_get_int(p4, str_from("verity")), 1, "fr rt verity");
+assert_eq(json_get_int(p4, str_from("mem_mb")), 128, "fr rt mem");
+
+# --- Enum values survive round-trip ---
+var edge_s = alloc(48);
+store64(edge_s, 3);
+var ej = TStats_to_json(edge_s);
+var p5 = json_parse(ej);
+assert_eq(json_get_int(p5, str_from("boot_mode")), 3, "enum edge rt");
+
+var rec_s = alloc(48);
+store64(rec_s, 4);
+var rj = TStats_to_json(rec_s);
+var p6 = json_parse(rj);
+assert_eq(json_get_int(p6, str_from("boot_mode")), 4, "enum rec rt");
+
+# --- Zero values survive ---
+var zero = alloc(48);
+memset(zero, 0, 48);
+var zj = TStats_to_json(zero);
+var p7 = json_parse(zj);
+assert_eq(json_get_int(p7, str_from("boot_mode")), 0, "zero mode rt");
+assert_eq(json_get_int(p7, str_from("dur_ms")), 0, "zero dur rt");
+assert_eq(json_get_int(p7, str_from("complete")), 0, "zero done rt");
+
+# --- JSON parse/build ---
+var bp = json_parse(str_from("{\"name\":\"test\",\"value\":\"42\"}"));
+assert(json_get(bp, str_from("name")) != 0, "json get name");
+assert_eq(json_get_int(bp, str_from("value")), 42, "json get int");
+
+var bld = vec_new();
+vec_push(bld, json_pair_new(str_from("k1"), str_from("v1")));
+vec_push(bld, json_pair_new(str_from("k2"), str_from("v2")));
+var built = json_build(bld);
+assert(str_contains(built, str_from("k1")), "built k1");
+assert(str_contains(built, str_from("v1")), "built v1");
+
+# --- THcResult serialize ---
+var hcr = alloc(48);
+store64(hcr, 42);
+store64(hcr + 16, 1);
+store64(hcr + 24, 55);
+var hcrj = THcResult_to_json(hcr);
+assert(str_contains(hcrj, str_from("service")), "hcr has svc");
+assert(str_contains(hcrj, str_from("passed")), "hcr has pass");
+assert(str_contains(hcrj, str_from("latency_ms")), "hcr has lat");
+
+var r = assert_summary();

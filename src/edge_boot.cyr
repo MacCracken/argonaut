@@ -138,7 +138,7 @@ fn close_luks(mapped_name) {
 
 fn execute_edge_boot(config, root_device, hash_device, root_hash, luks_device) {
     var start = monotonic_ms();
-    var result = alloc(48);  # EdgeBootResult
+    var result = alloc(sizeof(EdgeBootResult));
     store64(result, 0);       # rootfs_locked
     store64(result + 8, 0);   # verity_verified
     store64(result + 16, 0);  # luks_unlocked
@@ -207,6 +207,40 @@ fn execute_edge_boot(config, root_device, hash_device, root_hash, luks_device) {
 # Edge profile validation
 # =========================================================================
 
+# Parse MemTotal from /proc/meminfo, return MB (0 on failure)
+fn parse_meminfo_total_mb() {
+    var buf[4096];
+    var n = file_read_all("/proc/meminfo", &buf, 4095);
+    if (n <= 0) { return 0; }
+    store8(&buf + n, 0);
+
+    # Find "MemTotal:" line and extract kB value
+    var needle = "MemTotal:";
+    var needle_len = 9;
+    for (var i = 0; i < n - needle_len; i = i + 1) {
+        var found = 1;
+        for (var j = 0; j < needle_len; j = j + 1) {
+            if (load8(&buf + i + j) != load8(needle + j)) {
+                found = 0;
+                break;
+            }
+        }
+        if (found) {
+            # Skip whitespace after "MemTotal:"
+            var pos = i + needle_len;
+            while (pos < n && load8(&buf + pos) == 32) { pos = pos + 1; }
+            # Parse integer (kB)
+            var kb = 0;
+            while (pos < n && load8(&buf + pos) >= 48 && load8(&buf + pos) <= 57) {
+                kb = kb * 10 + (load8(&buf + pos) - 48);
+                pos = pos + 1;
+            }
+            return kb / 1024;  # kB to MB
+        }
+    }
+    return 0;
+}
+
 fn validate_edge_profile(boot_result, max_memory_mb) {
     var violations = vec_new();
 
@@ -230,12 +264,17 @@ fn validate_edge_profile(boot_result, max_memory_mb) {
     }
 
     # Memory check via /proc/meminfo
-    var buf[4096];
-    var n = file_read_all("/proc/meminfo", &buf, 4095);
-    if (n > 0) {
-        store8(&buf + n, 0);
-        # Find MemTotal line and parse KB value
-        # Simplified: just check if memory exceeds limit
+    if (max_memory_mb > 0) {
+        var mem_mb = parse_meminfo_total_mb();
+        if (mem_mb > 0 && mem_mb > max_memory_mb) {
+            var sb = str_builder_new();
+            str_builder_add_cstr(sb, "memory ");
+            str_builder_add_int(sb, mem_mb);
+            str_builder_add_cstr(sb, "MB exceeds limit ");
+            str_builder_add_int(sb, max_memory_mb);
+            str_builder_add_cstr(sb, "MB");
+            vec_push(violations, str_builder_build(sb));
+        }
     }
 
     return violations;
@@ -246,7 +285,7 @@ fn validate_edge_profile(boot_result, max_memory_mb) {
 # =========================================================================
 
 fn fleet_registration_from_system(boot_result) {
-    var reg = alloc(56);  # FleetRegistration
+    var reg = alloc(sizeof(FleetRegistration));
 
     # Read machine-id
     var buf[256];
@@ -286,7 +325,7 @@ fn fleet_registration_from_system(boot_result) {
         store64(reg + 40, str_from("unknown"));
     }
 
-    store64(reg + 48, 0);  # total_memory_mb (TODO: parse /proc/meminfo)
+    store64(reg + 48, parse_meminfo_total_mb());
 
     return reg;
 }

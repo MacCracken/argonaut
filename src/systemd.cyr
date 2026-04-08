@@ -3,6 +3,10 @@
 # Ported from rust-old/src/systemd.rs
 
 # =========================================================================
+# Helpers
+# =========================================================================
+
+# =========================================================================
 # Sanitization helpers
 # =========================================================================
 
@@ -118,7 +122,29 @@ fn generate_unit(svc) {
     # Environment — sorted keys for deterministic output
     var env = svc_def_env(svc);
     var env_keys = map_keys(env);
-    # TODO: sort keys
+    # Inline insertion sort to avoid cc2 bug #16 (new function shifts addresses)
+    for (var si = 1; si < vec_len(env_keys); si = si + 1) {
+        var skey = vec_get(env_keys, si);
+        var sj = si - 1;
+        while (sj >= 0) {
+            var sa = vec_get(env_keys, sj);
+            # Lexicographic compare inline
+            var sk = 0;
+            var cmp = 0;
+            while (load8(sa + sk) != 0 && load8(skey + sk) != 0) {
+                if (load8(sa + sk) != load8(skey + sk)) {
+                    cmp = load8(sa + sk) - load8(skey + sk);
+                    break;
+                }
+                sk = sk + 1;
+            }
+            if (cmp == 0) { cmp = load8(sa + sk) - load8(skey + sk); }
+            if (cmp <= 0) { break; }
+            vec_set(env_keys, sj + 1, sa);
+            sj = sj - 1;
+        }
+        vec_set(env_keys, sj + 1, skey);
+    }
     for (var i = 0; i < vec_len(env_keys); i = i + 1) {
         var key = vec_get(env_keys, i);
         var val = map_get(env, key);

@@ -93,7 +93,7 @@ struct BootStep {
 }
 
 fn boot_step_new(stage, desc, required, timeout_ms) {
-    var s = alloc(64);  # 8 fields * 8 bytes
+    var s = alloc(sizeof(BootStep));
     store64(s, stage);
     store64(s + 8, desc);
     store64(s + 16, required);
@@ -134,7 +134,7 @@ struct RestartConfig {
 }
 
 fn restart_config_default() {
-    var rc = alloc(24);
+    var rc = alloc(sizeof(RestartConfig));
     store64(rc, 5);          # max_restarts
     store64(rc + 8, 1000);   # base_delay_ms
     store64(rc + 16, 30000); # max_delay_ms
@@ -189,7 +189,7 @@ struct HealthCheck {
 }
 
 fn health_check_new(check_type, target, port, interval_ms, timeout_ms, retries) {
-    var hc = alloc(48);
+    var hc = alloc(sizeof(HealthCheck));
     store64(hc, check_type);
     store64(hc + 8, target);
     store64(hc + 16, port);
@@ -213,7 +213,7 @@ struct ReadyCheck {
 }
 
 fn ready_check_new(check_type, target, port, timeout_ms, retries, retry_delay_ms) {
-    var rc = alloc(48);
+    var rc = alloc(sizeof(ReadyCheck));
     store64(rc, check_type);
     store64(rc + 8, target);
     store64(rc + 16, port);
@@ -284,7 +284,7 @@ struct ResourceLimits {
 }
 
 fn resource_limits_empty() {
-    var rl = alloc(32);
+    var rl = alloc(sizeof(ResourceLimits));
     store64(rl, 0);
     store64(rl + 8, 0);
     store64(rl + 16, 0);
@@ -293,7 +293,7 @@ fn resource_limits_empty() {
 }
 
 fn resource_limits_secure() {
-    var rl = alloc(32);
+    var rl = alloc(sizeof(ResourceLimits));
     store64(rl, 0);
     store64(rl + 8, 0);
     store64(rl + 16, 0);
@@ -311,7 +311,7 @@ struct LogConfig {
 }
 
 fn log_config_default() {
-    var lc = alloc(16);
+    var lc = alloc(sizeof(LogConfig));
     store64(lc, 10485760);  # 10 MB
     store64(lc + 8, 5);
     return lc;
@@ -549,7 +549,7 @@ struct ServiceDefinition {
 }
 
 fn svc_def_new(name, desc, binary) {
-    var sd = alloc(168);  # 21 fields * 8 bytes
+    var sd = alloc(sizeof(ServiceDefinition));
     store64(sd, name);
     store64(sd + 8, desc);
     store64(sd + 16, binary);
@@ -607,7 +607,7 @@ struct ManagedService {
 }
 
 fn managed_svc_new(definition) {
-    var ms = alloc(48);
+    var ms = alloc(sizeof(ManagedService));
     store64(ms, definition);
     store64(ms + 8, STATE_STOPPED);
     store64(ms + 16, 0);
@@ -644,7 +644,7 @@ struct EdgeBootConfig {
 }
 
 fn edge_config_default() {
-    var ec = alloc(40);
+    var ec = alloc(sizeof(EdgeBootConfig));
     store64(ec, 1);                      # readonly_rootfs
     store64(ec + 8, 1);                  # luks_enabled
     store64(ec + 16, 1);                 # tpm_attestation
@@ -669,7 +669,7 @@ struct ArgonautConfig {
 }
 
 fn argonaut_config_default() {
-    var cfg = alloc(64);
+    var cfg = alloc(sizeof(ArgonautConfig));
     store64(cfg, BOOT_DESKTOP);
     store64(cfg + 8, vec_new());
     store64(cfg + 16, 30000);
@@ -718,7 +718,7 @@ struct ShutdownStep {
 }
 
 fn shutdown_step_new(desc, action, data, signal, timeout_ms) {
-    var ss = alloc(48);
+    var ss = alloc(sizeof(ShutdownStep));
     store64(ss, desc);
     store64(ss + 8, action);
     store64(ss + 16, data);
@@ -816,7 +816,7 @@ struct SafeCommand {
 }
 
 fn safe_cmd_new(binary) {
-    var sc = alloc(16);
+    var sc = alloc(sizeof(SafeCommand));
     store64(sc, binary);
     store64(sc + 8, vec_new());
     return sc;
@@ -876,7 +876,7 @@ struct EmergencyShellConfig {
 }
 
 fn emergency_shell_default() {
-    var esc = alloc(40);
+    var esc = alloc(sizeof(EmergencyShellConfig));
     store64(esc, str_from("/usr/bin/agnoshi"));
     var env = map_new();
     map_set(env, "HOME", str_from("/root"));
