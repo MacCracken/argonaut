@@ -1,4 +1,4 @@
-# serde.tcyr — JSON serialization tests
+# serde.tcyr - JSON serialization tests
 # New API (v1.10.3+): _to_json(ptr) returns Str, no str_builder arg.
 # Deserialize tested via manual json_parse + json_get (derive(Deserialize)
 # has duplicate-variable conflict when combined with Serialize).
@@ -28,7 +28,8 @@ struct TFleet { machine_id; hostname; mode_str; verity; luks; kernel_ver; mem_mb
 #derive(Serialize)
 struct THcResult { service; check_type; passed; latency_ms; message; checked_at; }
 
-alloc_init();
+fn main() {
+    alloc_init();
 test_group("serde-roundtrips");
 
 # --- TStats serialize ---
@@ -145,4 +146,7 @@ assert(str_contains(hcrj, str_from("service")), "hcr has svc");
 assert(str_contains(hcrj, str_from("passed")), "hcr has pass");
 assert(str_contains(hcrj, str_from("latency_ms")), "hcr has lat");
 
-var r = assert_summary();
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

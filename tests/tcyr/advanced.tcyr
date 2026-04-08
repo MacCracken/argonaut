@@ -1,6 +1,7 @@
-# advanced.tcyr — Service waves, edge profile, env files, API, creation
+# advanced.tcyr - Service waves, edge profile, env files, API, creation
 include "tests/test_header.cyr"
-alloc_init();
+fn main() {
+    alloc_init();
 
 test_group("waves-edge-env-api");
 
@@ -118,4 +119,7 @@ assert(vec_len(mv) >= 2, "multiple violations");
 
 # (LUKS, dm-verity, env files, name validation, runlevel, stage tests in other suites)
 
-var r = assert_summary();
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

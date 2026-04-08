@@ -1,6 +1,7 @@
-# init.tcyr — Tests for init orchestrator, state, deps, crash, shutdown
+# init.tcyr - Tests for init orchestrator, state, deps, crash, shutdown
 include "tests/test_header.cyr"
-alloc_init();
+fn main() {
+    alloc_init();
 
 test_group("init-state-deps");
 
@@ -78,4 +79,7 @@ assert(order_pos(dsk_o, "daimon") < order_pos(dsk_o, "aethersafha"), "dai<comp")
 assert(order_pos(dsk_o, "aethersafha") < order_pos(dsk_o, "agnoshi"), "comp<shell");
 assert(order_pos(dsk_o, "llm-gateway") < order_pos(dsk_o, "ifran"), "gw<ifran");
 
-var r = assert_summary();
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

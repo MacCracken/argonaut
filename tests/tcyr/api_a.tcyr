@@ -1,0 +1,116 @@
+# api_a.tcyr - Systemd generation, tmpfiles, health history
+include "tests/test_header.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("sys-tmp-hist");
+
+    # --- Systemd unit: dependencies ---
+    var sd = svc_def_new(str_from("web"), str_from("Web"), str_from("/usr/bin/web"));
+    vec_push(svc_def_deps(sd), str_from("postgres"));
+    vec_push(svc_def_deps(sd), str_from("redis"));
+    vec_push(svc_def_modes(sd), BOOT_SERVER);
+    var unit = generate_unit(sd);
+    assert(str_contains(unit, str_from("After=")), "u aft");
+    assert(str_contains(unit, str_from("Requires=")), "u req");
+    assert(str_contains(unit, str_from(".service")), "u svc");
+
+    # --- Systemd unit: env vars ---
+    var sd2 = svc_def_new(str_from("e"), str_from("E"), str_from("/usr/bin/e"));
+    vec_push(svc_def_modes(sd2), BOOT_SERVER);
+    map_set(svc_def_env(sd2), "PORT", str_from("8080"));
+    var u2 = generate_unit(sd2);
+    assert(str_contains(u2, str_from("Environment=")), "u env");
+    assert(str_contains(u2, str_from("PORT")), "u port");
+
+    # --- Systemd unit: health check watchdog ---
+    var sd3 = svc_def_new(str_from("h"), str_from("H"), str_from("/usr/bin/h"));
+    vec_push(svc_def_modes(sd3), BOOT_SERVER);
+    store64(sd3 + 72, health_check_new(HC_HTTP_GET, str_from("http://x"), 0, 5000, 2000, 3));
+    var u3 = generate_unit(sd3);
+    assert(str_contains(u3, str_from("WatchdogSec=")), "u wd");
+
+    # --- Systemd unit: restart limit ---
+    var sd4 = svc_def_new(str_from("r"), str_from("R"), str_from("/usr/bin/r"));
+    vec_push(svc_def_modes(sd4), BOOT_SERVER);
+    var u4 = generate_unit(sd4);
+    assert(str_contains(u4, str_from("StartLimitBurst=")), "u slb");
+
+    # --- Systemd unit: NotifyAccess ---
+    var u5 = generate_unit(sd);
+    assert(str_contains(u5, str_from("NotifyAccess=main")), "u na");
+
+    # --- Systemd filename ---
+    assert(streq(str_data(generate_unit_filename(sd)), "web.service"), "u fn");
+
+    # --- Tmpfiles: directory with chown ---
+    var te = vec_new();
+    var e1 = alloc(72);
+    store64(e1, TMP_DIRECTORY);
+    store64(e1 + 8, str_from("/run/app"));
+    store64(e1 + 24, 755);
+    store64(e1 + 32, 999);
+    store64(e1 + 40, 999);
+    vec_push(te, e1);
+    var tc = generate_tmpfile_commands(te);
+    assert_eq(vec_len(tc), 2, "d+c 2");
+    assert(streq(str_data(safe_cmd_binary(vec_get(tc, 0))), "mkdir"), "d cmd");
+    assert(streq(str_data(safe_cmd_binary(vec_get(tc, 1))), "chown"), "c cmd");
+
+    # --- Tmpfiles: symlink ---
+    var se = vec_new();
+    var e2 = alloc(72);
+    store64(e2, TMP_SYMLINK);
+    store64(e2 + 8, str_from("/run/link"));
+    store64(e2 + 16, str_from("/run/target"));
+    vec_push(se, e2);
+    var sc = generate_tmpfile_commands(se);
+    assert_eq(vec_len(sc), 1, "s 1");
+    assert(streq(str_data(safe_cmd_binary(vec_get(sc, 0))), "ln"), "s ln");
+
+    # --- Tmpfiles: empty entries ---
+    assert_eq(vec_len(generate_tmpfile_commands(vec_new())), 0, "mt 0");
+
+    # --- Tmpfiles: invalid mode ---
+    var bm = alloc(72);
+    store64(bm, TMP_DIRECTORY);
+    store64(bm + 8, str_from("/run/x"));
+    store64(bm + 24, 99999);
+    var bv = vec_new();
+    vec_push(bv, bm);
+    assert_eq(validate_tmpfile_entries(bv), 0 - 1, "bad mode");
+
+    # --- Tmpfiles: symlink traversal ---
+    var st = alloc(72);
+    store64(st, TMP_SYMLINK);
+    store64(st + 8, str_from("/run/../etc/passwd"));
+    store64(st + 16, str_from("/x"));
+    var sv = vec_new();
+    vec_push(sv, st);
+    assert_eq(validate_tmpfile_entries(sv), 0 - 1, "trav");
+
+    # --- Health history: latest after wrap ---
+    var rp = alloc(48);
+    store64(rp + 16, 1);
+    var rf = alloc(48);
+    store64(rf + 16, 0);
+    var hh = health_history_new(3);
+    health_history_record(hh, rp, 3);
+    health_history_record(hh, rp, 3);
+    health_history_record(hh, rf, 3);
+    health_history_record(hh, rp, 3);
+    assert_eq(health_history_len(hh), 3, "hh cap");
+    assert_eq(health_history_total(hh), 4, "hh tot");
+
+    # --- Health history: empty latest ---
+    var hh2 = health_history_new(5);
+    assert_eq(health_history_len(hh2), 0, "hh mt");
+
+    # --- Health tracker: unknown service ---
+    var tracker = health_tracker_new();
+    assert_eq(health_tracker_count(tracker, "nonexistent"), 0, "tr unk");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

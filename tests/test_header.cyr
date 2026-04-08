@@ -1,5 +1,7 @@
 # test_header.cyr — shared includes and helpers for .tcyr test files
+# Uses system stdlib via lib/ symlink to ~/.cyrius/versions/*/lib/
 
+# Core stdlib — system install via lib/ symlink to ~/.cyrius
 include "lib/string.cyr"
 include "lib/fmt.cyr"
 include "lib/alloc.cyr"
@@ -16,6 +18,7 @@ include "lib/assert.cyr"
 include "lib/json.cyr"
 include "lib/fnptr.cyr"
 
+# Argonaut modules
 include "src/types.cyr"
 include "src/boot.cyr"
 include "src/services.cyr"

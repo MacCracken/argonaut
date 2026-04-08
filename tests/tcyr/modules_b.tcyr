@@ -1,0 +1,94 @@
+# modules_b.tcyr - Systemd, tmpfiles, edge boot tests
+include "tests/test_header.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("systemd-tmpfiles-edge");
+
+    # --- Systemd unit gen ---
+    var sd = svc_def_new(str_from("myapp"), str_from("Test myapp"), str_from("/usr/bin/myapp"));
+    vec_push(svc_def_modes(sd), BOOT_SERVER);
+    var unit = generate_unit(sd);
+    assert(str_contains(unit, str_from("[Unit]")), "u [Unit]");
+    assert(str_contains(unit, str_from("[Service]")), "u [Service]");
+    assert(str_contains(unit, str_from("Type=notify")), "u Type");
+    assert(str_contains(unit, str_from("ExecStart=/usr/bin/myapp")), "u Exec");
+    assert(str_contains(unit, str_from("Restart=on-failure")), "u Restart");
+    assert(str_contains(unit, str_from("multi-user.target")), "u target");
+
+    var sd2 = svc_def_new(str_from("gui"), str_from("GUI"), str_from("/usr/bin/gui"));
+    vec_push(svc_def_modes(sd2), BOOT_DESKTOP);
+    assert(str_contains(generate_unit(sd2), str_from("graphical.target")), "u gfx tgt");
+
+    var sd3 = svc_def_new(str_from("a"), str_from("A"), str_from("/usr/bin/a"));
+    store64(sd3 + 56, RESTART_ALWAYS);
+    assert(str_contains(generate_unit(sd3), str_from("Restart=always")), "u always");
+
+    var sd4 = svc_def_new(str_from("n"), str_from("N"), str_from("/usr/bin/n"));
+    store64(sd4 + 56, RESTART_NEVER);
+    assert(str_contains(generate_unit(sd4), str_from("Restart=no")), "u no");
+
+    # --- Tmpfiles ---
+    var entries = vec_new();
+    var de = alloc(72);
+    store64(de, TMP_DIRECTORY);
+    store64(de + 8, str_from("/run/myapp"));
+    store64(de + 24, 755);
+    store64(de + 32, 0 - 1);
+    store64(de + 40, 0 - 1);
+    vec_push(entries, de);
+    assert_eq(vec_len(generate_tmpfile_commands(entries)), 1, "dir 1 cmd");
+
+    var bad = vec_new();
+    var be = alloc(72);
+    store64(be, TMP_DIRECTORY);
+    store64(be + 8, str_from("relative"));
+    store64(be + 24, 755);
+    vec_push(bad, be);
+    assert_eq(validate_tmpfile_entries(bad), 0 - 1, "rel path bad");
+
+    var ok = vec_new();
+    var oe = alloc(72);
+    store64(oe, TMP_DIRECTORY);
+    store64(oe + 8, str_from("/run/ok"));
+    store64(oe + 24, 755);
+    vec_push(ok, oe);
+    assert_eq(validate_tmpfile_entries(ok), 0, "abs path ok");
+
+    # --- Edge boot ---
+    var cmds = configure_readonly_rootfs();
+    assert_eq(vec_len(cmds), 5, "rootfs 5 cmds");
+
+    var hash = str_from("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    var vcmds = verify_rootfs_integrity(str_from("/dev/sda1"), str_from("/dev/sda2"), hash);
+    assert(vcmds != 0, "verity ok");
+    assert_eq(vec_len(vcmds), 2, "verity 2 cmds");
+
+    assert_eq(verify_rootfs_integrity(str_from(""), str_from("/dev/x"), hash), 0, "verity empty dev");
+    assert_eq(verify_rootfs_integrity(str_from("/dev/x"), str_from("/dev/y"), str_from("short")), 0, "verity short hash");
+    assert_eq(verify_rootfs_integrity(str_from("/tmp/x"), str_from("/dev/y"), hash), 0, "verity bad dev");
+
+    assert(validate_device_path(str_from("/dev/sda1")), "devpath ok");
+    assert(1 - validate_device_path(str_from("")), "devpath empty");
+    assert(1 - validate_device_path(str_from("/tmp/x")), "devpath nodev");
+
+    var lcmds = unlock_luks(str_from("/dev/sda3"), str_from("agnos-data"));
+    assert(lcmds != 0, "luks ok");
+    assert_eq(unlock_luks(str_from("/tmp/x"), str_from("y")), 0, "luks bad dev");
+    assert_eq(unlock_luks(str_from("/dev/x"), str_from("")), 0, "luks empty name");
+
+    # --- Service name validation ---
+    assert(validate_service_name(str_from("daimon")), "name ok");
+    assert(validate_service_name(str_from("llm-gateway")), "name hyphen");
+    assert(1 - validate_service_name(str_from("")), "name empty");
+    assert(1 - validate_service_name(str_from("a..b")), "name traversal");
+
+    # --- Edge init ---
+    var einit = edge_init_fn();
+    assert_eq(map_count(load64(einit + 16)), 1, "edge 1 svc");
+    assert(map_has(load64(einit + 16), "daimon"), "edge daimon");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

@@ -1,0 +1,53 @@
+# audit_b.tcyr - Audit extras (chain linkage, accessors, severity ordering, filters)
+include "tests/test_header.cyr"
+include "src/audit.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("audit-extras");
+
+    var log6 = audit_log_new();
+    for (var i = 0; i < 10; i = i + 1) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "svc-");
+        str_builder_add_int(sb, i);
+        audit_log_record(log6, str_data(str_builder_build(sb)), EVT_STARTING);
+    }
+
+    var entries = audit_log_entries(log6);
+    var e0 = vec_get(entries, 0);
+    assert_eq(audit_entry_prev_hash(e0), 0, "gen ph0");
+    var e1 = vec_get(entries, 1);
+    assert_eq(audit_entry_prev_hash(e1), audit_entry_hash(e0), "lnk e1");
+
+    assert_eq(audit_entry_severity(e0), SEV_INFO, "ea sev");
+    assert(streq(str_data(audit_entry_source(e0)), "argonaut"), "ea src");
+    assert(streq(str_data(audit_entry_action(e0)), "Starting"), "ea act");
+    assert(audit_entry_timestamp(e0) > 0, "ea ts");
+    assert(audit_entry_hash(e0) != 0, "ea hash");
+
+    assert(severity_level(SEV_DEBUG) < severity_level(SEV_INFO), "o d<i");
+    assert(severity_level(SEV_INFO) < severity_level(SEV_WARNING), "o i<w");
+    assert(severity_level(SEV_WARNING) < severity_level(SEV_ERROR), "o w<e");
+    assert(severity_level(SEV_ERROR) < severity_level(SEV_CRITICAL), "o e<c");
+    assert(severity_level(SEV_CRITICAL) < severity_level(SEV_SECURITY), "o c<s");
+
+    var log7 = audit_log_new();
+    audit_log_record(log7, "a", EVT_STARTING);
+    audit_log_record(log7, "b", EVT_STOPPING);
+    audit_log_record(log7, "c", EVT_TIMEOUT_KILLED);
+    assert_eq(vec_len(audit_log_by_min_severity(log7, SEV_WARNING)), 2, "ms 2w");
+    assert_eq(vec_len(audit_log_by_min_severity(log7, SEV_ERROR)), 1, "ms 1e");
+
+    assert(streq(severity_str(SEV_DEBUG), "debug"), "ss dbg");
+    assert(streq(severity_str(SEV_INFO), "info"), "ss inf");
+    assert(streq(severity_str(SEV_WARNING), "warning"), "ss wrn");
+    assert(streq(severity_str(SEV_ERROR), "error"), "ss err");
+
+    assert(streq(event_type_str(EVT_STARTING), "Starting"), "es st");
+    assert(streq(event_type_str(EVT_TIMEOUT_KILLED), "TimeoutKilled"), "es tk");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

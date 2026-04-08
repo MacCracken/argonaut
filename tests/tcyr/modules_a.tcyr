@@ -1,0 +1,116 @@
+# modules_a.tcyr - Health, notify, security tests
+include "tests/test_header.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("hlth-ntfy-sec");
+
+    # --- Health tracker ---
+    var t = health_tracker_new();
+    assert_eq(health_tracker_record(t, "s1", 1, 3), 0, "pnr");
+    assert_eq(health_tracker_count(t, "s1"), 0, "pc0");
+    health_tracker_record(t, "s1", 0, 3);
+    assert_eq(health_tracker_count(t, "s1"), 1, "fc1");
+    health_tracker_record(t, "s1", 0, 3);
+    assert(health_tracker_record(t, "s1", 0, 3), "f3 rst");
+    assert_eq(health_tracker_count(t, "s1"), 3, "fc3");
+    health_tracker_record(t, "s1", 1, 3);
+    assert_eq(health_tracker_count(t, "s1"), 0, "p clr");
+    health_tracker_record(t, "s2", 0, 3);
+    health_tracker_record(t, "s2", 0, 3);
+    health_tracker_reset(t, "s2");
+    assert_eq(health_tracker_count(t, "s2"), 0, "rst 0");
+
+    var t2 = health_tracker_new();
+    health_tracker_record(t2, "a", 0, 2);
+    health_tracker_record(t2, "b", 0, 2);
+    assert(health_tracker_record(t2, "a", 0, 2), "a thr");
+    assert(1 - health_tracker_record(t2, "b", 1, 2), "b ok");
+
+    # --- Health history ---
+    var hh = health_history_new(10);
+    assert_eq(health_history_state(hh), HS_UNKNOWN, "hh unk");
+    assert_eq(health_history_len(hh), 0, "hh mt");
+
+    var r_pass = alloc(48);
+    store64(r_pass + 16, 1);
+    health_history_record(hh, r_pass, 3);
+    assert_eq(health_history_state(hh), HS_HEALTHY, "hh ok");
+    assert_eq(health_history_failures(hh), 0, "hh f0");
+
+    var r_fail = alloc(48);
+    store64(r_fail + 16, 0);
+    health_history_record(hh, r_fail, 3);
+    assert_eq(health_history_state(hh), HS_DEGRADED, "hh deg");
+    health_history_record(hh, r_fail, 3);
+    health_history_record(hh, r_fail, 3);
+    assert_eq(health_history_state(hh), HS_UNHEALTHY, "hh bad");
+
+    health_history_record(hh, r_pass, 3);
+    assert_eq(health_history_state(hh), HS_HEALTHY, "hh rok");
+
+    var hh2 = health_history_new(3);
+    for (var i = 0; i < 5; i = i + 1) { health_history_record(hh2, r_pass, 3); }
+    assert_eq(health_history_len(hh2), 3, "ring cap");
+    assert_eq(health_history_total(hh2), 5, "tot 5");
+
+    health_history_reset(hh);
+    assert_eq(health_history_state(hh), HS_UNKNOWN, "rst unk");
+    assert_eq(health_history_len(hh), 0, "rst mt");
+
+    # --- Health state display ---
+    assert(streq(health_state_str(HS_UNKNOWN), "unknown"), "hs unk");
+    assert(streq(health_state_str(HS_HEALTHY), "healthy"), "hs ok");
+    assert(streq(health_state_str(HS_DEGRADED), "degraded"), "hs deg");
+    assert(streq(health_state_str(HS_UNHEALTHY), "unhealthy"), "hs bad");
+
+    # --- Notify parsing ---
+    var d1 = "READY=1\nSTATUS=running\n";
+    var m1 = notify_parse(d1, strlen(d1));
+    assert_eq(load64(m1), 1, "n rdy");
+    assert(load64(m1 + 8) != 0, "n sts");
+
+    var d2 = "WATCHDOG=1\n";
+    var m2 = notify_parse(d2, strlen(d2));
+    assert_eq(load64(m2 + 24), 1, "n wd");
+    assert_eq(load64(m2), 0, "n !rdy");
+
+    var d3 = "READY=1\nMAINPID=42\n";
+    var m3 = notify_parse(d3, strlen(d3));
+    assert_eq(load64(m3 + 16), 42, "n mp42");
+
+    var m4 = notify_parse("", 0);
+    assert_eq(load64(m4), 0, "n mt");
+
+    var d5 = "RELOADING=1\n";
+    var m5 = notify_parse(d5, strlen(d5));
+    assert_eq(load64(m5 + 32), 1, "n rld");
+
+    var d6 = "STOPPING=1\n";
+    var m6 = notify_parse(d6, strlen(d6));
+    assert_eq(load64(m6 + 40), 1, "n stp");
+
+    # --- Security ---
+    var bd = seccomp_description(0, 0, 0);
+    assert(str_contains(bd, str_from("basic")), "sc bas");
+    var cd = seccomp_description(1, 2, 1);
+    assert(str_contains(cd, str_from("2 syscalls")), "sc cus");
+
+    assert(streq(landlock_access_str(LL_NO_ACCESS), "none"), "ll no");
+    assert(streq(landlock_access_str(LL_READ_ONLY), "ro"), "ll ro");
+    assert(streq(landlock_access_str(LL_READ_WRITE), "rw"), "ll rw");
+
+    assert(streq(capability_str(CAP_SYS_ADMIN), "cap_sys_admin"), "cp adm");
+    assert(streq(capability_str(CAP_KILL), "cap_kill"), "cp kil");
+
+    assert(constant_time_eq("hello", 5, "hello", 5), "ct eq");
+    assert(1 - constant_time_eq("hello", 5, "world", 5), "ct ne");
+    assert(1 - constant_time_eq("short", 5, "longer", 6), "ct ln");
+
+    var esc = emergency_shell_default();
+    assert(verify_emergency_auth(esc, str_from("any")), "auth sk");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

@@ -1,6 +1,7 @@
-# types.tcyr — Tests for types, boot sequences, default services, config
+# types.tcyr - Tests for types, boot sequences, default services, config
 include "tests/test_header.cyr"
-alloc_init();
+fn main() {
+    alloc_init();
 
 test_group("types-boot-services");
 
@@ -136,4 +137,7 @@ assert_eq(runlevel_level(RL_EDGE), 8, "rl lvl 8");
 assert(streq(runlevel_str(RL_EMERGENCY), "emergency"), "rl str em");
 assert(streq(runlevel_str(RL_CONSOLE), "console"), "rl str con");
 
-var r = assert_summary();
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);
