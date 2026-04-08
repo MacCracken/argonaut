@@ -17,6 +17,7 @@ include "lib/process.cyr"
 include "lib/hashmap.cyr"
 include "lib/tagged.cyr"
 include "lib/args.cyr"
+include "lib/json.cyr"
 
 # Argonaut modules
 include "src/types.cyr"

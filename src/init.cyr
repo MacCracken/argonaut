@@ -117,10 +117,11 @@ fn init_is_boot_complete(init) {
         var step = vec_get(steps, i);
         var status = load64(step + 32);
         var required = load64(step + 16);
+        # Use if/elif/else — multi-continue in one loop body is buggy in cc2
         if (status == STEP_COMPLETE || status == STEP_SKIPPED) {
-            # ok, skip
+            # ok
         } elif (required == 0 && status == STEP_FAILED) {
-            # ok, optional failure
+            # ok
         } else {
             return 0;
         }
@@ -449,42 +450,42 @@ fn init_check_watchdog(init) {
     for (var i = 0; i < vec_len(keys); i = i + 1) {
         var name = vec_get(keys, i);
         var ms = init_get_service(init, name);
-        if (ms != 0) {
-            var sd = managed_svc_def(ms);
-            var state = managed_svc_state(ms);
-            var uptime = proc_table_uptime_ms(svc_def_name(sd));
+        if (ms == 0) { continue; }
 
-            # Check startup timeout
-            if (state == STATE_STARTING) {
-                var rc = svc_def_ready_check(sd);
-                if (rc != 0) {
-                    var max_startup = load64(rc + 24);  # timeout_ms
-                    if (uptime > max_startup) {
-                        vec_push(timed_out, str_from(name));
-                    }
+        var sd = managed_svc_def(ms);
+        var state = managed_svc_state(ms);
+        var uptime = proc_table_uptime_ms(svc_def_name(sd));
+
+        # Check startup timeout
+        if (state == STATE_STARTING) {
+            var rc = svc_def_ready_check(sd);
+            if (rc != 0) {
+                var max_startup = load64(rc + 24);  # timeout_ms
+                if (uptime > max_startup) {
+                    vec_push(timed_out, str_from(name));
                 }
             }
+        }
 
-            # Check runtime watchdog
-            if (state == STATE_RUNNING) {
-                var hc = svc_def_health_check(sd);
-                if (hc != 0) {
-                    var interval = load64(hc + 24);
-                    var retries = load64(hc + 40);
-                    var timeout = load64(hc + 32);
-                    var watchdog_ms = interval * retries + timeout;
+        # Check runtime watchdog
+        if (state == STATE_RUNNING) {
+            var hc = svc_def_health_check(sd);
+            if (hc != 0) {
+                var interval = load64(hc + 24);
+                var retries = load64(hc + 40);
+                var timeout = load64(hc + 32);
+                var watchdog_ms = interval * retries + timeout;
 
-                    var last_hc = managed_svc_last_hc(ms);
-                    var elapsed = 0;
-                    if (last_hc == 0) {
-                        elapsed = uptime;
-                    } else {
-                        elapsed = now_ms() - last_hc;
-                    }
+                var last_hc = managed_svc_last_hc(ms);
+                var elapsed = 0;
+                if (last_hc == 0) {
+                    elapsed = uptime;
+                } else {
+                    elapsed = now_ms() - last_hc;
+                }
 
-                    if (elapsed > watchdog_ms) {
-                        vec_push(timed_out, str_from(name));
-                    }
+                if (elapsed > watchdog_ms) {
+                    vec_push(timed_out, str_from(name));
                 }
             }
         }
@@ -531,15 +532,11 @@ fn init_poll_health(init, tracker) {
             if (hc != 0) {
                 var pid = managed_svc_pid(ms);
                 var result = execute_health_check(svc_def_name(sd), hc, pid);
-
-                var threshold = load64(hc + 40);  # retries
+                var threshold = load64(hc + 40);
                 health_tracker_record(tracker, name, load64(result + 16), threshold);
-
-                # Update last_health_check on passing checks
                 if (load64(result + 16)) {
                     managed_svc_set_last_hc(ms, now_ms());
                 }
-
                 vec_push(results, result);
             }
         }

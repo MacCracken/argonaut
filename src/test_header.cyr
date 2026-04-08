@@ -13,6 +13,8 @@ include "lib/hashmap.cyr"
 include "lib/tagged.cyr"
 include "lib/args.cyr"
 include "lib/assert.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
 
 include "src/types.cyr"
 include "src/boot.cyr"

@@ -17,7 +17,7 @@ fn sanitize_unit_value(value) {
         if (c == 10) {       # \n -> space
             str_builder_add_cstr(sb, " ");
         } elif (c == 13) {   # \r -> skip
-            # do nothing
+            continue;
         } elif (c == 36) {   # $ -> $$
             str_builder_add_cstr(sb, "$$");
         } else {

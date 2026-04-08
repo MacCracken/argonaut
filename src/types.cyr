@@ -126,6 +126,7 @@ fn restart_policy_str(p) {
 # Restart config
 # =========================================================================
 
+#derive(Serialize)
 struct RestartConfig {
     max_restarts;    # 0 = unlimited
     base_delay_ms;
@@ -633,11 +634,12 @@ fn managed_svc_set_last_hc(ms, ts)      { store64(ms + 40, ts); }
 # Edge boot config
 # =========================================================================
 
+#derive(Serialize)
 struct EdgeBootConfig {
     readonly_rootfs;     # 1/0
     luks_enabled;        # 1/0
     tpm_attestation;     # 1/0
-    max_boot_time_ms;
+    max_boot_ms;
     pcr_bindings;        # Str ptr
 }
 
@@ -692,11 +694,12 @@ fn config_tmpfiles(cfg)           { return load64(cfg + 56); }
 # Argonaut stats — snapshot of init-system statistics
 # =========================================================================
 
+#derive(Serialize)
 struct ArgonautStats {
     boot_mode;
-    boot_duration_ms;   # 0 = not complete
-    services_running;
-    services_failed;
+    boot_dur_ms;        # 0 = not complete
+    svcs_running;
+    svcs_failed;
     total_restarts;
     boot_complete;      # 1/0
 }
@@ -765,6 +768,7 @@ struct RunlevelSwitchResult {
 # Health check result
 # =========================================================================
 
+#derive(Serialize)
 struct HealthCheckResult {
     service;            # Str ptr
     check_type_str;     # Str ptr
@@ -903,14 +907,15 @@ struct EdgeBootResult {
 # Fleet registration (edge auto-registration)
 # =========================================================================
 
+#derive(Serialize)
 struct FleetRegistration {
     machine_id;          # Str ptr
     hostname;            # Str ptr
     boot_mode_str;       # Str ptr
     verity_active;       # 1/0
     luks_active;         # 1/0
-    kernel_version;      # Str ptr
-    total_memory_mb;
+    kernel_ver;          # Str ptr
+    total_mem_mb;
 }
 
 # =========================================================================

@@ -9,7 +9,8 @@ mkdir -p "$BUILD"
 TOTAL_PASS=0
 TOTAL_FAIL=0
 
-for suite in test_types test_init test_lifecycle test_modules; do
+# test_serde excluded — blocked on cc2 bug #12 (#derive(Serialize) regression in v1.10.2)
+for suite in test_types test_init test_lifecycle test_modules test_display test_advanced test_api; do
     echo "--- Compiling $suite ---"
     cat "src/${suite}.cyr" | "$CC" > "$BUILD/$suite" 2>/dev/null
     chmod +x "$BUILD/$suite"

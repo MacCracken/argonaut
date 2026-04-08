@@ -1,0 +1,72 @@
+# test_display.cyr — Comprehensive display/string and type value tests
+include "src/test_header.cyr"
+
+fn main() {
+    alloc_init();
+    println("=== Test Suite 5: Display, Types, Values ===");
+
+    # --- BootMode display all ---
+    assert(streq(boot_mode_str(BOOT_SERVER), "server"), "bm server");
+    assert(streq(boot_mode_str(BOOT_DESKTOP), "desktop"), "bm desktop");
+    assert(streq(boot_mode_str(BOOT_MINIMAL), "minimal"), "bm minimal");
+    assert(streq(boot_mode_str(BOOT_EDGE), "edge"), "bm edge");
+    assert(streq(boot_mode_str(BOOT_RECOVERY), "recovery"), "bm recovery");
+
+    # --- BootStage display all ---
+    assert(streq(boot_stage_str(STAGE_MOUNT_FS), "mount-filesystems"), "bs mount");
+    assert(streq(boot_stage_str(STAGE_DEVICE_MGR), "start-device-manager"), "bs dev");
+    assert(streq(boot_stage_str(STAGE_VERIFY_ROOTFS), "verify-rootfs"), "bs verify");
+    assert(streq(boot_stage_str(STAGE_SECURITY), "start-security"), "bs sec");
+    assert(streq(boot_stage_str(STAGE_DATABASE), "start-database-services"), "bs db");
+    assert(streq(boot_stage_str(STAGE_AGENT_RUNTIME), "start-agent-runtime"), "bs agent");
+    assert(streq(boot_stage_str(STAGE_LLM_GATEWAY), "start-llm-gateway"), "bs llm");
+    assert(streq(boot_stage_str(STAGE_MODEL_SERVICES), "start-model-services"), "bs model");
+    assert(streq(boot_stage_str(STAGE_COMPOSITOR), "start-compositor"), "bs comp");
+    assert(streq(boot_stage_str(STAGE_SHELL), "start-shell"), "bs shell");
+    assert(streq(boot_stage_str(STAGE_BOOT_COMPLETE), "boot-complete"), "bs done");
+
+    # --- BootStage ord all ---
+    assert(STAGE_MOUNT_FS < STAGE_DEVICE_MGR, "ord 0<1");
+    assert(STAGE_DEVICE_MGR < STAGE_VERIFY_ROOTFS, "ord 1<2");
+    assert(STAGE_VERIFY_ROOTFS < STAGE_SECURITY, "ord 2<3");
+    assert(STAGE_SECURITY < STAGE_DATABASE, "ord 3<4");
+    assert(STAGE_DATABASE < STAGE_AGENT_RUNTIME, "ord 4<5");
+    assert(STAGE_AGENT_RUNTIME < STAGE_LLM_GATEWAY, "ord 5<6");
+    assert(STAGE_LLM_GATEWAY < STAGE_MODEL_SERVICES, "ord 6<7");
+    assert(STAGE_MODEL_SERVICES < STAGE_COMPOSITOR, "ord 7<8");
+    assert(STAGE_COMPOSITOR < STAGE_SHELL, "ord 8<9");
+    assert(STAGE_SHELL < STAGE_BOOT_COMPLETE, "ord 9<10");
+
+    # --- ServiceState display all ---
+    assert(streq(service_state_str(STATE_STOPPED), "stopped"), "ss stopped");
+    assert(streq(service_state_str(STATE_STARTING), "starting"), "ss starting");
+    assert(streq(service_state_str(STATE_RUNNING), "running"), "ss running");
+    assert(streq(service_state_str(STATE_STOPPING), "stopping"), "ss stopping");
+    assert(streq(service_state_str(STATE_FAILED), "failed"), "ss failed");
+
+    # --- ServiceState valid_transition comprehensive ---
+    assert(valid_transition(STATE_STOPPED, STATE_STOPPED), "ss s=s");
+    assert(valid_transition(STATE_STOPPED, STATE_STARTING), "ss s->st");
+    # (Comprehensive state transitions tested in test_init)
+
+    # --- ServiceType display all ---
+    assert(streq(service_type_str(SVC_SIMPLE), "simple"), "st simple");
+    assert(streq(service_type_str(SVC_FORKING), "forking"), "st forking");
+    # SVC_ONESHOT tested in test_types
+    assert_eq(SVC_SIMPLE, 0, "st default=0");
+
+    # --- ShutdownType display all ---
+    assert(streq(shutdown_type_str(SHUTDOWN_POWEROFF), "poweroff"), "sdt po");
+    assert(streq(shutdown_type_str(SHUTDOWN_REBOOT), "reboot"), "sdt rb");
+    assert(streq(shutdown_type_str(SHUTDOWN_HALT), "halt"), "sdt ht");
+    assert(streq(shutdown_type_str(SHUTDOWN_KEXEC), "kexec"), "sdt kx");
+
+    # (Enum values and landlock display tested in test_modules)
+
+    # (Capability, runlevel, health, restart, resource tests in other suites)
+
+    var failures = assert_summary();
+    return failures;
+}
+var r = main();
+syscall(SYS_EXIT, r);

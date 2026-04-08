@@ -1,0 +1,134 @@
+# test_api.cyr — Systemd generation, tmpfiles, health history, process table
+include "src/test_header.cyr"
+
+fn main() {
+    alloc_init();
+    println("=== Test Suite 7: Systemd, Tmpfiles, History, Process ===");
+
+    # --- Systemd unit: dependencies ---
+    var sd1 = svc_def_new(str_from("back"), str_from("Backend"), str_from("/usr/bin/back"));
+    vec_push(svc_def_deps(sd1), str_from("postgres"));
+    vec_push(svc_def_deps(sd1), str_from("redis"));
+    var u1 = generate_unit(sd1);
+    assert(str_contains(u1, str_from("After=")), "u1 after");
+    assert(str_contains(u1, str_from("Requires=")), "u1 requires");
+    assert(str_contains(u1, str_from("postgres.service")), "u1 pg svc");
+
+    # --- Systemd unit: env vars ---
+    var sd2 = svc_def_new(str_from("ev"), str_from("Env"), str_from("/usr/bin/ev"));
+    map_set(svc_def_env(sd2), "PGDATA", str_from("/var/lib/pg"));
+    var u2 = generate_unit(sd2);
+    assert(str_contains(u2, str_from("Environment=")), "u2 env");
+    assert(str_contains(u2, str_from("PGDATA")), "u2 pgdata");
+
+    # --- Systemd unit: health check watchdog ---
+    var sd3 = svc_def_new(str_from("hc"), str_from("HC"), str_from("/usr/bin/hc"));
+    store64(sd3 + 72, health_check_new(HC_HTTP_GET, str_from("http://127.0.0.1:8080/h"), 0, 10000, 2000, 3));
+    var u3 = generate_unit(sd3);
+    assert(str_contains(u3, str_from("WatchdogSec=")), "u3 watchdog");
+
+    # --- Systemd unit: restart limit ---
+    var sd4 = svc_def_new(str_from("lim"), str_from("Lim"), str_from("/usr/bin/lim"));
+    var u4 = generate_unit(sd4);
+    assert(str_contains(u4, str_from("StartLimitBurst=5")), "u4 burst");
+
+    # --- Systemd unit: NotifyAccess ---
+    var u5 = generate_unit(sd1);
+    assert(str_contains(u5, str_from("NotifyAccess=main")), "u5 notify");
+
+    # --- Systemd filename ---
+    assert(str_contains(generate_unit_filename(sd1), str_from("back.service")), "fname back");
+
+    # --- Tmpfiles: directory with chown ---
+    var entries1 = vec_new();
+    var e1 = alloc(72);
+    store64(e1, TMP_DIRECTORY);
+    store64(e1 + 8, str_from("/var/lib/db"));
+    store64(e1 + 24, 700);
+    store64(e1 + 32, 999);
+    store64(e1 + 40, 999);
+    vec_push(entries1, e1);
+    var cmds1 = generate_tmpfile_commands(entries1);
+    assert_eq(vec_len(cmds1), 2, "dir+chown 2 cmds");
+    assert(streq(str_data(safe_cmd_binary(vec_get(cmds1, 0))), "mkdir"), "dir mkdir");
+    assert(streq(str_data(safe_cmd_binary(vec_get(cmds1, 1))), "chown"), "dir chown");
+
+    # --- Tmpfiles: symlink ---
+    var entries2 = vec_new();
+    var e2 = alloc(72);
+    store64(e2, TMP_SYMLINK);
+    store64(e2 + 8, str_from("/run/current"));
+    store64(e2 + 16, str_from("/var/lib/data"));
+    vec_push(entries2, e2);
+    var cmds2 = generate_tmpfile_commands(entries2);
+    assert_eq(vec_len(cmds2), 1, "sym 1 cmd");
+    assert(streq(str_data(safe_cmd_binary(vec_get(cmds2, 0))), "ln"), "sym ln");
+
+    # --- Tmpfiles: empty entries ---
+    assert_eq(vec_len(generate_tmpfile_commands(vec_new())), 0, "empty 0 cmds");
+
+    # --- Tmpfiles: invalid mode ---
+    var bad_mode = vec_new();
+    var bm = alloc(72);
+    store64(bm, TMP_DIRECTORY);
+    store64(bm + 8, str_from("/tmp/x"));
+    store64(bm + 24, 77777);  # > 0o7777
+    vec_push(bad_mode, bm);
+    assert_eq(validate_tmpfile_entries(bad_mode), 0 - 1, "bad mode fails");
+
+    # --- Tmpfiles: symlink traversal ---
+    var sym_trav = vec_new();
+    var st = alloc(72);
+    store64(st, TMP_SYMLINK);
+    store64(st + 8, str_from("/run/link"));
+    store64(st + 16, str_from("/var/../etc/shadow"));
+    vec_push(sym_trav, st);
+    assert_eq(validate_tmpfile_entries(sym_trav), 0 - 1, "sym trav fails");
+
+    # --- Health history: latest after wrap ---
+    var hh = health_history_new(3);
+    var rp = alloc(48);
+    store64(rp + 16, 1);  # passed
+    var rf = alloc(48);
+    store64(rf + 16, 0);  # failed
+    health_history_record(hh, rp, 3);
+    health_history_record(hh, rp, 3);
+    health_history_record(hh, rf, 3);
+    health_history_record(hh, rp, 3);  # wraps
+    assert_eq(health_history_len(hh), 3, "hh wrapped len 3");
+    assert_eq(health_history_total(hh), 4, "hh total 4");
+    assert_eq(health_history_state(hh), HS_HEALTHY, "hh wrapped healthy");
+
+    # --- Health history: empty latest ---
+    var hh2 = health_history_new(5);
+    assert_eq(health_history_len(hh2), 0, "hh2 empty");
+
+    # --- Health tracker: unknown service ---
+    var tracker = health_tracker_new();
+    assert_eq(health_tracker_count(tracker, "nonexistent"), 0, "tracker unknown=0");
+
+    # --- Process table basic ops ---
+    proc_table_init();
+    assert_eq(proc_table_count(), 0, "pt empty");
+    proc_table_insert(str_from("svc-a"), 12345);
+    assert_eq(proc_table_count(), 1, "pt count 1");
+    assert(proc_table_has(str_from("svc-a")), "pt has svc-a");
+    assert_eq(proc_table_pid(str_from("svc-a")), 12345, "pt pid 12345");
+    proc_table_remove(str_from("svc-a"));
+    assert_eq(proc_table_count(), 0, "pt removed");
+
+    # --- Notify: socket env ---
+    var nenv = socket_env_listen_fds(3, 42);
+    assert_eq(vec_len(nenv), 4, "nenv 4 items");
+
+    # (Seccomp, landlock, auth, constant-time tested in test_modules)
+
+    # (Shutdown plan variants tested in test_lifecycle suite)
+
+    # (Mixed stats tested in test_init suite)
+
+    var failures = assert_summary();
+    return failures;
+}
+var r = main();
+syscall(SYS_EXIT, r);
