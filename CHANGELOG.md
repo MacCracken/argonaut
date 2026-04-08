@@ -9,18 +9,71 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ## [Unreleased]
 
+---
+
+## [0.95.0] — 2026-04-08
+
 ### Added
 
 #### Cyrius Port
-- Full rewrite from Rust (13,577 lines) to Cyrius (~5,400 lines application + ~4,600 lines stdlib)
+- Full rewrite from Rust (13,577 lines) to Cyrius (6,124 lines — 2.2x compression)
 - Original Rust source preserved in `rust-old/`
-- 22 source modules: types, boot, services, process_mgmt, health, edge_boot, notify, security, systemd, tmpfiles, init + 10 test/bench files
-- 28 stdlib modules shipped in `lib/`: alloc, vec, hashmap, string, str, fmt, io, fs, process, syscalls, json, regex, net, thread, async, tagged, bench, assert, args, bounds, callback, fnptr, freelist, math, matrix, toml, trait, vidya
-- 8 test suites with 348 assertions (test_serde blocked on cc2 bug #12)
-- 18 benchmarks (parity with Rust Criterion suite)
-- Statically linked ELF x86_64 binaries (~210KB)
-- Build via `cyrb.toml` / `cc2` compiler
-- `tests/test.sh` — unified test + benchmark runner
+- 13 source modules: types, boot, services, process_mgmt, health, edge_boot, notify, security, systemd, tmpfiles, init, audit, main
+- 207KB statically linked ELF x86_64 binary (10.6x smaller than Rust musl)
+- Build via `cyrb.toml` / `cc2` 2.1.0 compiler
+
+#### Audit Module
+- `audit.cyr` — self-contained audit chain (libro-compatible API shim)
+- `AuditLog`, `AuditEntry` — append-only hash-linked audit entries (FNV-1a)
+- `audit_event_severity()` — maps ServiceEventType to severity (Info/Warning/Error)
+- `audit_log_by_source()`, `audit_log_by_severity()`, `audit_log_by_min_severity()` — query filters
+- `audit_log_query()` — composite source + min_severity filter
+- `audit_log_verify()` — chain integrity verification (hash + linkage)
+- Designed for drop-in replacement when libro is ported to Cyrius (blocked on majra)
+
+#### Edge Boot
+- `parse_meminfo_total_mb()` — parses MemTotal from `/proc/meminfo`, returns MB
+- Memory validation in `validate_edge_profile()` — checks against `max_memory_mb` budget
+- `fleet_registration_from_system()` — now reads real memory via `parse_meminfo_total_mb()`
+
+#### Cyrius 2.0 Features
+- `sizeof(StructName)` in all `alloc()` calls — 25 replacements across 7 modules
+- `bitget()` builtins in audit hash computation (replaces manual shift/mask)
+- `lib/assert.cyr` updated with `test_group()`, `assert_streq()`, `assert_nonnull()`, `assert_lt/gte/lte()`
+
+#### Testing
+- 12 test suites (.tcyr format): types, init, lifecycle, modules_a, modules_b, display, advanced, api_a, api_b, audit_a, audit_b, serde
+- 395 assertions, 0 failures on cc2 2.1.0
+- Auto-discovered by `cyrb test`
+- Process table tests: multi-entry insert/remove/keys/reinit
+
+#### Benchmarks
+- 29 benchmarks (.bcyr format), auto-discovered by `cyrb bench`
+- Added: resolve_order_desktop, resolve_waves_chain_20, resolve_waves_wide_20, plan_shutdown_poweroff, configure_readonly_rootfs, verify_rootfs_integrity, stats_desktop, generate_tmpfile_cmds_20, plan_runlevel_switch, mark_all_steps_complete, audit_log_record
+- Rust baseline comparison in `docs/benchmarks-rust-baseline.md`
+- Typical 4-8x vs Rust; state transitions 0.62x (Cyrius faster)
+
+#### CI/CD
+- CI workflow rewritten for Cyrius toolchain (`cyrb build`, `cyrb test`, `cyrb bench`)
+- Release workflow: static binary, source archive, SHA256SUMS, GitHub release
+- Security scan: raw execve, shadow access, system() call detection
+- Version consistency check: VERSION + cyrb.toml + tag
+
+### Changed
+- `build_dep_graph()` extracted from `resolve_service_order()` and `resolve_service_waves()` — eliminates 19 lines of duplicated dependency graph construction
+- `execute_ready_check()` hoists temporary HealthCheck allocation outside retry loop
+- `init_stop_service()` caches service lookup — removes triple `init_get_service()` call
+- Environment variables in `generate_unit()` now sorted lexicographically for deterministic systemd unit output
+- CLAUDE.md updated for Cyrius toolchain (was cargo/clippy/audit/deny)
+
+### Fixed
+- **init.cyr**: unknown service type now transitions to STATE_FAILED (was stuck in STATE_STARTING)
+- **edge_boot.cyr**: `/proc/meminfo` parsing implemented (was dead code / TODO stub)
+- **edge_boot.cyr**: `validate_edge_profile()` memory check now functional
+- **fleet_registration_from_system()**: `total_mem_mb` populated from real meminfo (was hardcoded 0)
+
+### Removed
+- `programs/` directory (empty placeholder, nothing to port)
 
 #### v0.2.0 scope — Hardening
 - `#![forbid(unsafe_code)]` — no unsafe in the crate
