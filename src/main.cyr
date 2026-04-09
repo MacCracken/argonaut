@@ -18,7 +18,8 @@ include "lib/hashmap.cyr"
 include "lib/tagged.cyr"
 include "lib/args.cyr"
 include "lib/json.cyr"
-include "lib/sakshi_full.cyr"
+# sakshi — dep declared in cyrius.toml [deps.sakshi]
+include "../sakshi/sakshi_full.cyr"
 
 # Argonaut modules
 include "src/types.cyr"

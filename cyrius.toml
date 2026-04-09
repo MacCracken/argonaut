@@ -4,3 +4,7 @@ license = "GPL-3.0-only"
 entry = "src/main.cyr"
 output = "argonaut"
 description = "argonaut — Cyrius port"
+
+[deps.sakshi]
+git = "https://github.com/MacCracken/sakshi"
+tag = "v0.7.0"
