@@ -120,10 +120,10 @@ fn notify_bind(path) {
 # Try to receive a notification without blocking.
 # Returns a NotifyMessage ptr, or 0 if no message available.
 fn notify_try_recv(fd) {
-    var buf[4096];
-    var n = sys_read(fd, &buf, 4096);
+    var buf = alloc(1024);
+    var n = sys_read(fd, buf, 1024);
     if (n <= 0) { return 0; }
-    return notify_parse(&buf, n);
+    return notify_parse(buf, n);
 }
 
 # Drain pending notifications, up to limit.

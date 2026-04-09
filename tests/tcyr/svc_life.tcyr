@@ -1,0 +1,83 @@
+# svc_life.tcyr — Init service lifecycle tests (start, stop, restart)
+# Note: uses /bin/sleep as dummy service — no real daemons
+include "tests/test_header.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("svc-lifecycle");
+
+    # --- init_start_service: simple ---
+    var cfg = argonaut_config_default();
+    store64(cfg, BOOT_MINIMAL);
+    var init = alloc(sizeof(ArgonautInit));
+    store64(init, cfg);
+    store64(init + 8, build_boot_sequence(BOOT_MINIMAL));
+    var svc_map = map_new();
+
+    var sd = svc_def_new(str_from("test-svc"), str_from("test"), str_from("/bin/sleep"));
+    vec_push(svc_def_args(sd), str_from("60"));
+    store64(sd + 96, SVC_SIMPLE);
+
+    var ms = managed_svc_new(sd);
+    map_set(svc_map, "test-svc", ms);
+    store64(init + 16, svc_map);
+    store64(init + 24, 0);
+    store64(init + 32, 0);
+    proc_table_init();
+
+    # Note: exec_env fails in test env but fork succeeds — child exits 127
+    # init_start_simple gets a valid PID back and sets RUNNING
+    # (no ready_check configured, so it skips readiness verification)
+    var pid = init_start_service(init, "test-svc");
+    assert(pid > 0, "start pid");
+    assert_eq(managed_svc_state(ms), STATE_RUNNING, "start run");
+    assert(managed_svc_pid(ms) > 0, "start has pid");
+
+    # --- init_stop_service ---
+    var code = init_stop_service(init, "test-svc", 2000);
+    assert_eq(managed_svc_state(ms), STATE_STOPPED, "stop ok");
+    assert_eq(managed_svc_pid(ms), 0, "stop pid 0");
+
+    # --- init_start + restart ---
+    var pid2 = init_start_service(init, "test-svc");
+    assert(pid2 > 0, "start2 pid");
+    var rr = init_restart_service(init, "test-svc", 2000);
+    assert(rr > 0, "restart pid");
+    assert_eq(managed_svc_restarts(ms), 1, "restart cnt");
+    init_stop_service(init, "test-svc", 2000);
+
+    # --- disabled service ---
+    store64(sd + 88, 0);
+    managed_svc_set_state(ms, STATE_STOPPED);
+    var dr = init_start_service(init, "test-svc");
+    assert_eq(dr, 0 - 1, "disabled");
+    store64(sd + 88, 1);
+
+    # --- restart limit ---
+    managed_svc_set_state(ms, STATE_STOPPED);
+    managed_svc_set_restarts(ms, 10);
+    var lr = init_restart_service(init, "test-svc", 2000);
+    assert_eq(lr, 0 - 1, "limit");
+    managed_svc_set_restarts(ms, 0);
+
+    # --- oneshot: state machine validation ---
+    # Note: exec_env returns 127 in test env (no real execve)
+    # Test that oneshot correctly handles non-zero exit as failure
+    var osd = svc_def_new(str_from("t-one"), str_from("one"), str_from("/nonexistent"));
+    store64(osd + 96, SVC_ONESHOT);
+    var oms = managed_svc_new(osd);
+    map_set(svc_map, "t-one", oms);
+
+    var or = init_start_service(init, "t-one");
+    # exec fails -> exit 127 -> oneshot sets FAILED
+    assert_eq(or, 0 - 1, "one exec fail");
+    assert_eq(managed_svc_state(oms), STATE_FAILED, "one failed");
+
+    # --- oneshot: unknown service ---
+    var no = init_start_service(init, "nonexistent");
+    assert_eq(no, 0 - 1, "no svc");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

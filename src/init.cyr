@@ -96,6 +96,10 @@ fn init_mark_step_failed(init, stage, error_msg) {
             store64(step + 32, STEP_FAILED);
             store64(step + 48, now_ms());
             store64(step + 56, error_msg);
+
+            var sname = boot_stage_str(stage);
+            sakshi_error(sname, strlen(sname));
+
             return 1;
         }
     }
@@ -186,6 +190,19 @@ fn init_set_service_state(init, name, state) {
     }
 
     managed_svc_set_state(ms, state);
+
+    # Trace state transition
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, name);
+    str_builder_add_cstr(sb, " -> ");
+    str_builder_add_cstr(sb, service_state_str(state));
+    var tmsg = str_builder_build(sb);
+    if (state == STATE_FAILED) {
+        sakshi_warn(str_data(tmsg), str_len(tmsg));
+    } else {
+        sakshi_info(str_data(tmsg), str_len(tmsg));
+    }
+
     return 1;
 }
 
@@ -352,7 +369,10 @@ fn init_restart_service(init, name, stop_timeout_ms) {
     var rc = svc_def_restart_config(sd);
     var restarts = managed_svc_restarts(ms);
 
-    if (restart_limit_exceeded(rc, restarts)) { return 0 - 1; }
+    if (restart_limit_exceeded(rc, restarts)) {
+        sakshi_warn(name, strlen(name));
+        return 0 - 1;
+    }
 
     var state = managed_svc_state(ms);
     if (state == STATE_RUNNING || state == STATE_STARTING) {
@@ -383,6 +403,7 @@ fn init_reap_services(init) {
                 managed_svc_set_state(ms, STATE_STOPPED);
             } else {
                 managed_svc_set_state(ms, STATE_FAILED);
+                sakshi_warn(name, strlen(name));
             }
 
             var action = on_service_crash(ms, code);
@@ -510,6 +531,9 @@ fn init_enforce_watchdog(init) {
 
     for (var i = 0; i < vec_len(timed_out); i = i + 1) {
         var name = str_data(vec_get(timed_out, i));
+
+        sakshi_error(name, strlen(name));
+
         var pid = proc_table_pid(name);
         if (pid > 0) {
             process_kill(pid);
@@ -544,9 +568,12 @@ fn init_poll_health(init, tracker) {
                 var pid = managed_svc_pid(ms);
                 var result = execute_health_check(svc_def_name(sd), hc, pid);
                 var threshold = load64(hc + 40);
-                health_tracker_record(tracker, name, load64(result + 16), threshold);
-                if (load64(result + 16)) {
+                var hc_passed = load64(result + 16);
+                health_tracker_record(tracker, name, hc_passed, threshold);
+                if (hc_passed) {
                     managed_svc_set_last_hc(ms, now_ms());
+                } else {
+                    sakshi_warn(name, strlen(name));
                 }
                 vec_push(results, result);
             }
@@ -626,7 +653,227 @@ fn init_plan_shutdown(init, shutdown_type) {
 # Runlevel switching
 # =========================================================================
 
+# =========================================================================
+# API response builders
+# =========================================================================
+
+# List all services with state info. Returns vec of ServiceStatus JSON Str ptrs.
+fn init_list_services(init) {
+    var results = vec_new();
+    var svc_map = load64(init + 16);
+    var keys = map_keys(svc_map);
+
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        var name = vec_get(keys, i);
+        var ms = map_get(svc_map, name);
+        var sd = managed_svc_def(ms);
+
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{\"name\":\"");
+        str_builder_add_cstr(sb, name);
+        str_builder_add_cstr(sb, "\",\"state\":\"");
+        str_builder_add_cstr(sb, service_state_str(managed_svc_state(ms)));
+        str_builder_add_cstr(sb, "\",\"pid\":");
+        str_builder_add_int(sb, managed_svc_pid(ms));
+        str_builder_add_cstr(sb, ",\"restarts\":");
+        str_builder_add_int(sb, managed_svc_restarts(ms));
+        str_builder_add_cstr(sb, ",\"enabled\":");
+        str_builder_add_int(sb, svc_def_enabled(sd));
+        str_builder_add_cstr(sb, ",\"type\":\"");
+        str_builder_add_cstr(sb, service_type_str(svc_def_service_type(sd)));
+        str_builder_add_cstr(sb, "\"}");
+
+        vec_push(results, str_builder_build(sb));
+    }
+
+    return results;
+}
+
+# System status response. Returns JSON Str.
+fn init_system_status(init) {
+    var stats = init_stats(init);
+    var config = load64(init);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"boot_mode\":\"");
+    str_builder_add_cstr(sb, boot_mode_str(load64(stats)));
+    str_builder_add_cstr(sb, "\",\"boot_duration_ms\":");
+    str_builder_add_int(sb, load64(stats + 8));
+    str_builder_add_cstr(sb, ",\"services_running\":");
+    str_builder_add_int(sb, load64(stats + 16));
+    str_builder_add_cstr(sb, ",\"services_failed\":");
+    str_builder_add_int(sb, load64(stats + 24));
+    str_builder_add_cstr(sb, ",\"total_restarts\":");
+    str_builder_add_int(sb, load64(stats + 32));
+    str_builder_add_cstr(sb, ",\"boot_complete\":");
+    if (load64(stats + 40)) {
+        str_builder_add_cstr(sb, "true");
+    } else {
+        str_builder_add_cstr(sb, "false");
+    }
+    str_builder_add_cstr(sb, "}");
+    return str_builder_build(sb);
+}
+
+# System metrics for nazar scrape endpoint. Returns JSON Str.
+fn init_system_metrics(init) {
+    var stats = init_stats(init);
+    var svc_map = load64(init + 16);
+    var keys = map_keys(svc_map);
+
+    var total = vec_len(keys);
+    var stopped = 0;
+    var starting = 0;
+    for (var i = 0; i < total; i = i + 1) {
+        var ms = map_get(svc_map, vec_get(keys, i));
+        var state = managed_svc_state(ms);
+        if (state == STATE_STOPPED) { stopped = stopped + 1; }
+        if (state == STATE_STARTING) { starting = starting + 1; }
+    }
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"services_total\":");
+    str_builder_add_int(sb, total);
+    str_builder_add_cstr(sb, ",\"services_running\":");
+    str_builder_add_int(sb, load64(stats + 16));
+    str_builder_add_cstr(sb, ",\"services_failed\":");
+    str_builder_add_int(sb, load64(stats + 24));
+    str_builder_add_cstr(sb, ",\"services_stopped\":");
+    str_builder_add_int(sb, stopped);
+    str_builder_add_cstr(sb, ",\"services_starting\":");
+    str_builder_add_int(sb, starting);
+    str_builder_add_cstr(sb, ",\"total_restarts\":");
+    str_builder_add_int(sb, load64(stats + 32));
+    str_builder_add_cstr(sb, ",\"boot_duration_ms\":");
+    str_builder_add_int(sb, load64(stats + 8));
+    str_builder_add_cstr(sb, ",\"boot_complete\":");
+    if (load64(stats + 40)) {
+        str_builder_add_cstr(sb, "true");
+    } else {
+        str_builder_add_cstr(sb, "false");
+    }
+    str_builder_add_cstr(sb, "}");
+    return str_builder_build(sb);
+}
+
+# Boot log. Returns JSON Str (array of boot step entries).
+fn init_boot_log(init) {
+    var steps = load64(init + 8);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "[");
+
+    for (var i = 0; i < vec_len(steps); i = i + 1) {
+        var step = vec_get(steps, i);
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"stage\":\"");
+        str_builder_add_cstr(sb, boot_stage_str(load64(step)));
+        str_builder_add_cstr(sb, "\",\"status\":\"");
+        str_builder_add_cstr(sb, step_status_str(load64(step + 32)));
+        str_builder_add_cstr(sb, "\",\"required\":");
+        if (load64(step + 16)) {
+            str_builder_add_cstr(sb, "true");
+        } else {
+            str_builder_add_cstr(sb, "false");
+        }
+        str_builder_add_cstr(sb, ",\"started_at\":");
+        str_builder_add_int(sb, load64(step + 40));
+        str_builder_add_cstr(sb, ",\"completed_at\":");
+        str_builder_add_int(sb, load64(step + 48));
+        var err = load64(step + 56);
+        if (err != 0) {
+            str_builder_add_cstr(sb, ",\"error\":\"");
+            str_builder_add(sb, err);
+            str_builder_add_cstr(sb, "\"");
+        }
+        str_builder_add_cstr(sb, "}");
+    }
+
+    str_builder_add_cstr(sb, "]");
+    return str_builder_build(sb);
+}
+
+# =========================================================================
+# Boot execution plans
+# =========================================================================
+
+# Build a flat boot execution plan: ordered vec of (name Str, ProcessSpec/svc_def) pairs.
+# Returns vec of 2-element vecs [name, svc_def].
+fn init_boot_execution_plan(init) {
+    var svc_map = load64(init + 16);
+    var defs = vec_new();
+    var keys = map_keys(svc_map);
+
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        var ms = map_get(svc_map, vec_get(keys, i));
+        var sd = managed_svc_def(ms);
+        if (svc_def_enabled(sd)) {
+            vec_push(defs, sd);
+        }
+    }
+
+    var order = resolve_service_order(defs);
+    if (order == 0) { return vec_new(); }
+
+    var plan = vec_new();
+    for (var i = 0; i < vec_len(order); i = i + 1) {
+        var name = vec_get(order, i);
+        var ms = map_get(svc_map, str_data(name));
+        if (ms != 0) {
+            var pair = alloc(16);
+            store64(pair, name);
+            store64(pair + 8, managed_svc_def(ms));
+            vec_push(plan, pair);
+        }
+    }
+
+    return plan;
+}
+
+# Build a wave-based boot execution plan: vec of waves,
+# each wave is a vec of (name Str, svc_def) pairs that can start in parallel.
+fn init_boot_execution_plan_waves(init) {
+    var svc_map = load64(init + 16);
+    var defs = vec_new();
+    var keys = map_keys(svc_map);
+
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        var ms = map_get(svc_map, vec_get(keys, i));
+        var sd = managed_svc_def(ms);
+        if (svc_def_enabled(sd)) {
+            vec_push(defs, sd);
+        }
+    }
+
+    var waves = resolve_service_waves(defs);
+    if (waves == 0) { return vec_new(); }
+
+    var result = vec_new();
+    for (var w = 0; w < vec_len(waves); w = w + 1) {
+        var wave = vec_get(waves, w);
+        var wave_plan = vec_new();
+        for (var i = 0; i < vec_len(wave); i = i + 1) {
+            var name = vec_get(wave, i);
+            var ms = map_get(svc_map, str_data(name));
+            if (ms != 0) {
+                var pair = alloc(16);
+                store64(pair, name);
+                store64(pair + 8, managed_svc_def(ms));
+                vec_push(wave_plan, pair);
+            }
+        }
+        vec_push(result, wave_plan);
+    }
+
+    return result;
+}
+
+# =========================================================================
+# Runlevel switching
+# =========================================================================
+
 fn init_plan_runlevel_switch(init, target, targets) {
+    var rl_name = runlevel_str(target);
+    sakshi_info(rl_name, strlen(rl_name));
+
     var svc_map = load64(init + 16);
     var config = load64(init);
 

@@ -292,6 +292,62 @@ fn resource_limits_empty() {
     return rl;
 }
 
+# Generate prlimit(1) commands for a PID. Returns vec of SafeCommand ptrs.
+fn to_prlimit_commands(rl, pid) {
+    var cmds = vec_new();
+    var pid_str = str_from_int(pid);
+
+    var nofile = load64(rl);
+    if (nofile > 0) {
+        var cmd = safe_cmd_new(str_from("prlimit"));
+        safe_cmd_add_arg(cmd, str_from("--pid"));
+        safe_cmd_add_arg(cmd, pid_str);
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "--nofile=");
+        str_builder_add_int(sb, nofile);
+        safe_cmd_add_arg(cmd, str_builder_build(sb));
+        vec_push(cmds, cmd);
+    }
+
+    var addr_space = load64(rl + 8);
+    if (addr_space > 0) {
+        var cmd = safe_cmd_new(str_from("prlimit"));
+        safe_cmd_add_arg(cmd, str_from("--pid"));
+        safe_cmd_add_arg(cmd, pid_str);
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "--as=");
+        str_builder_add_int(sb, addr_space);
+        safe_cmd_add_arg(cmd, str_builder_build(sb));
+        vec_push(cmds, cmd);
+    }
+
+    var nproc = load64(rl + 16);
+    if (nproc > 0) {
+        var cmd = safe_cmd_new(str_from("prlimit"));
+        safe_cmd_add_arg(cmd, str_from("--pid"));
+        safe_cmd_add_arg(cmd, pid_str);
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "--nproc=");
+        str_builder_add_int(sb, nproc);
+        safe_cmd_add_arg(cmd, str_builder_build(sb));
+        vec_push(cmds, cmd);
+    }
+
+    var core = load64(rl + 24);
+    if (core >= 0) {
+        var cmd = safe_cmd_new(str_from("prlimit"));
+        safe_cmd_add_arg(cmd, str_from("--pid"));
+        safe_cmd_add_arg(cmd, pid_str);
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "--core=");
+        str_builder_add_int(sb, core);
+        safe_cmd_add_arg(cmd, str_builder_build(sb));
+        vec_push(cmds, cmd);
+    }
+
+    return cmds;
+}
+
 fn resource_limits_secure() {
     var rl = alloc(sizeof(ResourceLimits));
     store64(rl, 0);
@@ -828,6 +884,18 @@ fn safe_cmd_add_arg(sc, arg) {
 
 fn safe_cmd_binary(sc) { return load64(sc); }
 fn safe_cmd_args(sc)   { return load64(sc + 8); }
+
+# Display: "binary arg1 arg2 ..."
+fn safe_cmd_display(sc) {
+    var sb = str_builder_new();
+    str_builder_add(sb, safe_cmd_binary(sc));
+    var args = safe_cmd_args(sc);
+    for (var i = 0; i < vec_len(args); i = i + 1) {
+        str_builder_add_cstr(sb, " ");
+        str_builder_add(sb, vec_get(args, i));
+    }
+    return str_builder_build(sb);
+}
 
 # =========================================================================
 # Tmpfile entry types

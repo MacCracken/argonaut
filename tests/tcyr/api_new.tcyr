@@ -1,0 +1,73 @@
+# api_new.tcyr — API response builders, boot plans, safe_cmd_display
+include "tests/test_header.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("api-new");
+
+    var init = desktop_init();
+
+    # --- list_services ---
+    var svcs = init_list_services(init);
+    assert(vec_len(svcs) > 0, "ls cnt");
+    var s0 = vec_get(svcs, 0);
+    assert(str_contains(s0, str_from("name")), "ls name");
+    assert(str_contains(s0, str_from("state")), "ls state");
+    assert(str_contains(s0, str_from("stopped")), "ls stopped");
+    assert(str_contains(s0, str_from("type")), "ls type");
+
+    # --- system_status ---
+    var ss = init_system_status(init);
+    assert(str_contains(ss, str_from("boot_mode")), "ss mode");
+    assert(str_contains(ss, str_from("desktop")), "ss desk");
+    assert(str_contains(ss, str_from("services_running")), "ss run");
+    assert(str_contains(ss, str_from("boot_complete")), "ss boot");
+    assert(str_contains(ss, str_from("false")), "ss false");
+
+    # --- system_metrics ---
+    var sm = init_system_metrics(init);
+    assert(str_contains(sm, str_from("services_total")), "sm tot");
+    assert(str_contains(sm, str_from("services_running")), "sm run");
+    assert(str_contains(sm, str_from("services_failed")), "sm fail");
+    assert(str_contains(sm, str_from("services_stopped")), "sm stop");
+    assert(str_contains(sm, str_from("boot_duration_ms")), "sm dur");
+
+    # --- boot_log ---
+    var bl = init_boot_log(init);
+    assert(str_contains(bl, str_from("stage")), "bl stage");
+    assert(str_contains(bl, str_from("status")), "bl status");
+    assert(str_contains(bl, str_from("pending")), "bl pend");
+    assert(str_contains(bl, str_from("required")), "bl req");
+
+    # Mark a step failed and check error in boot_log
+    init_mark_step_failed(init, STAGE_SECURITY, str_from("fail!"));
+    var bl2 = init_boot_log(init);
+    assert(str_contains(bl2, str_from("failed")), "bl2 fail");
+    assert(str_contains(bl2, str_from("fail!")), "bl2 err");
+
+    # --- boot_execution_plan ---
+    var plan = init_boot_execution_plan(init);
+    assert(vec_len(plan) > 0, "plan cnt");
+    var p0 = vec_get(plan, 0);
+    assert(load64(p0) != 0, "plan name");
+    assert(load64(p0 + 8) != 0, "plan def");
+
+    # --- boot_execution_plan_waves ---
+    var waves = init_boot_execution_plan_waves(init);
+    assert(vec_len(waves) > 0, "waves cnt");
+    var w0 = vec_get(waves, 0);
+    assert(vec_len(w0) > 0, "w0 cnt");
+    var wp0 = vec_get(w0, 0);
+    assert(load64(wp0) != 0, "wp0 name");
+
+    # Total services across waves = total in plan
+    var wave_total = 0;
+    for (var i = 0; i < vec_len(waves); i = i + 1) {
+        wave_total = wave_total + vec_len(vec_get(waves, i));
+    }
+    assert_eq(wave_total, vec_len(plan), "waves=plan");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

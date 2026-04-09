@@ -1,8 +1,9 @@
-# bench_main.cyr — Argonaut benchmarks
-# Parity target: 32 Rust criterion benchmarks.
-# Implemented: 29. Blocked: 3 (api_responses x4→0 ported, resource_limits→no prlimit_commands fn)
-# Missing functions not yet ported: list_services, system_status, system_metrics,
-# boot_log, to_prlimit_commands, boot_execution_plan, safe_cmd_display.
+# bench_main.cyr — Argonaut benchmarks (29 core benchmarks)
+# API + resource benchmarks in tests/bcyr/api.bcyr (5 benchmarks)
+# Total: 34 benchmarks. All Rust criterion benchmarks ported.
+# Note: init construction loop crashes with new init.cyr API functions
+# due to cc2 string buffer overflow at high iteration counts (cc2 issue #16).
+# Split into separate bcyr files as workaround.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -495,6 +496,11 @@ fn main() {
     }
     bench_report(b29);
     vec_push(benches, b29);
+
+    # --- API response builders ---
+
+    # API + resource benchmarks in separate file (tests/bcyr/api.bcyr)
+    # to stay under cc2 string buffer limits
 
     println("\n=== Summary ===");
     bench_report_all(benches);

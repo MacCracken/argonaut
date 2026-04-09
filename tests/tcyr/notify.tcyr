@@ -1,0 +1,78 @@
+# notify.tcyr — Notify I/O tests
+include "tests/test_header.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("notify-io");
+
+    # --- notify_parse: READY=1 ---
+    var msg1 = "READY=1\n";
+    var nm1 = notify_parse(msg1, 8);
+    assert(nm1 != 0, "parse ok");
+    assert_eq(load64(nm1), 1, "nm ready");
+
+    # --- notify_parse: STATUS + MAINPID ---
+    var msg2 = "STATUS=running\nMAINPID=1234\n";
+    var nm2 = notify_parse(msg2, 27);
+    assert(nm2 != 0, "parse2 ok");
+    assert_eq(load64(nm2 + 16), 1234, "nm pid");
+    var status = load64(nm2 + 8);
+    assert(status != 0, "nm status");
+
+    # --- notify_parse: WATCHDOG=1 ---
+    var msg3 = "WATCHDOG=1\n";
+    var nm3 = notify_parse(msg3, 11);
+    assert_eq(load64(nm3 + 24), 1, "nm wd");
+
+    # --- notify_parse: RELOADING=1 ---
+    var msg4 = "RELOADING=1\n";
+    var nm4 = notify_parse(msg4, 12);
+    assert_eq(load64(nm4 + 32), 1, "nm reload");
+
+    # --- notify_parse: STOPPING=1 ---
+    var msg5 = "STOPPING=1\n";
+    var nm5 = notify_parse(msg5, 11);
+    assert_eq(load64(nm5 + 40), 1, "nm stop");
+
+    # --- notify_parse: empty ---
+    var msg6 = "";
+    var nm6 = notify_parse(msg6, 0);
+    assert(nm6 != 0, "parse empty");
+    assert_eq(load64(nm6), 0, "nm6 no rdy");
+
+    # --- notify_parse: multi-field ---
+    var msg7 = "READY=1\nSTATUS=up\nMAINPID=42\n";
+    var nm7 = notify_parse(msg7, 28);
+    assert_eq(load64(nm7), 1, "nm7 ready");
+    assert_eq(load64(nm7 + 16), 42, "nm7 pid");
+
+    # --- notify_bind: bad path ---
+    var bad_fd = notify_bind(str_from("/nonexistent/path/notify.sock"));
+    assert(bad_fd < 0, "bind bad");
+
+    # --- notify_bind + try_recv: real socket ---
+    var sock_path = str_from("/tmp/argonaut-test-notify.sock");
+    # Remove any old socket
+    syscall(87, str_data(sock_path));  # unlink
+    var fd = notify_bind(sock_path);
+    if (fd >= 0) {
+        # try_recv should return 0 (nothing pending)
+        var msg = notify_try_recv(fd);
+        assert_eq(msg, 0, "recv empty");
+
+        # drain should return empty vec
+        var msgs = notify_drain(fd, 10);
+        assert_eq(vec_len(msgs), 0, "drain 0");
+
+        sys_close(fd);
+        syscall(87, str_data(sock_path));  # cleanup
+    }
+
+    # --- socket_env_listen_fds ---
+    var env = socket_env_listen_fds(3, 42);
+    assert_eq(vec_len(env), 4, "env 4");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

@@ -1,0 +1,79 @@
+# edge_exec.tcyr — Edge boot execution tests
+include "tests/test_header.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("edge-exec");
+
+    # --- configure_readonly_rootfs ---
+    var cmds = configure_readonly_rootfs();
+    assert(vec_len(cmds) > 0, "rootfs cmds");
+    # First command should be mount
+    var c0 = vec_get(cmds, 0);
+    assert(streq(str_data(safe_cmd_binary(c0)), "mount"), "rootfs mount");
+
+    # --- verify_rootfs_integrity ---
+    var hash = str_from("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+    var vcmds = verify_rootfs_integrity(str_from("/dev/sda1"), str_from("/dev/sda2"), hash);
+    assert(vec_len(vcmds) > 0, "verity cmds");
+    var vc0 = vec_get(vcmds, 0);
+    assert(streq(str_data(safe_cmd_binary(vc0)), "veritysetup"), "verity bin");
+
+    # --- unlock_luks ---
+    var lcmds = unlock_luks(str_from("/dev/sda3"), str_from("crypt-root"));
+    assert(vec_len(lcmds) > 0, "luks cmds");
+    var lc0 = vec_get(lcmds, 0);
+    assert(streq(str_data(safe_cmd_binary(lc0)), "cryptsetup"), "luks bin");
+
+    # --- close_luks ---
+    var clcmds = close_luks(str_from("crypt-root"));
+    assert(vec_len(clcmds) > 0, "close cmds");
+    var cl0 = vec_get(clcmds, 0);
+    assert(streq(str_data(safe_cmd_binary(cl0)), "cryptsetup"), "close bin");
+    # Verify 'close' is in the args
+    var cl_args = safe_cmd_args(cl0);
+    assert(vec_len(cl_args) >= 2, "close args");
+
+    # --- validate_device_path ---
+    assert(validate_device_path(str_from("/dev/sda1")), "dev ok");
+    assert(validate_device_path(str_from("/dev/mapper/crypt-root")), "dev map");
+    assert_eq(validate_device_path(str_from("/etc/shadow")), 0, "dev bad");
+    assert_eq(validate_device_path(str_from("/dev/../etc/shadow")), 0, "dev trav");
+
+    # --- execute_edge_boot: all disabled ---
+    var ecfg = alloc(sizeof(EdgeBootConfig));
+    store64(ecfg, 0);      # readonly_rootfs off
+    store64(ecfg + 8, 0);  # luks off
+    store64(ecfg + 16, 0); # tpm off
+    store64(ecfg + 24, 5000);
+    store64(ecfg + 32, str_from(""));
+    var result = execute_edge_boot(ecfg, str_from(""), str_from(""), str_from(""), str_from(""));
+    # When readonly=0, rootfs_locked=1 (skip = success)
+    assert_eq(load64(result), 1, "eb rootfs skip");
+    # No verity inputs = skip
+    assert_eq(load64(result + 8), 0, "eb no verity");
+    # luks off + no device = luks_unlocked=1 (skip = success)
+    assert_eq(load64(result + 16), 1, "eb luks skip");
+    assert(load64(result + 24) >= 0, "eb time");
+
+    # --- validate_edge_profile: within budget ---
+    var br = alloc(48);
+    store64(br, 1);       # rootfs_locked
+    store64(br + 8, 1);   # verity
+    store64(br + 16, 1);  # luks
+    store64(br + 24, 500); # boot_time 500ms
+    store64(br + 32, 1);  # within_budget
+    store64(br + 40, vec_new());
+    var vr = validate_edge_profile(br, 999999);
+    # Returns vec of violations — 0 = ok
+    assert_eq(vec_len(vr), 0, "vep ok");
+
+    # --- validate_edge_profile: over budget ---
+    store64(br + 32, 0);  # within_budget = false
+    var vr2 = validate_edge_profile(br, 999999);
+    assert(vec_len(vr2) > 0, "vep over");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

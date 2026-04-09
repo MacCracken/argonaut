@@ -23,8 +23,10 @@ fn sakshi_info(msg, len) { return 0; }
 fn sakshi_warn(msg, len) { return 0; }
 fn sakshi_error(msg, len) { return 0; }
 fn sakshi_debug(msg, len) { return 0; }
+fn sakshi_trace(msg, len) { return 0; }
 fn sakshi_span_enter(name, len) { return 0; }
 fn sakshi_span_exit() { return 0; }
+fn sakshi_span_depth() { return 0; }
 
 # Argonaut modules
 include "src/types.cyr"

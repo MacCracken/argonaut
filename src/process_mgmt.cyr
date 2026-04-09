@@ -12,55 +12,54 @@
 # Lines starting with # are comments. Empty lines ignored.
 # Values optionally quoted with " or '.
 fn load_env_file(path, env_map) {
-    var buf[65536];
-    var n = file_read_all(str_data(path), &buf, 65536);
+    var buf = alloc(8192);
+    var n = file_read_all(str_data(path), buf, 8192);
     if (n <= 0) { return 0 - 1; }
 
     var line_start = 0;
     for (var i = 0; i <= n; i = i + 1) {
         var c = 0;
-        if (i < n) { c = load8(&buf + i); }
+        if (i < n) { c = load8(buf + i); }
 
         if (c == 10 || i == n) {  # newline or EOF
             var line_len = i - line_start;
             if (line_len > 0) {
-                var first = load8(&buf + line_start);
+                var first = load8(buf + line_start);
                 if (first != 35) {  # not '#'
                     # Find '=' separator
                     var eq_pos = 0 - 1;
                     for (var j = line_start; j < i; j = j + 1) {
-                        if (load8(&buf + j) == 61) {  # '='
+                        if (load8(buf + j) == 61) {  # '='
                             eq_pos = j;
                             break;
                         }
                     }
                     if (eq_pos > line_start) {
                         # Null-terminate key in-place for map lookup
-                        var saved = load8(&buf + eq_pos);
-                        store8(&buf + eq_pos, 0);
+                        var saved = load8(buf + eq_pos);
+                        store8(buf + eq_pos, 0);
                         var val_start = eq_pos + 1;
                         var val_len = i - val_start;
                         # Strip optional quotes
                         if (val_len >= 2) {
-                            var first_q = load8(&buf + val_start);
-                            var last_q = load8(&buf + val_start + val_len - 1);
+                            var first_q = load8(buf + val_start);
+                            var last_q = load8(buf + val_start + val_len - 1);
                             if ((first_q == 34 && last_q == 34) || (first_q == 39 && last_q == 39)) {
                                 val_start = val_start + 1;
                                 val_len = val_len - 2;
                             }
                         }
-                        # Copy key and value to heap (str_from/str_new don't copy)
+                        # Copy key and value to heap
                         var key_len = eq_pos - line_start;
                         var key_copy = alloc(key_len + 1);
-                        memcpy(key_copy, &buf + line_start, key_len);
+                        memcpy(key_copy, buf + line_start, key_len);
                         store8(key_copy + key_len, 0);
-                        # Copy value to heap
                         var val_copy = alloc(val_len + 1);
-                        memcpy(val_copy, &buf + val_start, val_len);
+                        memcpy(val_copy, buf + val_start, val_len);
                         store8(val_copy + val_len, 0);
                         var val = str_new(val_copy, val_len);
                         map_set(env_map, key_copy, val);
-                        store8(&buf + eq_pos, saved);
+                        store8(buf + eq_pos, saved);
                     }
                 }
             }
@@ -133,6 +132,9 @@ fn spawn_service(svc_def) {
 # Fork + exec a service, returning child PID.
 # Parent returns immediately; child execs the binary.
 fn fork_exec_service(svc_def) {
+    var sn = svc_def_name(svc_def);
+    sakshi_debug(str_data(sn), str_len(sn));
+
     var pid = sys_fork();
     if (pid < 0) { return 0 - 1; }
 
@@ -248,6 +250,7 @@ fn process_stop(pid, timeout_ms) {
     }
 
     # Timed out — SIGKILL
+    sakshi_warn("SIGKILL", 7);
     process_kill(pid);
 
     # Wait up to 500ms for SIGKILL

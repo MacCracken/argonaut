@@ -137,6 +137,7 @@ fn close_luks(mapped_name) {
 # =========================================================================
 
 fn execute_edge_boot(config, root_device, hash_device, root_hash, luks_device) {
+    sakshi_info("edge boot", 9);
     var start = monotonic_ms();
     var result = alloc(sizeof(EdgeBootResult));
     store64(result, 0);       # rootfs_locked
@@ -150,10 +151,12 @@ fn execute_edge_boot(config, root_device, hash_device, root_hash, luks_device) {
 
     # Step 1: Read-only rootfs
     if (readonly) {
+        sakshi_info("rootfs lock", 11);
         var ro_cmds = configure_readonly_rootfs();
         if (run_safe_cmd_sequence(ro_cmds) == 0) {
             store64(result, 1);
         } else {
+            sakshi_error("rootfs fail", 11);
             vec_push(load64(result + 40), str_from("rootfs lockdown failed"));
         }
     } else {
@@ -161,6 +164,7 @@ fn execute_edge_boot(config, root_device, hash_device, root_hash, luks_device) {
     }
 
     # Step 2: dm-verity
+    sakshi_info("dm-verity", 9);
     if (str_len(root_device) > 0 && str_len(hash_device) > 0 && str_len(root_hash) > 0) {
         var verity_cmds = verify_rootfs_integrity(root_device, hash_device, root_hash);
         if (verity_cmds == 0) {
@@ -182,6 +186,7 @@ fn execute_edge_boot(config, root_device, hash_device, root_hash, luks_device) {
     }
 
     # Step 3: LUKS unlock
+    sakshi_info("luks", 4);
     var luks_enabled = load64(config + 8);
     if (luks_enabled && str_len(luks_device) > 0) {
         var luks_cmds = unlock_luks(luks_device, str_from("agnos-data"));
@@ -209,10 +214,10 @@ fn execute_edge_boot(config, root_device, hash_device, root_hash, luks_device) {
 
 # Parse MemTotal from /proc/meminfo, return MB (0 on failure)
 fn parse_meminfo_total_mb() {
-    var buf[4096];
-    var n = file_read_all("/proc/meminfo", &buf, 4095);
+    var buf = alloc(1024);
+    var n = file_read_all("/proc/meminfo", buf, 1023);
     if (n <= 0) { return 0; }
-    store8(&buf + n, 0);
+    store8(buf + n, 0);
 
     # Find "MemTotal:" line and extract kB value
     var needle = "MemTotal:";
@@ -220,7 +225,7 @@ fn parse_meminfo_total_mb() {
     for (var i = 0; i < n - needle_len; i = i + 1) {
         var found = 1;
         for (var j = 0; j < needle_len; j = j + 1) {
-            if (load8(&buf + i + j) != load8(needle + j)) {
+            if (load8(buf + i + j) != load8(needle + j)) {
                 found = 0;
                 break;
             }
@@ -228,11 +233,11 @@ fn parse_meminfo_total_mb() {
         if (found) {
             # Skip whitespace after "MemTotal:"
             var pos = i + needle_len;
-            while (pos < n && load8(&buf + pos) == 32) { pos = pos + 1; }
+            while (pos < n && load8(buf + pos) == 32) { pos = pos + 1; }
             # Parse integer (kB)
             var kb = 0;
-            while (pos < n && load8(&buf + pos) >= 48 && load8(&buf + pos) <= 57) {
-                kb = kb * 10 + (load8(&buf + pos) - 48);
+            while (pos < n && load8(buf + pos) >= 48 && load8(buf + pos) <= 57) {
+                kb = kb * 10 + (load8(buf + pos) - 48);
                 pos = pos + 1;
             }
             return kb / 1024;  # kB to MB

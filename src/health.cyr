@@ -136,9 +136,7 @@ fn execute_health_check(service_name, hc, pid) {
             message = str_from("command check failed");
         }
     } elif (check_type == HC_HTTP_GET) {
-        # HTTP GET simplified: just TCP connect to the port
-        # Full HTTP parsing would require more infrastructure
-        # Extract port from URL: http://host:port/path
+        # HTTP GET: connect, send GET request, validate status line
         var url_data = str_data(target);
         var url_len = str_len(target);
         # Skip "http://"
@@ -146,29 +144,110 @@ fn execute_health_check(service_name, hc, pid) {
         if (str_starts_with(target, "http://")) {
             offset = 7;
         }
-        # Find port after ':'
+        # Parse host and port
         var colon_pos = 0 - 1;
+        var slash_pos = url_len;
         for (var i = offset; i < url_len; i = i + 1) {
             var c = load8(url_data + i);
-            if (c == 58) { colon_pos = i; break; }  # ':'
-            if (c == 47) { break; }                    # '/'
+            if (c == 58 && colon_pos < 0) { colon_pos = i; }
+            if (c == 47) { slash_pos = i; break; }
         }
         var http_port = 80;
+        var host_end = slash_pos;
         if (colon_pos > 0) {
+            host_end = colon_pos;
             var port_start = colon_pos + 1;
             var port_end = port_start;
-            while (port_end < url_len && load8(url_data + port_end) >= 48 && load8(url_data + port_end) <= 57) {
+            while (port_end < slash_pos && load8(url_data + port_end) >= 48 && load8(url_data + port_end) <= 57) {
                 port_end = port_end + 1;
             }
             if (port_end > port_start) {
                 http_port = str_to_int(str_new(url_data + port_start, port_end - port_start));
             }
         }
-        passed = check_tcp_connect(str_from("127.0.0.1"), http_port, timeout);
-        if (passed) {
-            message = str_from("HTTP endpoint reachable");
+
+        # Extract path (default "/")
+        var path = "/";
+        var path_len = 1;
+        if (slash_pos < url_len) {
+            path = url_data + slash_pos;
+            path_len = url_len - slash_pos;
+        }
+
+        # TCP connect
+        var fd = syscall(41, 2, 1, 0);  # socket(AF_INET, SOCK_STREAM, 0)
+        if (fd >= 0) {
+            var addr[16];
+            memset(&addr, 0, 16);
+            store16(&addr, 2);  # AF_INET
+            var pbe = ((http_port & 255) << 8) | ((http_port >> 8) & 255);
+            store16(&addr + 2, pbe);
+            store8(&addr + 4, 127);
+            store8(&addr + 5, 0);
+            store8(&addr + 6, 0);
+            store8(&addr + 7, 1);
+
+            var ret = syscall(42, fd, &addr, 16);  # connect
+            if (ret == 0) {
+                # Send HTTP GET request
+                var req_sb = str_builder_new();
+                str_builder_add_cstr(req_sb, "GET ");
+                str_builder_add_cstr(req_sb, path);
+                str_builder_add_cstr(req_sb, " HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+                var req = str_builder_build(req_sb);
+                var req_data = str_data(req);
+                var req_len = str_len(req);
+                syscall(1, fd, req_data, req_len);  # write
+
+                # Read response (just need status line)
+                var resp[512];
+                # Poll for data with timeout
+                var pfd[8];
+                store32(&pfd, fd);
+                store16(&pfd + 4, 1);  # POLLIN
+                store16(&pfd + 6, 0);
+                var poll_ret = syscall(7, &pfd, 1, timeout);
+                if (poll_ret > 0) {
+                    var n = syscall(0, fd, &resp, 511);  # read
+                    if (n > 0) {
+                        store8(&resp + n, 0);
+                        # Parse "HTTP/1.x NNN" — status code at bytes 9-11
+                        if (n >= 12 && load8(&resp) == 72 && load8(&resp + 1) == 84) {
+                            # Starts with "HT" (HTTP)
+                            var status_code = 0;
+                            var d0 = load8(&resp + 9) - 48;
+                            var d1 = load8(&resp + 10) - 48;
+                            var d2 = load8(&resp + 11) - 48;
+                            if (d0 >= 0 && d0 <= 9 && d1 >= 0 && d1 <= 9 && d2 >= 0 && d2 <= 9) {
+                                status_code = d0 * 100 + d1 * 10 + d2;
+                            }
+                            if (status_code >= 200 && status_code < 400) {
+                                passed = 1;
+                                var msb = str_builder_new();
+                                str_builder_add_cstr(msb, "HTTP ");
+                                str_builder_add_int(msb, status_code);
+                                message = str_builder_build(msb);
+                            } else {
+                                var msb = str_builder_new();
+                                str_builder_add_cstr(msb, "HTTP ");
+                                str_builder_add_int(msb, status_code);
+                                message = str_builder_build(msb);
+                            }
+                        } else {
+                            message = str_from("invalid HTTP response");
+                        }
+                    } else {
+                        message = str_from("HTTP read failed");
+                    }
+                } else {
+                    message = str_from("HTTP response timeout");
+                }
+            } else {
+                message = str_from("HTTP connect failed");
+            }
+            sys_close(fd);
         } else {
-            message = str_from("HTTP endpoint unreachable");
+            message = str_from("HTTP socket failed");
         }
     }
 
@@ -181,6 +260,14 @@ fn execute_health_check(service_name, hc, pid) {
     store64(result + 24, latency);
     store64(result + 32, message);
     store64(result + 40, now_ms());
+
+    # Trace result
+    if (passed) {
+        sakshi_debug(str_data(service_name), str_len(service_name));
+    } else {
+        var emsg = str_data(service_name);
+        sakshi_warn(emsg, str_len(service_name));
+    }
 
     return result;
 }
@@ -206,6 +293,8 @@ fn execute_ready_check(service_name, rc, pid) {
     store64(hc + 16, port);
     store64(hc + 24, 0);        # interval (unused)
     store64(hc + 40, 0);        # retries (unused)
+
+    sakshi_debug(str_data(service_name), str_len(service_name));
 
     for (var attempt = 0; attempt <= retries; attempt = attempt + 1) {
         var remaining = timeout - (monotonic_ms() - overall_start);
