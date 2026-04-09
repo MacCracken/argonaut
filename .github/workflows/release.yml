@@ -27,14 +27,14 @@ jobs:
       - name: Verify version consistency
         run: |
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          CYRB_VERSION=$(grep '^version' cyrb.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          TOML_VERSION=$(grep '^version' cyrius.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           TAG_VERSION="${GITHUB_REF_NAME}"
           if [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
             echo "ERROR: VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"
             exit 1
           fi
-          if [ "$CYRB_VERSION" != "$TAG_VERSION" ]; then
-            echo "ERROR: cyrb.toml ($CYRB_VERSION) != tag ($TAG_VERSION)"
+          if [ "$TOML_VERSION" != "$TAG_VERSION" ]; then
+            echo "ERROR: cyrius.toml ($TOML_VERSION) != tag ($TAG_VERSION)"
             exit 1
           fi
           echo "Version verified: $TAG_VERSION"
@@ -43,15 +43,18 @@ jobs:
         run: |
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          export CYRIUS_HOME="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p build
-          cp "$CYRIUS_HOME/bin/cc2" ./build/cc2
-          cp "$CYRIUS_HOME/bin/cyrb" ./build/cyrb
-          chmod +x ./build/cc2 ./build/cyrb
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
 
       - name: Build x86_64 binary
         run: |
-          ./build/cyrb build src/main.cyr build/argonaut
+          mkdir -p build
+          cat src/main.cyr | cc2 > build/argonaut 2>/dev/null
+          chmod +x build/argonaut
           echo "argonaut: $(wc -c < build/argonaut) bytes"
           cp build/argonaut argonaut-x86_64
 
