@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CYRIUS_VERSION: "2.7.2"
+  CYRIUS_VERSION: "3.2.6"
 
 jobs:
   # ── Build ──
@@ -36,7 +36,7 @@ jobs:
       - name: Build argonaut
         run: |
           mkdir -p build
-          cat src/main.cyr | cc2 > build/argonaut 2>/dev/null
+          cat src/main.cyr | cc3 > build/argonaut 2>/dev/null
           chmod +x build/argonaut
           echo "argonaut: $(wc -c < build/argonaut) bytes"
 
@@ -135,7 +135,7 @@ jobs:
           for tcyr in tests/*.tcyr; do
             [ -f "$tcyr" ] || continue
             name=$(basename "$tcyr" .tcyr)
-            if cat "$tcyr" | cc2 > /tmp/test 2>/dev/null; then
+            if cat "$tcyr" | cc3 > /tmp/test 2>/dev/null; then
               chmod +x /tmp/test
               output=$(/tmp/test 2>&1) || true
               summary=$(echo "$output" | grep -o '[0-9]* passed, [0-9]* failed' | tail -1)

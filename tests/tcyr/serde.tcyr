@@ -33,7 +33,7 @@ fn main() {
 test_group("serde-roundtrips");
 
 # --- TStats serialize ---
-var s = alloc(48);
+var s = alloc(sizeof(TStats));
 store64(s, 1);
 store64(s + 8, 1234);
 store64(s + 16, 3);
@@ -57,7 +57,7 @@ assert_eq(json_get_int(p1, str_from("restarts")), 7, "st rt rest");
 assert_eq(json_get_int(p1, str_from("complete")), 1, "st rt done");
 
 # --- TRestart serialize + round-trip ---
-var rc = alloc(24);
+var rc = alloc(sizeof(TRestart));
 store64(rc, 5);
 store64(rc + 8, 1000);
 store64(rc + 16, 30000);
@@ -70,7 +70,7 @@ assert_eq(json_get_int(p2, str_from("base_delay")), 1000, "rc rt base");
 assert_eq(json_get_int(p2, str_from("max_delay")), 30000, "rc rt maxd");
 
 # --- TEdgeCfg serialize + round-trip ---
-var ec = alloc(40);
+var ec = alloc(sizeof(TEdgeCfg));
 store64(ec, 1);
 store64(ec + 8, 1);
 store64(ec + 16, 1);
@@ -86,7 +86,7 @@ assert_eq(json_get_int(p3, str_from("luks")), 1, "ec rt luks");
 assert_eq(json_get_int(p3, str_from("max_boot_ms")), 3000, "ec rt boot");
 
 # --- TFleet serialize + round-trip ---
-var fr = alloc(56);
+var fr = alloc(sizeof(TFleet));
 store64(fr, 100);
 store64(fr + 8, 200);
 store64(fr + 16, 300);
@@ -103,21 +103,21 @@ assert_eq(json_get_int(p4, str_from("verity")), 1, "fr rt verity");
 assert_eq(json_get_int(p4, str_from("mem_mb")), 128, "fr rt mem");
 
 # --- Enum values survive round-trip ---
-var edge_s = alloc(48);
+var edge_s = alloc(sizeof(TStats));
 store64(edge_s, 3);
 var ej = TStats_to_json(edge_s);
 var p5 = json_parse(ej);
 assert_eq(json_get_int(p5, str_from("boot_mode")), 3, "enum edge rt");
 
-var rec_s = alloc(48);
+var rec_s = alloc(sizeof(TStats));
 store64(rec_s, 4);
 var rj = TStats_to_json(rec_s);
 var p6 = json_parse(rj);
 assert_eq(json_get_int(p6, str_from("boot_mode")), 4, "enum rec rt");
 
 # --- Zero values survive ---
-var zero = alloc(48);
-memset(zero, 0, 48);
+var zero = alloc(sizeof(TStats));
+memset(zero, 0, sizeof(TStats));
 var zj = TStats_to_json(zero);
 var p7 = json_parse(zj);
 assert_eq(json_get_int(p7, str_from("boot_mode")), 0, "zero mode rt");
@@ -137,7 +137,7 @@ assert(str_contains(built, str_from("k1")), "built k1");
 assert(str_contains(built, str_from("v1")), "built v1");
 
 # --- THcResult serialize ---
-var hcr = alloc(48);
+var hcr = alloc(sizeof(THcResult));
 store64(hcr, 42);
 store64(hcr + 16, 1);
 store64(hcr + 24, 55);

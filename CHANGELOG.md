@@ -7,6 +7,11 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
+## [0.96.1] - 2026-04-09
+
+### Changed
+- Cyrius toolchain pinned to v3.2.5 (cc3 compiler, minimum version)
+
 ## [Unreleased]
 
 ---
