@@ -12,7 +12,7 @@ include "lib/hashmap.cyr"
 include "lib/tagged.cyr"
 include "lib/args.cyr"
 include "lib/bench.cyr"
-include "lib/sakshi.cyr"
+include "lib/sakshi_full.cyr"
 
 include "src/types.cyr"
 include "src/boot.cyr"
@@ -83,6 +83,36 @@ fn main() {
     }
     bench_report(b5);
     vec_push(benches, b5);
+
+    var b6 = bench_new("boot_exec_plan");
+    for (var i = 0; i < iters; i = i + 1) {
+        bench_start(b6);
+        init_boot_execution_plan(init);
+        bench_stop(b6);
+    }
+    bench_report(b6);
+    vec_push(benches, b6);
+
+    var b7 = bench_new("boot_exec_waves");
+    for (var i = 0; i < iters; i = i + 1) {
+        bench_start(b7);
+        init_boot_execution_plan_waves(init);
+        bench_stop(b7);
+    }
+    bench_report(b7);
+    vec_push(benches, b7);
+
+    var dcmd = safe_cmd_new(str_from("/usr/bin/svc"));
+    safe_cmd_add_arg(dcmd, str_from("--port"));
+    safe_cmd_add_arg(dcmd, str_from("8080"));
+    var b8 = bench_new("safe_cmd_disp");
+    for (var i = 0; i < iters; i = i + 1) {
+        bench_start(b8);
+        safe_cmd_display(dcmd);
+        bench_stop(b8);
+    }
+    bench_report(b8);
+    vec_push(benches, b8);
 
     println("\n=== Summary ===");
     bench_report_all(benches);

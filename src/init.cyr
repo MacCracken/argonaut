@@ -124,7 +124,7 @@ fn init_is_boot_complete(init) {
         var step = vec_get(steps, i);
         var status = load64(step + 32);
         var required = load64(step + 16);
-        # Use if/elif/else — multi-continue in one loop body is buggy in cc2
+        # Use if/elif/else — multi-continue in one loop body is buggy in cc3
         if (status == STEP_COMPLETE || status == STEP_SKIPPED) {
             # ok
         } elif (required == 0 && status == STEP_FAILED) {

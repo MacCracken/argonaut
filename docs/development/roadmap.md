@@ -4,50 +4,16 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## Current — v0.95.0
+## Current — v0.96.1
 
-Cyrius port complete. 12 test suites (395 assertions), 29 benchmarks, 207KB binary.
-All v0.7–v0.9 features ported. Audit module (libro shim) in place.
-
----
-
-## v0.96.0 — Test Coverage & Hardening
-
-### Test gaps (from audit)
-- [ ] Process management tests: fork_exec_service, process_stop, process_kill, proc_table_reap
-- [ ] Init service lifecycle tests: start_simple, start_oneshot, start_forking, stop, restart
-- [ ] Health check execution tests: TCP connect, command check, ready check retries, HTTP parsing
-- [ ] Edge boot execution tests: execute_edge_boot, close_luks full path
-- [ ] Notify I/O tests: bind, try_recv, drain, send
-- [ ] Security tests: landlock_description, capability_setpriv_cmd
-
-### Code quality
-- [ ] HTTP health check: validate HTTP status line (currently TCP connect only)
-- [ ] API response builders: list_services, system_status, system_metrics, boot_log
-- [ ] Resource limit command generation: to_prlimit_commands
-- [ ] boot_execution_plan / boot_execution_plan_waves
-- [ ] safe_cmd_display (SafeCommand Display)
-
-### Missing benchmarks (3 blocked on above)
-- [ ] api_responses (4 benchmarks — needs response builders)
-- [ ] resource_limits_prlimit (1 benchmark — needs prlimit command gen)
-
----
-
-## v0.97.0 — Sakshi Integration
-
-- [ ] Integrate sakshi (structured tracing/logging) for service state transitions
-- [ ] Trace: boot step completion/failure
-- [ ] Trace: health check results
-- [ ] Trace: shutdown orchestration steps
-- [ ] Trace: watchdog enforcement actions
-- [ ] Replace audit.cyr println-based logging with sakshi spans
+22 test suites (545 assertions), 34 benchmarks, 197KB binary (cc3 3.2.5+).
+sakshi_full.cyr from stdlib. All v0.96/v0.97 items complete.
 
 ---
 
 ## v0.98.0 — Libro Integration
 
-Blocked on: majra Cyrius port -> libro Cyrius port.
+Blocked on: majra Cyrius port -> libro Cyrius port (nearly ready).
 
 - [ ] Replace audit.cyr shim with real libro includes
 - [ ] Swap FNV-1a hash for libro's BLAKE3/SHA-256
@@ -69,7 +35,7 @@ Blocked on: majra Cyrius port -> libro Cyrius port.
 - [x] Shutdown ordering tested (clean stop -> sync -> poweroff)
 - [ ] Edge boot < 1s
 - [ ] Real hardware testing (RPi4, NUC)
-- [ ] Sakshi tracing integrated
+- [x] Sakshi tracing integrated (sakshi_full 0.7.0, v0.96.1)
 - [ ] Libro audit chain (real, not shim)
 - [ ] Kybernet using argonaut library (not hand-rolled PID 1)
 - [ ] 95%+ function test coverage
@@ -92,12 +58,12 @@ Blocked on: libro Cyrius port (for audit chain).
 
 ---
 
-## Known Compiler Issues (cc2)
+## Known Compiler Issues (cc3)
 
 | # | Issue | Impact | Workaround |
 |---|-------|--------|------------|
+| 4 | `break` in chained if blocks inside while | json.cyr integer parsing broken | Flag variable + `||` (fixed in stdlib 3.2.6) |
 | 16 | Adding includes shifts global addresses | Test string corruption in large compilation units | Split large .tcyr files to stay under string buffer |
-| — | System stdlib cross-includes exceed token limit | Can't use `~/.cyrius/lib/` symlink | Use local `lib/` copy with updated assert.cyr |
 | — | String data buffer 8192 bytes | Large test files overflow silently | Keep test files < ~500 string literals |
 
 ---

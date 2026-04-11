@@ -1,7 +1,7 @@
 #!/bin/sh
 # Argonaut test + benchmark runner (v2.0 — .tcyr/.bcyr format)
 
-CC="${1:-$HOME/.cyrius/bin/cc2}"
+CC="${1:-$HOME/.cyrius/bin/cc3}"
 BUILD="build"
 mkdir -p "$BUILD"
 

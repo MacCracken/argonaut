@@ -122,7 +122,7 @@ fn generate_unit(svc) {
     # Environment — sorted keys for deterministic output
     var env = svc_def_env(svc);
     var env_keys = map_keys(env);
-    # Inline insertion sort to avoid cc2 bug #16 (new function shifts addresses)
+    # Inline insertion sort to avoid cc3 bug #16 (new function shifts addresses)
     for (var si = 1; si < vec_len(env_keys); si = si + 1) {
         var skey = vec_get(env_keys, si);
         var sj = si - 1;

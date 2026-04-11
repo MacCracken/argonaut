@@ -7,10 +7,55 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
-## [0.96.1] - 2026-04-09
+## [0.96.1] — 2026-04-10
+
+### Added
+
+#### Code Quality
+- `init_list_services()`, `init_system_status()`, `init_system_metrics()`, `init_boot_log()` — API response builders (JSON)
+- `init_boot_execution_plan()`, `init_boot_execution_plan_waves()` — boot execution plans
+- `safe_cmd_display()` — SafeCommand string representation
+- `to_prlimit_commands()` — ResourceLimits to prlimit(1) SafeCommand generation
+- HTTP health check upgraded: full HTTP/1.x GET with status line parsing (was TCP-only)
+
+#### Sakshi Integration (v0.97.0 scope)
+- `sakshi_full.cyr` v0.7.0 — real span stack, ring buffer, UDP output (from cyrius stdlib)
+- State transitions traced (INFO/WARN on failure)
+- Boot step failures traced (ERROR)
+- Health check results traced (DEBUG pass, WARN fail)
+- Watchdog enforcement traced (ERROR)
+- Shutdown/runlevel switch steps traced (INFO)
+- Process fork/exec traced (DEBUG), SIGKILL fallback (WARN)
+- Edge boot steps traced (INFO per phase, ERROR on failure)
+
+#### Testing — 7 new suites, 150 new assertions
+- `process.tcyr` (26) — proc_table, safe_cmd, prlimit, fork_exec
+- `svc_life.tcyr` (13) — start/stop/restart, oneshot, disabled, restart limit
+- `health_exec.tcyr` (22) — process alive, command check, ready check, health history
+- `edge_exec.tcyr` (19) — rootfs, verity, luks, device path, edge boot, profile validation
+- `notify.tcyr` (16) — parse, bind, try_recv, drain, socket env
+- `security.tcyr` (26) — landlock, capability, seccomp, auth, password hash
+- `api_new.tcyr` (28) — API builders, boot plans, boot log with errors
+
+#### Benchmarks — 5 new
+- `api_list_svcs` (9us), `api_sys_status` (2us), `api_sys_metrics` (4us), `api_boot_log` (17us), `prlimit_cmds` (2us)
+- Separated into `tests/bcyr/api.bcyr` (string buffer limits)
 
 ### Changed
-- Cyrius toolchain pinned to v3.2.5 (cc3 compiler, minimum version)
+- Cyrius toolchain: cc2 → cc3, cyrb → cyrius, minimum version 3.2.5
+- `sakshi_full.cyr` from cyrius stdlib (removed local copies)
+- `load_env_file` buffer: 64KB static → 8KB heap (saved 56KB binary size)
+- `parse_meminfo_total_mb` buffer: 4KB static → 1KB heap
+- `notify_try_recv` buffer: 4KB static → 1KB heap
+- Binary size: 213KB → 197KB (heap buffers + sakshi_full vs minimal)
+- Test suites: 15 → 22 (545 assertions, 0 failures)
+- Benchmarks: 29 → 34
+- `lib/json.cyr` patched for cc3 bug #4 (break in chained if/while)
+- `serde.tcyr` uses `sizeof()` instead of hardcoded struct sizes
+- All docs updated: CLAUDE.md, CONTRIBUTING.md, roadmap.md (cc2→cc3, cyrb→cyrius)
+
+### Fixed
+- `lib/json.cyr`: `json_parse` non-string value delimiter broken on cc3 — chained `if`/`break` inside `while` doesn't exit. Replaced with flag variable + `||`. Upstream fix in cyrius stdlib 3.2.6.
 
 ## [Unreleased]
 

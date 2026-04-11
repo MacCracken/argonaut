@@ -7,31 +7,31 @@ Thank you for your interest in contributing to Argonaut.
 1. Fork and clone the repository
 2. Create a feature branch from `main`
 3. Make your changes
-4. Build: `cyrb build src/main.cyr build/argonaut`
-5. Test: `cyrb test`
-6. Benchmark: `cyrb bench`
+4. Build: `cyrius build src/main.cyr build/argonaut`
+5. Test: `cyrius test`
+6. Benchmark: `cyrius bench`
 7. Open a pull request
 
 ## Prerequisites
 
-- [Cyrius](https://github.com/MacCracken/cyrius) toolchain (cc2 + cyrb) v2.1.0+
+- [Cyrius](https://github.com/MacCracken/cyrius) toolchain (cc3 + cyrius) v3.2.5+
 - Linux x86_64
 
 ## Build Commands
 
 | Command | Description |
 |---------|-------------|
-| `cyrb build src/main.cyr build/argonaut` | Compile |
-| `cyrb test` | Run all .tcyr test suites |
-| `cyrb bench` | Run all .bcyr benchmarks |
-| `cyrb check src/main.cyr` | Syntax check |
+| `cyrius build src/main.cyr build/argonaut` | Compile |
+| `cyrius test` | Run all .tcyr test suites |
+| `cyrius bench` | Run all .bcyr benchmarks |
+| `cyrius check src/main.cyr` | Syntax check |
 
 ## Project Structure
 
 ```
 src/           Application modules (.cyr)
-tests/tcyr/    Test suites (.tcyr) — auto-discovered by cyrb test
-tests/bcyr/    Benchmarks (.bcyr) — auto-discovered by cyrb bench
+tests/tcyr/    Test suites (.tcyr) — auto-discovered by cyrius test
+tests/bcyr/    Benchmarks (.bcyr) — auto-discovered by cyrius bench
 tests/         test_header.cyr (shared includes + helpers)
 lib/           Cyrius stdlib (local copy)
 docs/          Architecture, roadmap, ADRs
@@ -54,7 +54,7 @@ rust-old/      Original Rust source (archived)
 - Strings are null-terminated C strings
 - Error returns: -1 for error, 0+ for success
 - Comments with `#`
-- No `match` as variable name (reserved keyword in cc2 2.0+)
+- No `match` as variable name (reserved keyword in cc3)
 - Max 6 function parameters
 
 ## Code Style

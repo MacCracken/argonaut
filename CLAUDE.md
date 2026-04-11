@@ -5,7 +5,7 @@
 **Argonaut** (Greek: sailors of the Argo — one letter off from AGNOS) — Init system and service manager for AGNOS — boot sequencing, service lifecycle, health checks, runlevel switching, shutdown orchestration
 
 - **Type**: Cyrius application (ported from Rust library crate)
-- **Language**: Cyrius (compiled via `cc2`), original Rust preserved in `rust-old/`
+- **Language**: Cyrius (compiled via `cc3`), original Rust preserved in `rust-old/`
 - **License**: GPL-3.0-only
 - **Version**: SemVer 0.D.M pre-1.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
@@ -23,7 +23,7 @@ AGNOS boot (PID 1 / systemd delegate), stiva, sutra, daimon
 
 0. Read roadmap, CHANGELOG, and open issues — know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Build check: `cat src/main.cyr | cc2 > build/argonaut && chmod +x build/argonaut`
+2. Build check: `cyrius build src/main.cyr build/argonaut`
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Initial refactor + audit (performance, memory, security, edge cases)
 5. Build check — must compile clean after audit
@@ -35,7 +35,7 @@ AGNOS boot (PID 1 / systemd delegate), stiva, sutra, daimon
 ### Development Loop (continuous)
 
 1. Work phase — new features, roadmap items, bug fixes
-2. Build check: `cat src/main.cyr | cc2 > build/argonaut && chmod +x build/argonaut`
+2. Build check: `cyrius build src/main.cyr build/argonaut`
 3. Test + benchmark additions for new code
 4. Run benchmarks (`./scripts/bench-history.sh`)
 5. Audit phase — review performance, memory, security, throughput, correctness
@@ -44,7 +44,7 @@ AGNOS boot (PID 1 / systemd delegate), stiva, sutra, daimon
 8. Run benchmarks again — prove the wins
 9. If audit heavy → return to step 5
 10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, source citations for algorithms/formulas, update docs/sources.md, guides and examples for new API surface, verify recipe version in zugot
-11. Version check — VERSION, cyrb.toml, recipe (in zugot) all in sync
+11. Version check — VERSION, cyrius.toml, recipe (in zugot) all in sync
 12. Return to step 1
 
 ### Key Principles

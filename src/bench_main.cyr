@@ -2,7 +2,7 @@
 # API + resource benchmarks in tests/bcyr/api.bcyr (5 benchmarks)
 # Total: 34 benchmarks. All Rust criterion benchmarks ported.
 # Note: init construction loop crashes with new init.cyr API functions
-# due to cc2 string buffer overflow at high iteration counts (cc2 issue #16).
+# due to cc3 string buffer overflow at high iteration counts (cc3 issue #16).
 # Split into separate bcyr files as workaround.
 
 include "lib/string.cyr"
@@ -500,7 +500,7 @@ fn main() {
     # --- API response builders ---
 
     # API + resource benchmarks in separate file (tests/bcyr/api.bcyr)
-    # to stay under cc2 string buffer limits
+    # to stay under cc3 string buffer limits
 
     println("\n=== Summary ===");
     bench_report_all(benches);

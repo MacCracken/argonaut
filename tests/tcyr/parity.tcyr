@@ -1,0 +1,131 @@
+# parity.tcyr — Rust parity gap tests (final items before rust-old removal)
+include "tests/test_header.cyr"
+include "src/audit.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("rust-parity");
+
+    # --- boot_started set after first step completes ---
+    var init = desktop_init();
+    assert_eq(load64(init + 24), 0, "bs init 0");
+    init_mark_step_complete(init, STAGE_MOUNT_FS);
+    assert(load64(init + 24) > 0, "bs set");
+
+    # --- boot_started set after first step fails ---
+    var init2 = desktop_init();
+    assert_eq(load64(init2 + 24), 0, "bs2 init 0");
+    init_mark_step_failed(init2, STAGE_MOUNT_FS, str_from("err"));
+    assert(load64(init2 + 24) > 0, "bs2 set");
+
+    # --- boot_started not overwritten by later steps ---
+    var first_ts = load64(init + 24);
+    init_mark_step_complete(init, STAGE_DEVICE_MGR);
+    assert_eq(load64(init + 24), first_ts, "bs no overwrite");
+
+    # --- started_at populated on mark_step_complete ---
+    var init3 = desktop_init();
+    var steps = load64(init3 + 8);
+    var step0 = vec_get(steps, 0);
+    assert_eq(load64(step0 + 40), 0, "sa init 0");
+    init_mark_step_complete(init3, load64(step0));
+    assert(load64(step0 + 40) > 0, "sa set");
+
+    # --- started_at populated on mark_step_failed ---
+    var init4 = desktop_init();
+    var steps4 = load64(init4 + 8);
+    var step4 = vec_get(steps4, 0);
+    assert_eq(load64(step4 + 40), 0, "sa4 init 0");
+    init_mark_step_failed(init4, load64(step4), str_from("e"));
+    assert(load64(step4 + 40) > 0, "sa4 set");
+
+    # --- register service overwrite preserves state ---
+    var init5 = minimal_init();
+    var svc_map = load64(init5 + 16);
+    var ms = map_get(svc_map, "daimon");
+    assert(ms != 0, "reg has daimon");
+    # Set state to RUNNING
+    managed_svc_set_state(ms, STATE_STARTING);
+    managed_svc_set_state(ms, STATE_RUNNING);
+    assert_eq(managed_svc_state(ms), STATE_RUNNING, "reg running");
+    # Re-register with new definition
+    var new_sd = svc_def_new(str_from("daimon"), str_from("new"), str_from("/new"));
+    var new_ms = managed_svc_new(new_sd);
+    map_set(svc_map, "daimon", new_ms);
+    # New managed service has fresh state
+    var ms2 = map_get(svc_map, "daimon");
+    assert_eq(managed_svc_state(ms2), STATE_STOPPED, "reg reset");
+
+    # --- enable/disable service ---
+    var init6 = desktop_init();
+    var ms6 = init_get_service(init6, "daimon");
+    assert(ms6 != 0, "en has daimon");
+    var sd6 = managed_svc_def(ms6);
+    assert_eq(svc_def_enabled(sd6), 1, "en default");
+    # Disable
+    store64(sd6 + 88, 0);
+    assert_eq(svc_def_enabled(sd6), 0, "en disabled");
+    # Start should fail when disabled
+    var er = init_start_service(init6, "daimon");
+    assert_eq(er, 0 - 1, "en start fail");
+    # Re-enable
+    store64(sd6 + 88, 1);
+    assert_eq(svc_def_enabled(sd6), 1, "en re-enabled");
+
+    # --- shruti service definition ---
+    var sh = shruti_service();
+    assert(streq(str_data(svc_def_name(sh)), "shruti"), "sh name");
+    assert(svc_def_health_check(sh) != 0, "sh hc");
+    # Shruti should NOT be in default services for any mode
+    var dsvc = default_services(BOOT_DESKTOP);
+    var has_shruti = 0;
+    for (var i = 0; i < vec_len(dsvc); i = i + 1) {
+        if (streq(str_data(svc_def_name(vec_get(dsvc, i))), "shruti")) {
+            has_shruti = 1;
+        }
+    }
+    assert_eq(has_shruti, 0, "sh not default");
+
+    # --- shruti not in recovery ---
+    var rsvc = default_services(BOOT_RECOVERY);
+    assert_eq(vec_len(rsvc), 0, "rec empty");
+
+    # --- serde: ManagedService fields ---
+    var msd = svc_def_new(str_from("test"), str_from("t"), str_from("/t"));
+    var mms = managed_svc_new(msd);
+    managed_svc_set_state(mms, STATE_STARTING);
+    managed_svc_set_state(mms, STATE_RUNNING);
+    managed_svc_set_pid(mms, 42);
+    managed_svc_set_restarts(mms, 3);
+    assert_eq(managed_svc_state(mms), STATE_RUNNING, "ms state");
+    assert_eq(managed_svc_pid(mms), 42, "ms pid");
+    assert_eq(managed_svc_restarts(mms), 3, "ms rest");
+
+    # --- serde: EdgeBootConfig fields ---
+    var ec = edge_config_default();
+    assert_eq(load64(ec), 1, "ec ro");
+    assert_eq(load64(ec + 8), 1, "ec luks");
+    assert_eq(load64(ec + 16), 1, "ec tpm");
+    assert_eq(load64(ec + 24), 3000, "ec boot");
+
+    # --- audit: record + verify chain ---
+    var alog = audit_log_new();
+    audit_log_record(alog, "svc-a", EVT_STARTING);
+    audit_log_record(alog, "svc-a", EVT_STARTED);
+    audit_log_record(alog, "svc-b", EVT_STOPPING);
+    assert_eq(audit_log_len(alog), 3, "al len");
+    assert(audit_log_verify(alog), "al verify");
+
+    # --- audit: query by source (source is always "argonaut") ---
+    var by_src = audit_log_by_source(alog, "argonaut");
+    assert_eq(vec_len(by_src), 3, "al src 3");
+
+    # --- audit: event severity mapping ---
+    assert_eq(audit_event_severity(EVT_STARTED), SEV_INFO, "sev start");
+    assert_eq(audit_event_severity(EVT_CRASH_DETECTED), SEV_ERROR, "sev crash");
+    assert_eq(audit_event_severity(EVT_TIMEOUT_KILLED), SEV_ERROR, "sev wd");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);
