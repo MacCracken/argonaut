@@ -6,16 +6,17 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ## Current — v0.96.1
 
-22 test suites (545 assertions), 34 benchmarks, 197KB binary (cc3 3.2.5+).
-sakshi_full.cyr from stdlib. All v0.96/v0.97 items complete.
+23 test suites (579 assertions), 37 benchmarks, 197KB binary (cc3 3.4.0).
+sakshi_full from cyrius stdlib. Rust port complete — `rust-old/` removed.
 
 ---
 
 ## v0.98.0 — Libro Integration
 
-Blocked on: majra Cyrius port -> libro Cyrius port (nearly ready).
+Blocked on: libro Cyrius port (nearly ready).
 
 - [ ] Replace audit.cyr shim with real libro includes
+- [ ] `record_audited_event()` bridge (ArgonautInit + AuditLog)
 - [ ] Swap FNV-1a hash for libro's BLAKE3/SHA-256
 - [ ] Wire AuditChain persistence (write to disk)
 - [ ] QueryFilter full support (time range, action, agent_id)
@@ -33,9 +34,10 @@ Blocked on: majra Cyrius port -> libro Cyrius port (nearly ready).
 - [x] QEMU boot: desktop < 3s (2.9s with real daimon)
 - [x] Crash recovery tested (exponential backoff, restart limit, GiveUp)
 - [x] Shutdown ordering tested (clean stop -> sync -> poweroff)
+- [x] Sakshi tracing integrated (sakshi_full 0.7.0, v0.96.1)
+- [x] Rust port complete, rust-old removed (v0.96.1)
 - [ ] Edge boot < 1s
 - [ ] Real hardware testing (RPi4, NUC)
-- [x] Sakshi tracing integrated (sakshi_full 0.7.0, v0.96.1)
 - [ ] Libro audit chain (real, not shim)
 - [ ] Kybernet using argonaut library (not hand-rolled PID 1)
 - [ ] 95%+ function test coverage

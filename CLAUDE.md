@@ -5,7 +5,7 @@
 **Argonaut** (Greek: sailors of the Argo — one letter off from AGNOS) — Init system and service manager for AGNOS — boot sequencing, service lifecycle, health checks, runlevel switching, shutdown orchestration
 
 - **Type**: Cyrius application (ported from Rust library crate)
-- **Language**: Cyrius (compiled via `cc3`), original Rust preserved in `rust-old/`
+- **Language**: Cyrius (compiled via `cc3`), ported from Rust (rust-old removed v0.96.1)
 - **License**: GPL-3.0-only
 - **Version**: SemVer 0.D.M pre-1.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
@@ -88,4 +88,3 @@ Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST 
 - Do not add unnecessary dependencies — keep it lean
 - Do not skip benchmarks before claiming performance improvements
 - Do not commit `build/` directory (compiled binaries)
-- Do not commit `rust-old/target/`

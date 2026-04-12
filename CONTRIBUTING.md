@@ -35,7 +35,6 @@ tests/bcyr/    Benchmarks (.bcyr) — auto-discovered by cyrius bench
 tests/         test_header.cyr (shared includes + helpers)
 lib/           Cyrius stdlib (local copy)
 docs/          Architecture, roadmap, ADRs
-rust-old/      Original Rust source (archived)
 ```
 
 ## Adding a Module

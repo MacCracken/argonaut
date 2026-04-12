@@ -72,6 +72,8 @@ fn json_parse(src) {
             }
         } else {
             # Non-string value (number, true, false, null)
+            # Note: chained if/break inside while is broken in cc3 —
+            # use flag + || instead (fixed in 3.2.6, upstream from argonaut)
             if (key != 0) {
                 var vs = ji;
                 var done = 0;

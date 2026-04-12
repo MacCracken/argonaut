@@ -7,7 +7,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
-## [0.96.1] — 2026-04-10
+## [0.96.1] — 2026-04-11
 
 ### Added
 
@@ -28,7 +28,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 - Process fork/exec traced (DEBUG), SIGKILL fallback (WARN)
 - Edge boot steps traced (INFO per phase, ERROR on failure)
 
-#### Testing — 7 new suites, 150 new assertions
+#### Testing — 8 new suites, 184 new assertions
 - `process.tcyr` (26) — proc_table, safe_cmd, prlimit, fork_exec
 - `svc_life.tcyr` (13) — start/stop/restart, oneshot, disabled, restart limit
 - `health_exec.tcyr` (22) — process alive, command check, ready check, health history
@@ -36,23 +36,28 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 - `notify.tcyr` (16) — parse, bind, try_recv, drain, socket env
 - `security.tcyr` (26) — landlock, capability, seccomp, auth, password hash
 - `api_new.tcyr` (28) — API builders, boot plans, boot log with errors
+- `parity.tcyr` (34) — Rust parity: boot timestamps, register overwrite, enable/disable, shruti, serde fields, audit chain
 
-#### Benchmarks — 5 new
-- `api_list_svcs` (9us), `api_sys_status` (2us), `api_sys_metrics` (4us), `api_boot_log` (17us), `prlimit_cmds` (2us)
+#### Benchmarks — 8 new (37 total)
+- `api_list_svcs`, `api_sys_status`, `api_sys_metrics`, `api_boot_log`, `prlimit_cmds`
+- `boot_exec_plan`, `boot_exec_waves`, `safe_cmd_disp`
 - Separated into `tests/bcyr/api.bcyr` (string buffer limits)
 
 ### Changed
-- Cyrius toolchain: cc2 → cc3, cyrb → cyrius, minimum version 3.2.5
+- Cyrius toolchain: cc2 → cc3, cyrb → cyrius, minimum version 3.4.0
 - `sakshi_full.cyr` from cyrius stdlib (removed local copies)
 - `load_env_file` buffer: 64KB static → 8KB heap (saved 56KB binary size)
 - `parse_meminfo_total_mb` buffer: 4KB static → 1KB heap
 - `notify_try_recv` buffer: 4KB static → 1KB heap
 - Binary size: 213KB → 197KB (heap buffers + sakshi_full vs minimal)
-- Test suites: 15 → 22 (545 assertions, 0 failures)
-- Benchmarks: 29 → 34
+- Test suites: 15 → 23 (579 assertions, 0 failures)
+- Benchmarks: 29 → 37
 - `lib/json.cyr` patched for cc3 bug #4 (break in chained if/while)
 - `serde.tcyr` uses `sizeof()` instead of hardcoded struct sizes
 - All docs updated: CLAUDE.md, CONTRIBUTING.md, roadmap.md (cc2→cc3, cyrb→cyrius)
+
+### Removed
+- **`rust-old/`** — original Rust source (13,577 lines) archived since v0.95.0. All functions, tests, and benchmarks ported to Cyrius. 2.3GB removed (includes `target/`).
 
 ### Fixed
 - `lib/json.cyr`: `json_parse` non-string value delimiter broken on cc3 — chained `if`/`break` inside `while` doesn't exit. Replaced with flag variable + `||`. Upstream fix in cyrius stdlib 3.2.6.
