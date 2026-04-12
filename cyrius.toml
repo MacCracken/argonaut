@@ -1,5 +1,5 @@
 name = "argonaut"
-version = "0.96.1"
+version = "0.97.0"
 license = "GPL-3.0-only"
 entry = "src/main.cyr"
 output = "argonaut"

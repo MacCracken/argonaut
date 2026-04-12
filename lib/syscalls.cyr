@@ -16,6 +16,8 @@ enum SysNr {
     SYS_FSTAT = 5;
     SYS_LSEEK = 8;
     SYS_MMAP = 9;
+    SYS_MPROTECT = 10;
+    SYS_MUNMAP = 11;
     SYS_BRK = 12;
     SYS_RT_SIGPROCMASK = 14;
     SYS_IOCTL = 16;
@@ -175,6 +177,21 @@ enum StdFd {
     STDIN_FD = 0;
     STDOUT_FD = 1;
     STDERR_FD = 2;
+}
+
+# Memory mapping (mmap)
+enum MmapProt {
+    PROT_NONE = 0;
+    PROT_READ = 1;
+    PROT_WRITE = 2;
+    PROT_EXEC = 4;
+}
+
+enum MmapFlag {
+    MAP_SHARED = 1;
+    MAP_PRIVATE = 2;
+    MAP_ANONYMOUS = 32;
+    MAP_ANON = 32;
 }
 
 # Reboot magic

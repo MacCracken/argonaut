@@ -4,22 +4,22 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## Current — v0.96.1
+## Current — v0.97.0
 
-23 test suites (579 assertions), 37 benchmarks, 197KB binary (cc3 3.4.0).
-sakshi_full from cyrius stdlib. Rust port complete — `rust-old/` removed.
+23 test suites (582 assertions), 37 benchmarks, 373KB binary (cc3 3.5.0).
+Libro 1.0.2 integrated — real SHA-256 audit chain replaces FNV-1a shim.
 
 ---
 
-## v0.98.0 — Libro Integration
+## v0.98.0 — Libro Extended Features
 
-Blocked on: libro Cyrius port (nearly ready).
-
-- [ ] Replace audit.cyr shim with real libro includes
-- [ ] `record_audited_event()` bridge (ArgonautInit + AuditLog)
-- [ ] Swap FNV-1a hash for libro's BLAKE3/SHA-256
-- [ ] Wire AuditChain persistence (write to disk)
-- [ ] QueryFilter full support (time range, action, agent_id)
+- [ ] `record_audited_event()` bridge (ArgonautInit + AuditLog wired into service lifecycle)
+- [ ] Wire AuditChain persistence (libro FileStore — write to disk)
+- [ ] QueryFilter time range support (after/before epoch filtering)
+- [ ] QueryFilter agent_id support
+- [ ] Libro signing module (Ed25519 signed entries)
+- [ ] Libro merkle module (Merkle tree for chain batches)
+- [ ] Libro export (JSONL/CSV audit trail export)
 
 ---
 
@@ -38,7 +38,7 @@ Blocked on: libro Cyrius port (nearly ready).
 - [x] Rust port complete, rust-old removed (v0.96.1)
 - [ ] Edge boot < 1s
 - [ ] Real hardware testing (RPi4, NUC)
-- [ ] Libro audit chain (real, not shim)
+- [x] Libro audit chain (real, not shim) — v0.97.0, SHA-256 via libro 1.0.2
 - [ ] Kybernet using argonaut library (not hand-rolled PID 1)
 - [ ] 95%+ function test coverage
 
@@ -49,7 +49,7 @@ Blocked on: libro Cyrius port (nearly ready).
 PID 1 helmsman — https://github.com/MacCracken/kybernet
 
 Currently uses hand-rolled init logic. Goal: replace with argonaut library calls.
-Blocked on: libro Cyrius port (for audit chain).
+Unblocked: libro 1.0.2 integrated in v0.97.0.
 
 - [ ] Wire kybernet to argonaut's init_start_service / init_stop_service
 - [ ] Wire kybernet to argonaut's boot_execution_plan_waves

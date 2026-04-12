@@ -7,6 +7,45 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
+## [0.97.0] — 2026-04-11
+
+### Added
+
+#### Libro 1.0.2 Integration — Real Cryptographic Audit Chain
+- **libro 1.0.2** integrated: SHA-256 hash-linked audit chain replaces FNV-1a shim
+- Includes libro core modules: error, hasher, entry, verify, query, retention, chain
+- New dependencies: sigil (SHA-256, hex, constant-time comparison), bigint, chrono
+- `audit_log_new()` now creates a libro `AuditChain` (was local FNV-1a vec)
+- `audit_log_record()` creates real `AuditEntry` with UUID, RFC 3339 timestamps, SHA-256 hash
+- `audit_log_verify()` performs cryptographic chain integrity verification
+- `audit_log_by_source()`, `audit_log_by_severity()` use libro's Str comparison
+- `audit_log_by_min_severity()`, `audit_log_query()` use libro's `QueryFilter` API
+- Full libro `entry_verify()` available for individual entry verification
+- `audit_entry_timestamp()` returns RFC 3339 Str (was epoch ms integer)
+- `audit_entry_hash()` returns 64-char hex SHA-256 Str (was FNV-1a i64)
+- `audit_entry_prev_hash()` returns Str (was i64, 0 for genesis)
+- `audit_entry_service()` accessor (service name stored in libro details field)
+
+#### Testing — 3 new assertions (582 total)
+- `audit_b.tcyr`: SHA-256 hash length (64 chars), entry_verify, RFC 3339 timestamp format
+- All 23 test suites pass (582 assertions, 0 failures)
+
+### Changed
+- **audit.cyr**: 328-line FNV-1a shim → 162-line libro bridge (51% smaller)
+- **Binary size**: 197KB → 373KB (+176KB for libro + sigil SHA-256 + bigint)
+- `lib/syscalls.cyr`: added `SYS_MPROTECT`, `SYS_MUNMAP`, `MmapProt`, `MmapFlag` enums (required by freelist for libro)
+- Libro modules in `lib/libro/` — core chain only (7 of 19 modules; signing, merkle, anchoring, timestamping, proof, stores, streaming available for future use)
+- Audit test suites (`audit_a.tcyr`, `audit_b.tcyr`) inline includes directly (cc3 nested include read limit workaround)
+- `parity.tcyr` inlines includes (same cc3 workaround)
+
+### Removed
+- **FNV-1a hash computation** in audit.cyr — replaced by libro's SHA-256 via sigil
+- **AuditEntry struct** (56 bytes, FNV-1a) — replaced by libro's AuditEntry (88 bytes, SHA-256)
+- **AuditLog struct** (local vec wrapper) — replaced by libro's AuditChain
+- `severity_str()`, `severity_level()` — replaced by libro's `severity_as_str()`, direct enum comparison
+
+---
+
 ## [0.96.1] — 2026-04-11
 
 ### Added

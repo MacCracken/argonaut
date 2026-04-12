@@ -18,6 +18,22 @@ include "lib/hashmap.cyr"
 include "lib/tagged.cyr"
 include "lib/args.cyr"
 include "lib/bench.cyr"
+include "lib/json.cyr"
+include "lib/freelist.cyr"
+
+# Libro dependencies
+include "lib/bigint.cyr"
+include "lib/chrono.cyr"
+include "lib/sigil.cyr"
+
+# Libro core chain modules
+include "lib/libro/error.cyr"
+include "lib/libro/hasher.cyr"
+include "lib/libro/entry.cyr"
+include "lib/libro/verify.cyr"
+include "lib/libro/query.cyr"
+include "lib/libro/retention.cyr"
+include "lib/libro/chain.cyr"
 
 include "src/types.cyr"
 include "src/boot.cyr"

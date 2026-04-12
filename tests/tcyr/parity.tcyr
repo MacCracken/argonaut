@@ -1,6 +1,81 @@
 # parity.tcyr — Rust parity gap tests (final items before rust-old removal)
-include "tests/test_header.cyr"
+# Inlines all includes (cc3 nested include read limit prevents using headers
+# when total source exceeds ~512KB per READFILE call in lex.cyr)
+
+# Core stdlib
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/process.cyr"
+include "lib/hashmap.cyr"
+include "lib/tagged.cyr"
+include "lib/args.cyr"
+include "lib/assert.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+include "lib/freelist.cyr"
+
+# Libro dependencies
+include "lib/bigint.cyr"
+include "lib/chrono.cyr"
+include "lib/sigil.cyr"
+
+# Sakshi stubs for tests
+fn sakshi_info(msg, len) { return 0; }
+fn sakshi_warn(msg, len) { return 0; }
+fn sakshi_error(msg, len) { return 0; }
+fn sakshi_debug(msg, len) { return 0; }
+fn sakshi_trace(msg, len) { return 0; }
+fn sakshi_span_enter(name, len) { return 0; }
+fn sakshi_span_exit() { return 0; }
+fn sakshi_span_depth() { return 0; }
+
+# Libro core chain modules
+include "lib/libro/error.cyr"
+include "lib/libro/hasher.cyr"
+include "lib/libro/entry.cyr"
+include "lib/libro/verify.cyr"
+include "lib/libro/query.cyr"
+include "lib/libro/retention.cyr"
+include "lib/libro/chain.cyr"
+
+# Argonaut modules
+include "src/types.cyr"
+include "src/boot.cyr"
+include "src/services.cyr"
+include "src/process_mgmt.cyr"
+include "src/health.cyr"
+include "src/edge_boot.cyr"
+include "src/notify.cyr"
+include "src/security.cyr"
+include "src/systemd.cyr"
+include "src/tmpfiles.cyr"
+include "src/init.cyr"
 include "src/audit.cyr"
+
+# Shared test helpers
+fn minimal_init() {
+    var cfg = argonaut_config_default();
+    store64(cfg, BOOT_MINIMAL);
+    return argonaut_init_new(cfg);
+}
+
+fn desktop_init() {
+    var cfg = argonaut_config_default();
+    store64(cfg, BOOT_DESKTOP);
+    return argonaut_init_new(cfg);
+}
+
+fn edge_init_fn() {
+    var cfg = argonaut_config_default();
+    store64(cfg, BOOT_EDGE);
+    return argonaut_init_new(cfg);
+}
 
 fn main() {
     alloc_init();
@@ -117,6 +192,7 @@ fn main() {
     assert(audit_log_verify(alog), "al verify");
 
     # --- audit: query by source (source is always "argonaut") ---
+    # libro uses Str comparison; audit_log_by_source wraps with str_from
     var by_src = audit_log_by_source(alog, "argonaut");
     assert_eq(vec_len(by_src), 3, "al src 3");
 
