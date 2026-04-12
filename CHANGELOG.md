@@ -7,13 +7,31 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
-## [0.97.0] — 2026-04-11
+## [1.0.0] — 2026-04-12
+
+### Summary
+
+Argonaut 1.0.0 — init system and service manager for AGNOS, written in Cyrius.
+
+- **Language**: Cyrius (compiled via cc3 3.6.2)
+- **Binary**: 373KB statically linked ELF x86_64
+- **Tests**: 26 suites, 606 assertions, 0 failures
+- **Benchmarks**: 37
+- **Audit**: libro 1.0.2 SHA-256 hash-linked chain with lifecycle recording
+- **Tracing**: sakshi_full 0.7.0 structured tracing
+
+All pre-1.0 features complete: boot sequencing, service lifecycle (simple/forking/oneshot), dependency resolution (Kahn's algorithm), health checks (HTTP/TCP/command/process-alive), watchdog enforcement, shutdown orchestration, runlevel switching, edge boot (dm-verity/LUKS/read-only rootfs), security enforcement (seccomp/Landlock/capabilities), sd_notify protocol, systemd unit generation, tmpfiles setup, API response builders, and cryptographic audit trail via libro.
+
+---
+
+## [0.97.0] — 2026-04-12
 
 ### Added
 
 #### Libro 1.0.2 Integration — Real Cryptographic Audit Chain
 - **libro 1.0.2** integrated: SHA-256 hash-linked audit chain replaces FNV-1a shim
 - Includes libro core modules: error, hasher, entry, verify, query, retention, chain
+- 16 of 19 libro modules compile-tested on cc3 3.6.2 (file_store/patra_store/streaming excluded — need patra lock fns)
 - New dependencies: sigil (SHA-256, hex, constant-time comparison), bigint, chrono
 - `audit_log_new()` now creates a libro `AuditChain` (was local FNV-1a vec)
 - `audit_log_record()` creates real `AuditEntry` with UUID, RFC 3339 timestamps, SHA-256 hash
@@ -26,17 +44,31 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 - `audit_entry_prev_hash()` returns Str (was i64, 0 for genesis)
 - `audit_entry_service()` accessor (service name stored in libro details field)
 
-#### Testing — 3 new assertions (582 total)
-- `audit_b.tcyr`: SHA-256 hash length (64 chars), entry_verify, RFC 3339 timestamp format
-- All 23 test suites pass (582 assertions, 0 failures)
+#### Lifecycle Audit Recording
+- `ArgonautInit` now carries an `audit_log` field (libro AuditChain)
+- `init_audit_log(init)` accessor
+- `init_start_service` records EVT_STARTING, EVT_STARTED / EVT_STOPPED_FAIL / EVT_READY_PASSED / EVT_READY_FAILED
+- `init_stop_service` records EVT_STOPPING, EVT_STOPPED_OK / EVT_STOPPED_FAIL
+- `init_restart_service` records EVT_RESTARTING
+- `init_reap_services` records EVT_STOPPED_OK / EVT_CRASH_DETECTED on process exit
+- `init_enforce_watchdog` records EVT_TIMEOUT_KILLED
+- `init_poll_health` records EVT_HEALTH_PASSED / EVT_HEALTH_FAILED
+- All events flow through libro's SHA-256 chain — tamper-proof service event history
+
+#### Testing — 26 suites, 606 assertions
+- `audit_lifecycle.tcyr` (17 assertions) — start/stop/restart produce audit entries, chain integrity, SHA-256 hashes, source attribution
+- `cc3_readfile_cap.tcyr` (4) — 16 libro modules compile on cc3 3.6.2
+- `cc3_ptr_regression.tcyr` (3) — full argonaut + libro build (cc3 3.5.2 ptr bug regression)
+- `audit_b.tcyr` updated: SHA-256 hash length, entry_verify, RFC 3339 timestamp format
 
 ### Changed
 - **audit.cyr**: 328-line FNV-1a shim → 162-line libro bridge (51% smaller)
+- **Include order**: audit.cyr now included before init.cyr (init depends on audit for lifecycle recording)
 - **Binary size**: 197KB → 373KB (+176KB for libro + sigil SHA-256 + bigint)
+- **Minimum cc3**: 3.6.2 (3.5.2–3.6.1 had `ptr` regression; 3.5.0 had READFILE 512KB cap)
 - `lib/syscalls.cyr`: added `SYS_MPROTECT`, `SYS_MUNMAP`, `MmapProt`, `MmapFlag` enums (required by freelist for libro)
-- Libro modules in `lib/libro/` — core chain only (7 of 19 modules; signing, merkle, anchoring, timestamping, proof, stores, streaming available for future use)
-- Audit test suites (`audit_a.tcyr`, `audit_b.tcyr`) inline includes directly (cc3 nested include read limit workaround)
-- `parity.tcyr` inlines includes (same cc3 workaround)
+- `tests/test_header.cyr`, `src/test_header.cyr`: now include libro deps + audit.cyr before init.cyr
+- Libro modules in `lib/libro/` — all 19 copied, 7 core included in main build
 
 ### Removed
 - **FNV-1a hash computation** in audit.cyr — replaced by libro's SHA-256 via sigil

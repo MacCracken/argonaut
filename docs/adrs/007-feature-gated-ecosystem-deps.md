@@ -1,38 +1,43 @@
 # ADR-007: Feature-Gated AGNOS Ecosystem Dependencies
 
-**Status**: Accepted
+**Status**: Superseded — Cyrius has no feature gates; AGNOS dependencies are included directly
 **Date**: 2026-04-02
 
 ## Context
 
 Argonaut is part of the AGNOS ecosystem but should also be usable as a standalone init library by anyone building a Linux-based OS. Two AGNOS crates provide capabilities argonaut benefits from: **libro** (tamper-proof audit logging) and **agnosys** (seccomp, Landlock, capability management). Adding these as hard dependencies would force all consumers to pull in the full AGNOS stack.
 
-## Decision
+## Decision (original — Rust)
 
-AGNOS ecosystem dependencies are optional, gated behind Cargo features:
+AGNOS ecosystem dependencies were optional, gated behind Cargo features:
 
-- `audit` feature enables `libro` — tamper-proof service event audit chains.
-- `security` feature enables `agnosys` — direct seccomp BPF loading, Landlock enforcement.
+- `audit` feature enabled `libro` — tamper-proof service event audit chains.
+- `security` feature enabled `agnosys` — direct seccomp BPF loading, Landlock enforcement.
 
-Without these features, the library still provides:
+Without these features, the library still provided:
 - All configuration types (`SeccompConfig`, `LandlockConfig`, `AuditLog` types, etc.)
 - SafeCommand generation for CLI tool fallbacks (`prlimit`, `setpriv`)
 - Human-readable descriptions for logging
 
-With features enabled, the library can directly apply security policies via syscalls (wrapped safely by agnosys) or record events to a cryptographic audit chain (via libro).
+With features enabled, the library could directly apply security policies via syscalls (via agnosys) or record events to a cryptographic audit chain (via libro).
 
-Both dependencies use `path = "../<crate>"` with a `version` constraint for local development, enabling Cargo workspace-like builds while supporting independent publishing.
+## Consequences (original — Rust)
 
-## Consequences
+- **Positive**: Non-AGNOS consumers got a fully functional init library with zero AGNOS coupling.
+- **Positive**: AGNOS deployments got tight native integration without runtime overhead of CLI shelling.
+- **Negative**: Feature-gated code paths (`#[cfg(feature = "...")]`) increased maintenance surface.
 
-- **Positive**: Non-AGNOS consumers get a fully functional init library with zero AGNOS coupling.
-- **Positive**: AGNOS deployments get tight native integration without runtime overhead of CLI shelling.
-- **Positive**: CI must test all feature combinations (`default`, `audit`, `security`, `all-features`).
-- **Negative**: Feature-gated code paths (`#[cfg(feature = "...")]`) increase maintenance surface.
-- **Negative**: Consumers must know to enable features for full security enforcement.
-
-## Alternatives Considered
+## Alternatives Considered (original — Rust)
 
 - **Hard dependencies on libro/agnosys**: Forces all consumers into the AGNOS stack. Rejected — violates reusability.
 - **Separate crates (argonaut-audit, argonaut-security)**: More crates to maintain, version, and publish. Rejected — feature gates achieve the same with less overhead.
 - **Runtime plugin system**: Adds complexity and indirection. Rejected — compile-time feature selection is simpler and has zero runtime cost.
+
+## Post-Port Update (v0.95.0)
+
+Cyrius has no equivalent of Cargo feature gates (`#[cfg(feature = "...")]`). In the Cyrius port, AGNOS ecosystem dependencies are handled via `include` directives:
+
+- **libro** is integrated directly via `include "src/audit.cyr"`. The audit module is always compiled in — there is no conditional compilation. The current implementation uses a shim (`audit.cyr`) pending the libro port (blocked on majra).
+- **agnosys** security functions are included directly where needed. The dual-path (SafeCommand fallback vs. native syscall) is preserved via runtime logic rather than compile-time feature selection.
+
+The reusability concern from the original decision is addressed differently in Cyrius: consumers include only the modules they need by selecting which `.cyr` files to compile into their project. The "always compiled in" approach is acceptable for AGNOS-first deployments.

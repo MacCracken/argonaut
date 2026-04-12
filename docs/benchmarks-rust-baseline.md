@@ -1,8 +1,13 @@
 # Rust Benchmark Baseline (pre-Cyrius port)
 
+> **Historical reference only.** The Rust implementation (`rust-old/`) was removed at v0.96.1.
+> This document exists solely as a baseline comparison for the Cyrius port performance analysis.
+> Do not use these numbers for current performance claims — see `scripts/bench-history.sh` for
+> current Cyrius benchmarks.
+
 Captured from Criterion cache in `rust-old/target/criterion/`.
 Rust edition 2024, release mode, x86_64 Linux.
-These are the last benchmark numbers before the codebase was ported to Cyrius.
+These are the last benchmark numbers before the codebase was ported to Cyrius at v0.95.0.
 
 ## Side-by-Side: Rust vs Cyrius
 

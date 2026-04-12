@@ -6,12 +6,12 @@ Based on research into s6, dinit, systemd, runit, OpenRC, and other production i
 
 | Feature | Why | Status |
 |---------|-----|--------|
-| Zombie reaping (SIGCHLD) | PID 1 MUST reap all children, not just tracked services. Orphans become zombies. | Deferred to PID 1 binary crate |
-| Signal forwarding | PID 1 receives all signals. Must forward SIGTERM/SIGINT/SIGHUP to services. | Deferred to PID 1 binary crate |
+| Zombie reaping (SIGCHLD) | PID 1 MUST reap all children, not just tracked services. Orphans become zombies. | Deferred to kybernet (PID 1 binary) — **kybernet v0.50.0 boots QEMU with real AGNOS binaries** |
+| Signal forwarding | PID 1 receives all signals. Must forward SIGTERM/SIGINT/SIGHUP to services. | Deferred to kybernet (PID 1 binary) |
 | Parallel service startup | Independent services should start concurrently. Toposort gives the data; need wave-based executor. | **Implemented** (v0.8.0) — `resolve_service_waves`, `boot_execution_plan_waves` |
-| Cgroup-per-service | Clean process killing (kill cgroup, not PID), resource accounting, OOM priority. | Deferred to PID 1 binary crate |
+| Cgroup-per-service | Clean process killing (kill cgroup, not PID), resource accounting, OOM priority. | Deferred to kybernet (PID 1 binary) |
 | Resource limits (rlimits) | RLIMIT_NOFILE, RLIMIT_AS, RLIMIT_NPROC, RLIMIT_CORE per service. | **Implemented** (v0.8.0) — `ResourceLimits` + prlimit commands |
-| Privilege drop (uid/gid) | Services must run as non-root. Currently `bail!()` on uid/gid. | Deferred to PID 1 binary crate (`pre_exec` requires unsafe) |
+| Privilege drop (uid/gid) | Services must run as non-root. Library errors on uid/gid set. | Deferred to kybernet (PID 1 binary) — requires pre-exec hook at OS level |
 | Forking service type | PostgreSQL and other daemons fork; parent exits. Need to track child PID via sd_notify or PID file. | **Implemented** (v0.8.0) — `ServiceType::Forking`, `read_pid_file` |
 
 ## P1 — Should Have
@@ -61,16 +61,16 @@ Based on research into s6, dinit, systemd, runit, OpenRC, and other production i
 The research confirms the standard pattern for modern init systems:
 
 ```
-PID 1 binary (tiny, may use unsafe):
+kybernet (PID 1 binary — Cyrius):
   mount /proc, /sys, /dev, /run
   set up signalfd for SIGCHLD + SIGTERM + SIGPWR
   exec argonaut-manager
 
-argonaut-manager (uses argonaut library):
+argonaut-manager (uses argonaut Cyrius library):
   epoll event loop: signalfd, timerfd, notify socket, control socket
   parallel service startup from dependency graph
   cgroup-per-service
   socket activation
 ```
 
-This two-process split means a bug in the service manager doesn't kernel-panic the system. s6, dinit, and systemd all use this pattern.
+This two-process split means a bug in the service manager doesn't kernel-panic the system. s6, dinit, and systemd all use this pattern. kybernet at v0.50.0 boots QEMU with real AGNOS binaries using the argonaut library.

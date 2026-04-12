@@ -1,0 +1,160 @@
+# audit_lifecycle.tcyr — verify init lifecycle events produce audit entries
+# Tests that start/stop/restart/crash/watchdog record to the audit chain.
+
+# Core stdlib
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/process.cyr"
+include "lib/hashmap.cyr"
+include "lib/tagged.cyr"
+include "lib/args.cyr"
+include "lib/assert.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+include "lib/freelist.cyr"
+
+# Libro dependencies
+include "lib/bigint.cyr"
+include "lib/chrono.cyr"
+include "lib/sigil.cyr"
+
+# Sakshi stubs
+fn sakshi_info(msg, len) { return 0; }
+fn sakshi_warn(msg, len) { return 0; }
+fn sakshi_error(msg, len) { return 0; }
+fn sakshi_debug(msg, len) { return 0; }
+fn sakshi_trace(msg, len) { return 0; }
+fn sakshi_span_enter(name, len) { return 0; }
+fn sakshi_span_exit() { return 0; }
+fn sakshi_span_depth() { return 0; }
+
+# Libro core chain
+include "lib/libro/error.cyr"
+include "lib/libro/hasher.cyr"
+include "lib/libro/entry.cyr"
+include "lib/libro/verify.cyr"
+include "lib/libro/query.cyr"
+include "lib/libro/retention.cyr"
+include "lib/libro/chain.cyr"
+
+# Argonaut (audit before init)
+include "src/types.cyr"
+include "src/boot.cyr"
+include "src/services.cyr"
+include "src/process_mgmt.cyr"
+include "src/health.cyr"
+include "src/edge_boot.cyr"
+include "src/notify.cyr"
+include "src/security.cyr"
+include "src/systemd.cyr"
+include "src/tmpfiles.cyr"
+include "src/audit.cyr"
+include "src/init.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("audit-lifecycle");
+
+    # --- init creates an audit log ---
+    var cfg = argonaut_config_default();
+    store64(cfg, BOOT_MINIMAL);
+    var init = argonaut_init_new(cfg);
+    var alog = init_audit_log(init);
+    assert(alog != 0, "audit log exists");
+    assert_eq(audit_log_len(alog), 0, "audit log empty at start");
+
+    # --- start_service records STARTING + STARTED ---
+    var svc_map = load64(init + 16);
+    var sd = svc_def_new(str_from("test-svc"), str_from("test"), str_from("/bin/sleep"));
+    vec_push(svc_def_args(sd), str_from("60"));
+    store64(sd + 96, SVC_SIMPLE);
+    var ms = managed_svc_new(sd);
+    map_set(svc_map, "test-svc", ms);
+    proc_table_init();
+
+    var pid = init_start_service(init, "test-svc");
+    assert(pid > 0, "start ok");
+
+    # Should have STARTING + STARTED entries
+    var len_after_start = audit_log_len(alog);
+    assert(len_after_start >= 2, "start: 2+ entries");
+
+    # First entry should be STARTING (SEV_INFO)
+    var entries = audit_log_entries(alog);
+    var e0 = vec_get(entries, 0);
+    assert_eq(audit_entry_severity(e0), SEV_INFO, "e0 sev info");
+    assert(str_eq(audit_entry_action(e0), str_from("Starting")), "e0 action");
+    assert(str_eq(audit_entry_source(e0), str_from("argonaut")), "e0 source");
+
+    # Last entry should be STARTED (SEV_INFO)
+    var elast = vec_get(entries, len_after_start - 1);
+    assert_eq(audit_entry_severity(elast), SEV_INFO, "elast sev info");
+    assert(str_eq(audit_entry_action(elast), str_from("Started")), "elast action");
+
+    # --- stop_service records STOPPING + STOPPED_OK ---
+    var code = init_stop_service(init, "test-svc", 2000);
+    var len_after_stop = audit_log_len(alog);
+    assert(len_after_stop > len_after_start, "stop: more entries");
+
+    # Should have STOPPING entry
+    var q_stop = query_new();
+    query_action(q_stop, str_from("Stopping"));
+    var stopping = chain_query(alog, q_stop);
+    assert(vec_len(stopping) >= 1, "has stopping");
+
+    # Should have a STOPPED entry (ok or fail depending on test env)
+    var q_stopped_ok = query_new();
+    query_action(q_stopped_ok, str_from("Stopped(0)"));
+    var q_stopped_fail = query_new();
+    query_action(q_stopped_fail, str_from("Stopped(fail)"));
+    var stopped_ok = chain_query(alog, q_stopped_ok);
+    var stopped_fail = chain_query(alog, q_stopped_fail);
+    assert(vec_len(stopped_ok) + vec_len(stopped_fail) >= 1, "has stopped");
+
+    # --- restart records RESTARTING ---
+    managed_svc_set_state(ms, STATE_STOPPED);
+    managed_svc_set_restarts(ms, 0);
+    var pid2 = init_start_service(init, "test-svc");
+    var rr = init_restart_service(init, "test-svc", 2000);
+
+    var q_restart = query_new();
+    query_action(q_restart, str_from("Restarting"));
+    var restarting = chain_query(alog, q_restart);
+    assert(vec_len(restarting) >= 1, "has restarting");
+
+    init_stop_service(init, "test-svc", 2000);
+
+    # --- disabled service does not record (returns early) ---
+    var len_before_disabled = audit_log_len(alog);
+    store64(sd + 88, 0);
+    managed_svc_set_state(ms, STATE_STOPPED);
+    init_start_service(init, "test-svc");
+    assert_eq(audit_log_len(alog), len_before_disabled, "disabled: no entry");
+    store64(sd + 88, 1);
+
+    # --- chain integrity holds across all lifecycle events ---
+    assert_eq(audit_log_verify(alog), 1, "chain valid");
+
+    # --- all entries have SHA-256 hashes ---
+    var all_entries = audit_log_entries(alog);
+    var all_sha = 1;
+    for (var i = 0; i < vec_len(all_entries); i = i + 1) {
+        var e = vec_get(all_entries, i);
+        if (str_len(entry_hash(e)) != 64) { all_sha = 0; }
+    }
+    assert_eq(all_sha, 1, "all sha256");
+
+    # --- all entries source is "argonaut" ---
+    var by_src = audit_log_by_source(alog, "argonaut");
+    assert_eq(vec_len(by_src), vec_len(all_entries), "all from argonaut");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

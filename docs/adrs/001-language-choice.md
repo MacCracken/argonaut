@@ -1,6 +1,6 @@
 # ADR-001: Rust as Implementation Language
 
-**Status**: Accepted
+**Status**: Superseded — ported to Cyrius at v0.95.0; Rust source removed at v0.96.1
 **Date**: 2026-04-02
 
 ## Context
@@ -27,3 +27,14 @@ Implement argonaut in Rust with `#![forbid(unsafe_code)]`.
 - **C**: Maximum control, but manual memory management is the #1 source of init system CVEs.
 - **Go**: GC pauses are unacceptable for PID 1. Runtime startup overhead conflicts with <3s boot target.
 - **Zig**: Promising but ecosystem maturity insufficient for production init system.
+
+## Post-Port Update (v0.95.0 / v0.96.1)
+
+The original Rust implementation was ported to **Cyrius** (the AGNOS self-hosting systems language) at v0.95.0. The Rust source (`rust-old/`) was removed at v0.96.1 once the Cyrius port reached feature parity.
+
+The reasoning above remains valid: memory safety and type-encoded state invariants are still priorities. Cyrius addresses these through its own type system and compile-time checks rather than Rust's ownership model. The `forbid(unsafe_code)` constraint no longer applies as a Rust attribute, but the intent is preserved — all unsafe OS operations are delegated to the PID 1 binary (kybernet), and the argonaut library module itself contains no direct syscalls.
+
+**Rust-specific consequences now superseded:**
+- `cargo audit` / `cargo deny` → replaced by Cyrius build toolchain and AGNOS dependency management
+- Supply chain security is enforced at the OS layer, not via Cargo
+- Privilege dropping (`setuid`/`setgid`) remains deferred to kybernet (PID 1 binary), same constraint, different mechanism

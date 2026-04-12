@@ -7,7 +7,7 @@
 - **Type**: Cyrius application (ported from Rust library crate)
 - **Language**: Cyrius (compiled via `cc3`), ported from Rust (rust-old removed v0.96.1)
 - **License**: GPL-3.0-only
-- **Version**: SemVer 0.D.M pre-1.0
+- **Version**: SemVer 1.0.0+
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)

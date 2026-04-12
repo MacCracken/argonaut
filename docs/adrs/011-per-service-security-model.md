@@ -1,19 +1,19 @@
 # ADR-011: Per-Service Security Model (Seccomp, Landlock, Capabilities)
 
-**Status**: Accepted
+**Status**: Accepted — carried forward in Cyrius port; dual-path architecture unchanged
 **Date**: 2026-04-02
 
 ## Context
 
 Modern init systems enforce security policies per service — syscall filtering (seccomp), filesystem restrictions (Landlock), and capability dropping. These reduce the blast radius of a compromised service.
 
-The challenge: applying these policies requires Linux syscalls that are inherently `unsafe` in Rust. The library crate enforces `#![forbid(unsafe_code)]`. The AGNOS ecosystem provides `agnosys` which wraps these syscalls safely.
+The challenge: applying these policies requires Linux syscalls that the argonaut library deliberately avoids (direct syscalls belong in kybernet). The AGNOS ecosystem provides `agnosys` which wraps these syscalls, and the library integrates with agnosys for enforcement.
 
 ## Decision
 
 Security enforcement uses a **dual-path architecture**:
 
-### Configuration Layer (always available, no feature gate)
+### Configuration Layer (always available)
 
 `ServiceDefinition` gains four optional fields:
 - `seccomp: Option<SeccompConfig>` — Basic (20-syscall allowlist) or Custom (named syscalls)
@@ -26,9 +26,9 @@ These are serializable configuration types. Without any feature gate, consumers 
 - `to_capability_commands()` → `SafeCommand` using `setpriv --no-new-privs --bounding-set=-<caps>` (no shell interpretation)
 - `SocketActivationConfig::listen_fds_env()` — LISTEN_FDS environment variable
 
-### Enforcement Layer (feature-gated: `security`)
+### Enforcement Layer (agnosys integration)
 
-With `security` feature enabled (pulls in `agnosys`):
+With agnosys included (via `include "src/security.cyr"` which wraps agnosys):
 - `apply_seccomp(config)` — builds BPF filter via `agnosys::security::create_*_seccomp_filter` and loads it via `agnosys::security::load_seccomp`
 - `apply_landlock(config)` — converts rules to `agnosys::security::FilesystemRule` and calls `agnosys::security::apply_landlock`
 - Syscall name → number mapping via `agnosys::security::syscall_name_to_nr`
@@ -43,8 +43,8 @@ Capabilities use `setpriv` (from util-linux) instead of `capsh`:
 ## Consequences
 
 - **Positive**: Security config is declarative and serializable — can be loaded from TOML/JSON config files.
-- **Positive**: Non-AGNOS consumers get SafeCommand fallbacks that work with standard Linux tools.
-- **Positive**: AGNOS consumers get native syscall enforcement with zero CLI overhead.
+- **Positive**: SafeCommand fallbacks work with standard Linux tools regardless of agnosys availability.
+- **Positive**: AGNOS deployments get native syscall enforcement via agnosys with zero CLI overhead.
 - **Positive**: `setpriv` eliminates the shell injection risk that `capsh -c` would introduce.
 - **Negative**: seccomp/Landlock application functions operate on the *calling* process, not a child. In practice, these are called by the PID 1 binary in a `pre_exec` context or by the service itself. The library provides the building blocks.
 - **Negative**: Seccomp filters are irreversible once loaded. A malformed filter can brick a process.
@@ -53,4 +53,4 @@ Capabilities use `setpriv` (from util-linux) instead of `capsh`:
 
 - **Global security policy only**: Single system-wide seccomp filter. Rejected — per-service policies are more precise and follow the principle of least privilege.
 - **External policy files (seccomp JSON profiles)**: More flexible but adds a file format dependency. Rejected for initial implementation — can be added later as a config loading layer.
-- **Direct `prctl` calls via nix**: Requires unsafe in the library. Rejected — delegated to agnosys which encapsulates the unsafe code.
+- **Direct `prctl` syscalls in the library**: The library avoids direct syscalls. Rejected — delegated to agnosys which encapsulates the OS-level operations.
