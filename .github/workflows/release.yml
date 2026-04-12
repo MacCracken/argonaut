@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 env:
-  CYRIUS_VERSION: "3.2.6"
+  CYRIUS_VERSION: "3.6.2"
 
 jobs:
   # ── CI Gate (must pass before release) ──
@@ -53,7 +53,11 @@ jobs:
       - name: Build x86_64 binary
         run: |
           mkdir -p build
-          cat src/main.cyr | cc3 > build/argonaut 2>/dev/null
+          cat src/main.cyr | cc3 > build/argonaut 2>/tmp/cc3_stderr
+          if [ $? -ne 0 ]; then
+            cat /tmp/cc3_stderr
+            exit 1
+          fi
           chmod +x build/argonaut
           echo "argonaut: $(wc -c < build/argonaut) bytes"
           cp build/argonaut argonaut-x86_64
@@ -71,7 +75,7 @@ jobs:
           if [ -z "$BODY" ]; then
             BODY="No changelog entry for this release."
           fi
-          echo "$BODY" > /tmp/release-body.md
+          echo "$BODY" > release-body.md
 
       - name: Create source archive
         run: |
@@ -92,6 +96,7 @@ jobs:
             argonaut-x86_64
             argonaut-*-src.tar.gz
             SHA256SUMS
+            release-body.md
           retention-days: 5
 
   # ── Create GitHub Release ──
@@ -111,7 +116,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: "argonaut ${{ github.ref_name }}"
-          body_path: /tmp/release-body.md
+          body_path: release-body.md
           prerelease: ${{ startsWith(github.ref_name, '0.') }}
           files: |
             argonaut-x86_64

@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CYRIUS_VERSION: "3.2.6"
+  CYRIUS_VERSION: "3.6.2"
 
 jobs:
   # ── Build ──
@@ -36,9 +36,15 @@ jobs:
       - name: Build argonaut
         run: |
           mkdir -p build
-          cat src/main.cyr | cc3 > build/argonaut 2>/dev/null
+          cat src/main.cyr | cc3 > build/argonaut 2>/tmp/cc3_stderr
+          if [ $? -ne 0 ]; then
+            cat /tmp/cc3_stderr
+            exit 1
+          fi
           chmod +x build/argonaut
           echo "argonaut: $(wc -c < build/argonaut) bytes"
+          # Show warnings but don't fail on them
+          grep -v '^$' /tmp/cc3_stderr 2>/dev/null || true
 
       - name: Smoke test
         run: |
@@ -131,28 +137,32 @@ jobs:
 
       - name: Run test suite
         run: |
-          pass=0; fail=0
-          for tcyr in tests/*.tcyr; do
+          pass=0; fail=0; total_assertions=0
+          for tcyr in tests/tcyr/*.tcyr; do
             [ -f "$tcyr" ] || continue
             name=$(basename "$tcyr" .tcyr)
-            if cat "$tcyr" | cc3 > /tmp/test 2>/dev/null; then
-              chmod +x /tmp/test
-              output=$(/tmp/test 2>&1) || true
-              summary=$(echo "$output" | grep -o '[0-9]* passed, [0-9]* failed' | tail -1)
-              f=$(echo "$summary" | grep -o '[0-9]* failed' | grep -o '^[0-9]*' || echo "")
-              if [ -z "$f" ] || [ "$f" -eq 0 ]; then
-                echo "  PASS: $name${summary:+ ($summary)}"
-                pass=$((pass + 1))
-              else
-                echo "  FAIL: $name${summary:+ ($summary)}"
-                fail=$((fail + 1))
-              fi
+            cat "$tcyr" | cc3 2>/dev/null > /tmp/test_$name
+            if [ $? -ne 0 ]; then
+              err=$(cat "$tcyr" | cc3 2>&1 > /dev/null | head -1)
+              echo "  CFAIL: $name ($err)"
+              fail=$((fail + 1))
+              continue
+            fi
+            chmod +x /tmp/test_$name
+            output=$(/tmp/test_$name 2>&1)
+            ec=$?
+            a=$(echo "$output" | grep -o '[0-9]* passed' | grep -o '[0-9]*' || echo 0)
+            if [ "$ec" -eq 0 ]; then
+              echo "  PASS: $name ($a assertions)"
+              pass=$((pass + 1))
+              total_assertions=$((total_assertions + a))
             else
-              echo "  FAIL: $name (compile error)"
+              echo "  FAIL: $name (exit $ec)"
               fail=$((fail + 1))
             fi
           done
-          echo "$pass passed, $fail failed"
+          echo ""
+          echo "$pass passed, $fail failed, $total_assertions assertions"
           test $fail -eq 0
 
   # ── Benchmarks ──
