@@ -23,6 +23,7 @@ fn main() {
     store64(init + 16, svc_map);
     store64(init + 24, 0);
     store64(init + 32, 0);
+    store64(init + 40, audit_log_new());
     proc_table_init();
 
     # Note: exec_env fails in test env but fork succeeds — child exits 127

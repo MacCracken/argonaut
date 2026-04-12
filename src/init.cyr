@@ -12,6 +12,7 @@ struct ArgonautInit {
     services;            # map of name (cstr) -> ManagedService ptr
     boot_started;        # epoch ms (0 = not started)
     boot_completed;      # epoch ms (0 = not completed)
+    audit_log;           # libro AuditChain ptr
 }
 
 fn argonaut_init_new(config) {
@@ -44,12 +45,15 @@ fn argonaut_init_new(config) {
     store64(init + 16, svc_map);
     store64(init + 24, 0);  # boot_started
     store64(init + 32, 0);  # boot_completed
+    store64(init + 40, audit_log_new());  # audit_log
 
     proc_table_init();
 
     sakshi_span_exit();
     return init;
 }
+
+fn init_audit_log(init) { return load64(init + 40); }
 
 # =========================================================================
 # Boot step management
@@ -218,6 +222,8 @@ fn init_start_service(init, name) {
     var sd = managed_svc_def(ms);
     if (svc_def_enabled(sd) == 0) { sakshi_span_exit(); return 0 - 1; }
 
+    audit_log_record(load64(init + 40), name, EVT_STARTING);
+
     if (init_set_service_state(init, name, STATE_STARTING) == 0) {
         return 0 - 1;
     }
@@ -244,6 +250,7 @@ fn init_start_simple(init, name, ms, sd) {
     var pid = fork_exec_service(sd);
     if (pid < 0) {
         managed_svc_set_state(ms, STATE_FAILED);
+        audit_log_record(load64(init + 40), name, EVT_STOPPED_FAIL);
         return 0 - 1;
     }
 
@@ -259,12 +266,15 @@ fn init_start_simple(init, name, ms, sd) {
             managed_svc_set_state(ms, STATE_FAILED);
             process_kill(pid);
             proc_table_remove(svc_def_name(sd));
+            audit_log_record(load64(init + 40), name, EVT_READY_FAILED);
             return 0 - 1;
         }
+        audit_log_record(load64(init + 40), name, EVT_READY_PASSED);
     }
 
     managed_svc_set_state(ms, STATE_RUNNING);
     managed_svc_set_last_hc(ms, now_ms());
+    audit_log_record(load64(init + 40), name, EVT_STARTED);
     return pid;
 }
 
@@ -272,6 +282,7 @@ fn init_start_oneshot(init, name, ms, sd) {
     var pid = fork_exec_service(sd);
     if (pid < 0) {
         managed_svc_set_state(ms, STATE_FAILED);
+        audit_log_record(load64(init + 40), name, EVT_STOPPED_FAIL);
         return 0 - 1;
     }
 
@@ -290,9 +301,11 @@ fn init_start_oneshot(init, name, ms, sd) {
     managed_svc_set_pid(ms, 0);
     if (code == 0) {
         managed_svc_set_state(ms, STATE_STOPPED);
+        audit_log_record(load64(init + 40), name, EVT_STOPPED_OK);
         return 0;
     } else {
         managed_svc_set_state(ms, STATE_FAILED);
+        audit_log_record(load64(init + 40), name, EVT_STOPPED_FAIL);
         return 0 - 1;
     }
 }
@@ -301,6 +314,7 @@ fn init_start_forking(init, name, ms, sd) {
     var pid = fork_exec_service(sd);
     if (pid < 0) {
         managed_svc_set_state(ms, STATE_FAILED);
+        audit_log_record(load64(init + 40), name, EVT_STOPPED_FAIL);
         return 0 - 1;
     }
 
@@ -315,6 +329,7 @@ fn init_start_forking(init, name, ms, sd) {
 
     if (code != 0) {
         managed_svc_set_state(ms, STATE_FAILED);
+        audit_log_record(load64(init + 40), name, EVT_STOPPED_FAIL);
         return 0 - 1;
     }
 
@@ -322,12 +337,14 @@ fn init_start_forking(init, name, ms, sd) {
     var pid_file = svc_def_pid_file(sd);
     if (pid_file == 0) {
         managed_svc_set_state(ms, STATE_FAILED);
+        audit_log_record(load64(init + 40), name, EVT_STOPPED_FAIL);
         return 0 - 1;
     }
 
     var child_pid = read_pid_file(pid_file);
     if (child_pid < 0) {
         managed_svc_set_state(ms, STATE_FAILED);
+        audit_log_record(load64(init + 40), name, EVT_STOPPED_FAIL);
         return 0 - 1;
     }
 
@@ -336,12 +353,14 @@ fn init_start_forking(init, name, ms, sd) {
     managed_svc_set_started(ms, now_ms());
     managed_svc_set_state(ms, STATE_RUNNING);
     managed_svc_set_last_hc(ms, now_ms());
+    audit_log_record(load64(init + 40), name, EVT_STARTED);
 
     return child_pid;
 }
 
 fn init_stop_service(init, name, timeout_ms) {
     sakshi_info(name, strlen(name));
+    audit_log_record(load64(init + 40), name, EVT_STOPPING);
     if (init_set_service_state(init, name, STATE_STOPPING) == 0) {
         return 0 - 1;
     }
@@ -358,6 +377,12 @@ fn init_stop_service(init, name, timeout_ms) {
     managed_svc_set_pid(ms, 0);
     managed_svc_set_state(ms, STATE_STOPPED);
 
+    if (code == 0) {
+        audit_log_record(load64(init + 40), name, EVT_STOPPED_OK);
+    } else {
+        audit_log_record(load64(init + 40), name, EVT_STOPPED_FAIL);
+    }
+
     return code;
 }
 
@@ -373,6 +398,8 @@ fn init_restart_service(init, name, stop_timeout_ms) {
         sakshi_warn(name, strlen(name));
         return 0 - 1;
     }
+
+    audit_log_record(load64(init + 40), name, EVT_RESTARTING);
 
     var state = managed_svc_state(ms);
     if (state == STATE_RUNNING || state == STATE_STARTING) {
@@ -401,8 +428,10 @@ fn init_reap_services(init) {
             managed_svc_set_pid(ms, 0);
             if (code == 0) {
                 managed_svc_set_state(ms, STATE_STOPPED);
+                audit_log_record(load64(init + 40), name, EVT_STOPPED_OK);
             } else {
                 managed_svc_set_state(ms, STATE_FAILED);
+                audit_log_record(load64(init + 40), name, EVT_CRASH_DETECTED);
                 sakshi_warn(name, strlen(name));
             }
 
@@ -533,6 +562,7 @@ fn init_enforce_watchdog(init) {
         var name = str_data(vec_get(timed_out, i));
 
         sakshi_error(name, strlen(name));
+        audit_log_record(load64(init + 40), name, EVT_TIMEOUT_KILLED);
 
         var pid = proc_table_pid(name);
         if (pid > 0) {
@@ -572,8 +602,10 @@ fn init_poll_health(init, tracker) {
                 health_tracker_record(tracker, name, hc_passed, threshold);
                 if (hc_passed) {
                     managed_svc_set_last_hc(ms, now_ms());
+                    audit_log_record(load64(init + 40), name, EVT_HEALTH_PASSED);
                 } else {
                     sakshi_warn(name, strlen(name));
+                    audit_log_record(load64(init + 40), name, EVT_HEALTH_FAILED);
                 }
                 vec_push(results, result);
             }

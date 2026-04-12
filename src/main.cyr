@@ -49,8 +49,8 @@ include "src/notify.cyr"
 include "src/security.cyr"
 include "src/systemd.cyr"
 include "src/tmpfiles.cyr"
-include "src/init.cyr"
 include "src/audit.cyr"
+include "src/init.cyr"
 
 # =========================================================================
 # Entry point — verify the port compiles and runs

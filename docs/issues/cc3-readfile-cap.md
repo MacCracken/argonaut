@@ -1,47 +1,48 @@
-# cc3 READFILE 512KB Cap
+# cc3 Compiler Issues Blocking Full Libro Integration
 
-**Discovered:** 2026-04-11 during libro 1.0.2 integration
-**Compiler:** cc3 3.5.0
-**Status:** Waiting on cc3 3.5.0 release — may already be fixed
+## Issue 1: `undefined variable 'ptr'` (3.5.2+)
 
-## Problem
+**Introduced:** cc3 3.5.2
+**Present in:** 3.5.2, 3.6.0, 3.6.1
+**Not present in:** 3.5.0
+**Regression test:** `tests/tcyr/cc3_ptr_regression.tcyr`
 
-When argonaut includes all 19 libro modules (~600KB expanded source), cc3 silently truncates the source, producing misleading parse errors:
-- `expected '=', got fn`
-- `expected '}', got end of file`
-
-Only 7 of 19 libro modules can be included. The remaining 12 (signing, merkle, anchoring, timestamping, proof, stores, export, review, streaming, kernel_audit, file_store, patra_store) are in `lib/libro/` but excluded from `src/main.cyr`.
-
-A **nested include variant** also triggers the bug at lower total sizes — including libs through a header file (e.g. `tests/test_header.cyr`) consumes read budget that inner includes need.
-
-## Reproduction
-
-```sh
-# Current 7-module build works (~470KB expanded)
-cat src/main.cyr | cc3 2>/dev/null > build/argonaut  # OK
-
-# Adding remaining 12 libro modules pushes past 512KB — fails
-# Add these to src/main.cyr after lib/libro/chain.cyr:
-#   include "lib/libro/store.cyr"
-#   include "lib/libro/export.cyr"
-#   include "lib/libro/review.cyr"
-#   include "lib/libro/merkle.cyr"
-#   include "lib/libro/signing.cyr"
-#   include "lib/libro/anchoring.cyr"
-#   include "lib/libro/timestamping.cyr"
-#   include "lib/libro/proof.cyr"
-#   include "lib/libro/kernel_audit.cyr"
-#   include "lib/libro/file_store.cyr"
-#   include "lib/libro/patra_store.cyr"
-#   include "lib/libro/streaming.cyr"
+Compiling argonaut's standard include chain (stdlib + sigil + libro core 7 modules + argonaut src) fails with:
+```
+error:9362: undefined variable 'ptr'
 ```
 
-## Suspected root cause
+No source file in argonaut references a variable called `ptr`. The error is a compiler-internal symbol leak introduced between 3.5.0 and 3.5.2.
 
-Two READFILE calls in `src/frontend/lex.cyr` (lines ~1061, ~1209) cap reads at `524288 - op` (512KB) while the preprocess buffer is 1MB.
+**Impact:** Argonaut cannot build on cc3 3.5.2+. Currently using cc3 3.5.0 (last known good).
 
-## Impact on argonaut
+## Issue 2: READFILE 512KB Cap (fixed in 3.5.1)
 
-- Binary includes only libro core chain (7 modules) — no signing, merkle, persistence, export
-- Audit tests inline their includes directly instead of using shared headers
-- `parity.tcyr` inlines includes for the same reason
+**Fixed in:** cc3 3.5.1
+**Regression test:** `tests/tcyr/cc3_readfile_cap.tcyr`
+
+Two READFILE calls in `lex.cyr` capped per-include reads at 512KB. Fixed in 3.5.1.
+
+## Issue 3: Token Limit 131072 (3.5.1+)
+
+**Present in:** 3.5.1, 3.5.2, 3.6.0, 3.6.1
+**Regression test:** `tests/tcyr/cc3_readfile_cap.tcyr`
+
+Including all 19 libro modules exceeds the 131072 token limit. The READFILE cap is fixed but the expanded source is too large for the token table. Blocks including libro's signing, merkle, anchoring, timestamping, proof, stores, export, review, streaming modules.
+
+## Summary
+
+| cc3 version | 7 libro modules | 19 libro modules |
+|-------------|-----------------|-------------------|
+| 3.5.0       | PASS            | FAIL (READFILE)   |
+| 3.5.1       | PASS            | FAIL (token limit)|
+| 3.5.2       | FAIL (ptr)      | FAIL (ptr)        |
+| 3.6.0       | FAIL (ptr)      | FAIL (ptr)        |
+| 3.6.1       | FAIL (ptr)      | FAIL (ptr)        |
+| 3.6.1+fix   | PASS            | FAIL (codebuf)    |
+| 3.6.2       | PASS            | PASS (16 modules) / SEGV (19 — file_store/patra_store need lock fns) |
+
+## Status (3.6.2)
+
+Compiler limits (READFILE, codebuf, token) all resolved. 16 of 19 libro modules compile and run.
+The remaining 3 (`file_store.cyr`, `patra_store.cyr`, `streaming.cyr`) reference `file_append_locked`, `file_lock_shared`, `file_unlock` which are not in argonaut's stdlib. These are patra/fs extended functions — adding `lib/patra.cyr` would resolve this.

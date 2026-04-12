@@ -1,0 +1,59 @@
+# cc3_ptr_regression.tcyr — regression test for cc3 3.5.2+ "undefined variable 'ptr'" bug
+# cc3 3.5.0 compiles argonaut fine. cc3 3.5.2 and 3.6.0 fail with:
+#   error:9362: undefined variable 'ptr'
+# No source file in argonaut references a variable called 'ptr'.
+# The error appears when compiling the full include chain (stdlib + sigil + libro + argonaut).
+#
+# EXPECTED: FAIL (compile) on cc3 3.5.2, 3.6.0, 3.6.1. PASS on cc3 3.5.0 and when fixed.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/process.cyr"
+include "lib/hashmap.cyr"
+include "lib/tagged.cyr"
+include "lib/args.cyr"
+include "lib/assert.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+include "lib/freelist.cyr"
+include "lib/sakshi_full.cyr"
+include "lib/bigint.cyr"
+include "lib/chrono.cyr"
+include "lib/sigil.cyr"
+include "lib/libro/error.cyr"
+include "lib/libro/hasher.cyr"
+include "lib/libro/entry.cyr"
+include "lib/libro/verify.cyr"
+include "lib/libro/query.cyr"
+include "lib/libro/retention.cyr"
+include "lib/libro/chain.cyr"
+include "src/types.cyr"
+include "src/boot.cyr"
+include "src/services.cyr"
+include "src/process_mgmt.cyr"
+include "src/health.cyr"
+include "src/edge_boot.cyr"
+include "src/notify.cyr"
+include "src/security.cyr"
+include "src/systemd.cyr"
+include "src/tmpfiles.cyr"
+include "src/init.cyr"
+include "src/audit.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("cc3-ptr-regression");
+    assert(1, "full compile ok");
+    var init = argonaut_init_new(argonaut_config_default());
+    assert(init != 0, "init created");
+    assert(init_audit_log(init) != 0, "audit log created");
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

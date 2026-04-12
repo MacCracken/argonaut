@@ -1,0 +1,77 @@
+# cc3_readfile_cap.tcyr — regression test for cc3 compiler size limits
+# Tests that 16 libro modules compile and run (excludes file_store/patra_store/streaming
+# which need patra lock functions not in argonaut's stdlib).
+#
+# cc3 3.6.2: READFILE, codebuf, token limits all resolved. This test passes.
+# See docs/issues/cc3-readfile-cap.md for version history.
+
+# Core stdlib
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/hashmap.cyr"
+include "lib/assert.cyr"
+include "lib/json.cyr"
+include "lib/freelist.cyr"
+
+# Libro dependencies
+include "lib/bigint.cyr"
+include "lib/chrono.cyr"
+include "lib/sigil.cyr"
+
+# Sakshi stubs
+fn sakshi_info(msg, len) { return 0; }
+fn sakshi_warn(msg, len) { return 0; }
+fn sakshi_error(msg, len) { return 0; }
+fn sakshi_debug(msg, len) { return 0; }
+fn sakshi_trace(msg, len) { return 0; }
+fn sakshi_span_enter(name, len) { return 0; }
+fn sakshi_span_exit() { return 0; }
+fn sakshi_span_depth() { return 0; }
+
+# Libro — 16 of 19 modules (excludes file_store, patra_store, streaming)
+include "lib/libro/error.cyr"
+include "lib/libro/hasher.cyr"
+include "lib/libro/entry.cyr"
+include "lib/libro/verify.cyr"
+include "lib/libro/query.cyr"
+include "lib/libro/retention.cyr"
+include "lib/libro/chain.cyr"
+include "lib/libro/store.cyr"
+include "lib/libro/export.cyr"
+include "lib/libro/review.cyr"
+include "lib/libro/merkle.cyr"
+include "lib/libro/signing.cyr"
+include "lib/libro/anchoring.cyr"
+include "lib/libro/timestamping.cyr"
+include "lib/libro/proof.cyr"
+include "lib/libro/kernel_audit.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("cc3-readfile-cap");
+
+    # If we got here, cc3 compiled 16 libro modules
+    assert(1, "16 libro modules compile");
+
+    # Verify chain works
+    var c = chain_new();
+    chain_append(c, SEV_INFO, str_from("argonaut"), str_from("test"), str_from("{}"));
+    assert_eq(chain_len(c), 1, "chain append");
+    assert_eq(chain_verify(c), 0, "chain verify");
+
+    # Verify query works
+    var q = query_new();
+    query_source(q, str_from("argonaut"));
+    var results = chain_query(c, q);
+    assert_eq(vec_len(results), 1, "query works");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);
