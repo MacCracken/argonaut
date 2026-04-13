@@ -1,6 +1,6 @@
 [package]
 name = "argonaut"
-version = "1.2.2"
+version = "1.2.0"
 description = "Init system and service manager for AGNOS"
 license = "GPL-3.0-only"
 language = "cyrius"
