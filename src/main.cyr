@@ -18,6 +18,7 @@ include "lib/hashmap.cyr"
 include "lib/tagged.cyr"
 include "lib/args.cyr"
 include "lib/json.cyr"
+include "lib/fnptr.cyr"
 include "lib/sakshi_full.cyr"
 include "lib/freelist.cyr"
 
