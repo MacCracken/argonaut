@@ -172,7 +172,9 @@ fn main() {
     assert_eq(vec_len(vcmds), 2, "verity 2 cmds");
 
     assert_eq(verify_rootfs_integrity(str_from(""), str_from("/dev/x"), hash), 0, "verity empty dev");
-    assert_eq(verify_rootfs_integrity(str_from("/dev/x"), str_from("/dev/y"), str_from("short")), 0, "verity short hash");
+    var vr = verify_rootfs_integrity(
+    str_from("/dev/x"), str_from("/dev/y"), str_from("short"));
+    assert_eq(vr, 0, "verity short hash");
     assert_eq(verify_rootfs_integrity(str_from("/tmp/x"), str_from("/dev/y"), hash), 0, "verity bad dev");
 
     assert(validate_device_path(str_from("/dev/sda1")), "devpath ok");

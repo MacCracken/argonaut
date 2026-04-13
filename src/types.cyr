@@ -952,7 +952,15 @@ fn emergency_shell_default() {
     map_set(env, "PATH", str_from("/usr/sbin:/usr/bin:/sbin:/bin"));
     map_set(env, "SHELL", str_from("/usr/bin/agnoshi"));
     store64(esc + 8, env);
-    store64(esc + 16, str_from("\n========================================\n  AGNOS Emergency Shell\n========================================\n\nThe system has entered emergency mode.\nUse 'argonaut status' to check service state.\nUse 'argonaut start <service>' to start services.\nUse 'exit' to continue boot or 'reboot' to restart.\n"));
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n========================================\n");
+    str_builder_add_cstr(sb, "  AGNOS Emergency Shell\n");
+    str_builder_add_cstr(sb, "========================================\n\n");
+    str_builder_add_cstr(sb, "The system has entered emergency mode.\n");
+    str_builder_add_cstr(sb, "Use 'argonaut status' to check service state.\n");
+    str_builder_add_cstr(sb, "Use 'argonaut start <service>' to start services.\n");
+    str_builder_add_cstr(sb, "Use 'exit' to continue boot or 'reboot' to restart.\n");
+    store64(esc + 16, str_builder_build(sb));
     store64(esc + 24, 0);   # require_auth = false
     store64(esc + 32, 0);   # no password hash
     return esc;

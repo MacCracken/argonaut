@@ -7,6 +7,18 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
+## [1.0.2] — 2026-04-12
+
+### Changed
+- Minimum cc3 version: 3.8.0
+- `cyrfmt` applied to all source files — zero format issues
+- `cyrlint` clean — zero warnings (was 6 line-length violations)
+- `src/boot.cyr`: long `boot_step_new` calls split to stay under 120 chars
+- `src/types.cyr`: emergency shell banner built via `str_builder` (was single 120+ char string literal)
+- `src/test_modules.cyr`: long verity test line split
+
+---
+
 ## [1.0.1] — 2026-04-12
 
 ### Fixed
