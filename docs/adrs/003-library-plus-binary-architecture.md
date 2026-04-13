@@ -16,7 +16,7 @@ Argonaut is a Cyrius library that provides the orchestration logic. The actual P
 
 ## Consequences
 
-- **Positive**: The library is testable in CI without root privileges or a real boot environment. 545 assertions across 22 suites run in milliseconds.
+- **Positive**: The library is testable in CI without root privileges or a real boot environment. 607 assertions across 26 suites run in milliseconds.
 - **Positive**: Multiple consumers can use the library (AGNOS boot via kybernet, stiva containers, sutra playbooks, daimon agent).
 - **Positive**: Low-level OS operations are isolated to kybernet, keeping the library auditable and independently testable.
 - **Negative**: Some features (uid/gid dropping, cgroup management) cannot be implemented in the library and must be deferred to kybernet.

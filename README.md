@@ -4,7 +4,7 @@
 
 Argonaut (Greek: sailors of the Argo — one letter off from AGNOS) is a minimal init system that boots AGNOS in under 3 seconds. It manages service startup ordering, health checks, runlevel switching, and shutdown sequences.
 
-Written in [Cyrius](https://github.com/MacCracken/cyrius), compiled via cc3.
+Written in [Cyrius](https://github.com/MacCracken/cyrius), compiled via `cyrius build`.
 
 ## Features
 
@@ -16,7 +16,7 @@ Written in [Cyrius](https://github.com/MacCracken/cyrius), compiled via cc3.
 - **Shutdown planning** — ordered shutdown with drain, stop, kill phases
 - **Edge boot** — read-only rootfs, dm-verity integrity verification, LUKS unlock
 - **Security** — seccomp, Landlock, capabilities, socket activation per service
-- **Audit trail** — libro 1.0.2 SHA-256 hash-linked chain with lifecycle recording
+- **Audit trail** — libro 1.0.3 SHA-256 hash-linked chain with lifecycle recording
 - **Tracing** — sakshi_full 0.7.0 structured tracing (spans, ring buffer, UDP output)
 - **Emergency shell** — configurable fallback on boot failure
 - **Crash actions** — reboot, halt, or emergency shell on service crash
@@ -39,10 +39,8 @@ argonaut
 │   ├── audit.cyr       — Libro bridge (ServiceEventType → AuditChain)
 │   ├── init.cyr        — ArgonautInit orchestrator, service lifecycle
 │   └── main.cyr        — Entry point
-├── lib/                — Cyrius stdlib + libro deps
-│   └── libro/          — Libro 1.0.2 audit chain modules
-├── tests/tcyr/         — 26 test suites (606 assertions)
-└── build/              — Compiled binary (373KB ELF x86_64)
+├── tests/tcyr/         — 26 test suites (607 assertions)
+└── build/              — Compiled binary (378KB ELF x86_64)
 ```
 
 ## Boot Modes
@@ -79,7 +77,7 @@ cyrius test
 cyrius bench
 ```
 
-Requires cc3 3.6.2+.
+Requires cyrius 3.9.8+.
 
 ## License
 

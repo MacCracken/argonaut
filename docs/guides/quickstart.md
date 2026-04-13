@@ -3,7 +3,7 @@
 ## Building argonaut
 
 ```sh
-# Requires cc3 3.6.2+
+# Requires cyrius 3.9.8+
 cyrius build src/main.cyr build/argonaut
 
 # Run

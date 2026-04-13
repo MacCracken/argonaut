@@ -15,23 +15,23 @@ Security enforcement uses a **dual-path architecture**:
 
 ### Configuration Layer (always available)
 
-`ServiceDefinition` gains four optional fields:
-- `seccomp: Option<SeccompConfig>` — Basic (20-syscall allowlist) or Custom (named syscalls)
-- `landlock: Option<LandlockConfig>` — per-path access rules (NoAccess/ReadOnly/ReadWrite)
-- `capabilities: Option<CapabilityConfig>` — capabilities to drop from bounding set
-- `socket_activation: Option<SocketActivationConfig>` — LISTEN_FDS protocol
+`ServiceDefinition` gains four optional fields (all optional/0 when unused):
+- `seccomp` (`SeccompConfig`) — Basic (20-syscall allowlist) or Custom (named syscalls)
+- `landlock` (`LandlockConfig`) — per-path access rules (NoAccess/ReadOnly/ReadWrite)
+- `capabilities` (`CapabilityConfig`) — capabilities to drop from bounding set
+- `socket_activation` (`SocketActivationConfig`) — LISTEN_FDS protocol
 
-These are serializable configuration types. Without any feature gate, consumers get:
+These are serializable configuration types. All consumers get:
 - `seccomp_description()` / `landlock_description()` — human-readable summaries for logging
 - `to_capability_commands()` → `SafeCommand` using `setpriv --no-new-privs --bounding-set=-<caps>` (no shell interpretation)
-- `SocketActivationConfig::listen_fds_env()` — LISTEN_FDS environment variable
+- `socket_activation_listen_fds_env()` — LISTEN_FDS environment variable
 
 ### Enforcement Layer (agnosys integration)
 
 With agnosys included (via `include "src/security.cyr"` which wraps agnosys):
-- `apply_seccomp(config)` — builds BPF filter via `agnosys::security::create_*_seccomp_filter` and loads it via `agnosys::security::load_seccomp`
-- `apply_landlock(config)` — converts rules to `agnosys::security::FilesystemRule` and calls `agnosys::security::apply_landlock`
-- Syscall name → number mapping via `agnosys::security::syscall_name_to_nr`
+- `apply_seccomp(config)` — builds BPF filter via agnosys seccomp functions and loads it
+- `apply_landlock(config)` — converts rules to agnosys FilesystemRule and calls apply_landlock
+- Syscall name → number mapping via agnosys syscall_name_to_nr
 
 ### Capability Approach: setpriv over capsh
 

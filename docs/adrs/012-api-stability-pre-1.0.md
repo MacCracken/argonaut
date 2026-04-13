@@ -1,6 +1,6 @@
 # ADR-012: API Stability Approach Pre-1.0
 
-**Status**: Superseded — argonaut is now at v1.0.0; API stability guarantees are in effect
+**Status**: Superseded — argonaut is now at v1.2.0; API stability guarantees are in effect
 **Date**: 2026-04-02
 
 ## Context

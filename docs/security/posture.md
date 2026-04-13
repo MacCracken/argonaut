@@ -63,15 +63,15 @@ Argonaut is an init system — it runs as PID 1 with root privileges. Compromise
 
 | Measure | Detail |
 |---------|--------|
-| Structured logging | `tracing` instrumentation on all operations — service start/stop, health checks, state transitions, boot stages, security config application. |
-| Tamper-proof audit chain | With `audit` feature: libro integration provides hash-linked audit entries for all `ServiceEvent` types. Chain integrity verifiable via `AuditLog::verify()`. |
+| Structured logging | sakshi_full structured tracing on all operations — service start/stop, health checks, state transitions, boot stages, security config application. |
+| Tamper-proof audit chain | libro 1.0.3 provides hash-linked audit entries for all `ServiceEvent` types. Chain integrity verifiable via `audit_log_verify()`. |
 | Service event recording | `Enabled`, `Disabled`, `Starting`, `Started`, `Stopped`, `CrashDetected`, `TimeoutKilled` and 8 other event types recorded with timestamps. |
 
 ### 7. Supply Chain Security
 
 | Measure | Detail |
 |---------|--------|
-| Cyrius build toolchain | The Cyrius compiler (cc3) and stdlib are AGNOS-maintained. No third-party package registry — dependencies are path-based includes. |
+| Cyrius build toolchain | The Cyrius toolchain and stdlib are AGNOS-maintained. No third-party package registry — dependencies managed via `cyrius deps` from `cyrius.toml`. |
 | Minimal dependencies | argonaut's direct dependencies are: cyrius stdlib (`lib/`), and optional AGNOS libraries (libro, agnosys). No HTTP client library. Health checks use raw socket operations from stdlib. |
 | No direct syscalls in library | First-party library code contains no direct syscalls. OS-level operations are confined to kybernet and audited AGNOS libraries (agnosys for security syscalls). |
 | AGNOS-owned stack | Security primitives (seccomp, landlock) provided by `agnosys` — an AGNOS-maintained library, not a third-party dependency. |
@@ -83,13 +83,13 @@ Argonaut is an init system — it runs as PID 1 with root privileges. Compromise
 | CWE-78 | OS Command Injection | `SafeCommand` — no shell invocation anywhere. `setpriv` for capabilities (no `capsh -c`). |
 | CWE-22 | Path Traversal | `validate_device_path()`, `validate_tmpfile_entries()`, service name `..` rejection, absolute binary_path requirement. |
 | CWE-20 | Improper Input Validation | Hash length/charset validation, device path validation, mapped name validation, environment file parsing, tmpfile mode validation. |
-| CWE-190 | Integer Overflow | `i32::try_from(pid)`, `saturating_mul`, `saturating_pow`. |
+| CWE-190 | Integer Overflow | PID bounds-checked via explicit range validation, backoff uses saturating arithmetic. No truncation, no wrapping. |
 | CWE-676 | Use of Dangerous Function | No direct syscalls in library — OS operations delegated to kybernet and agnosys. |
 | CWE-400 | Uncontrolled Resource Consumption | Restart limits, backoff floor, health check timeouts, watchdog kills, log rotation, sd_notify drain limits. |
 | CWE-362 | TOCTOU Race Condition | Atomic socket removal (remove + ignore NotFound). PID file race documented (acceptable for init). |
 | CWE-269 | Improper Privilege Management | Explicit error on unimplemented uid/gid drop. Capability drop via `setpriv`. Seccomp/Landlock enforcement. |
 | CWE-835 | Infinite Loop | Deadline-based health checks, bounded stop waits, SIGKILL escalation. |
-| CWE-459 | Incomplete Cleanup | `Drop` on NotifyListener, shutdown plan includes sync/unmount/LUKS close, log rotation prevents disk fill. |
+| CWE-459 | Incomplete Cleanup | Explicit cleanup on NotifyListener, shutdown plan includes sync/unmount/LUKS close, log rotation prevents disk fill. |
 | CWE-754 | Unusual Conditions | Error returns (-1 convention) throughout; no unchecked panics in library code. |
 | CWE-696 | Incorrect Behavior Order | Kahn's algorithm for dependency resolution, cycle detection, wave-based parallel startup. |
 | CWE-829 | Untrusted Control Sphere | No external package registry. All dependencies are path-based AGNOS libraries or Cyrius stdlib. |
@@ -102,7 +102,7 @@ Argonaut is an init system — it runs as PID 1 with root privileges. Compromise
 |-----|----------|--------|
 | uid/gid privilege drop | High | Deferred to kybernet (PID 1 binary) — requires pre-exec hook at the OS level |
 | Cgroup-per-service isolation | High | Deferred to kybernet (PID 1 binary) — requires cgroup v2 filesystem manipulation |
-| Password hashing (emergency auth) | Medium | Current fallback uses non-cryptographic hash. Production deployments must enable `security` feature for proper crypto via agnosys. |
+| Password hashing (emergency auth) | Medium | SHA-256 hash via libro/sigil (upgraded in v1.2.0). Constant-time comparison in place. |
 | SBOM generation | Low | No Software Bill of Materials produced |
 | Reproducible builds | Low | No SLSA provenance attestation |
 
@@ -118,7 +118,7 @@ Cyrius uses `include`-based compilation rather than feature gates. All modules a
 | SafeCommand generation | Always available | `src/safe_command.cyr` |
 | systemd unit generation | Always available | `src/systemd.cyr` |
 | API response types | Always available | `src/api.cyr` |
-| Tamper-proof audit chain (libro) | Shim (pending libro port) | `src/audit.cyr` |
+| Tamper-proof audit chain (libro) | Always available — libro 1.0.3 | `src/audit.cyr` |
 | Seccomp application (agnosys) | Via agnosys integration | `src/security.cyr` |
 | Landlock application (agnosys) | Via agnosys integration | `src/security.cyr` |
 | Cryptographic auth hashing | Via agnosys integration | `src/security.cyr` |

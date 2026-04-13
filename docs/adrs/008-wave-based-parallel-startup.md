@@ -17,7 +17,7 @@ Added `resolve_service_waves()` — a modified Kahn's algorithm that groups serv
 - **Wave N**: Services whose dependencies are all in waves 0..N-1
 - Services within each wave are sorted alphabetically for deterministic ordering
 
-The library provides the wave grouping (`Vec<Vec<String>>`) and a `boot_execution_plan_waves()` method that returns `Vec<Vec<(String, ProcessSpec)>>`. The **consumer controls parallelism** — the library does not spawn threads or use async. This keeps the library runtime-agnostic.
+The library provides the wave grouping (vec of vec of string) via `resolve_service_waves()` and `boot_execution_plan_waves()` which returns waves of `(name, ProcessSpec)` pairs. The **consumer controls parallelism** — the library does not spawn threads or use async. This keeps the library runtime-agnostic.
 
 Example for Desktop mode:
 ```

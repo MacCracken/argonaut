@@ -81,5 +81,5 @@
 | PW.1 Design for security | Full | SafeCommand by design, secure defaults |
 | PW.5 Secure coding practices | Full | No direct syscalls in library, input validation, Cyrius type system |
 | PW.7 Code analysis | Full | Cyrius build check, coverage, benchmark regression |
-| PW.8 Testing | Full | 545 assertions / 22 suites, CI on every push |
+| PW.8 Testing | Full | 607 assertions / 26 suites, CI on every push |
 | RV.1 Vulnerability identification | Full | AGNOS library audits on every PR |

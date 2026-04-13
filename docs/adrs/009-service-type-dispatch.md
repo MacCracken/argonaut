@@ -20,7 +20,7 @@ Added `ServiceType` enum with three variants:
 
 `start_service()` dispatches to `start_simple_service()`, `start_forking_service()`, or `start_oneshot_service()` based on `ServiceDefinition.service_type`.
 
-`SpawnedProcess.child` changed from `Child` to `Option<Child>` to support forked processes where the original `Child` handle is consumed when the parent exits.
+`SpawnedProcess.child_pid` is optional (0 = not set) to support forked processes where the original handle is released when the parent exits and the child PID is read from the pid_file.
 
 ## Consequences
 
@@ -28,7 +28,7 @@ Added `ServiceType` enum with three variants:
 - **Positive**: Oneshot services complete synchronously during wave execution — subsequent waves don't start until oneshots finish.
 - **Positive**: `start_service()` API unchanged — callers don't need to know the service type.
 - **Negative**: Forking services require a `pid_file` configuration. sd_notify MAINPID is parsed but not yet wired as an alternative PID source (future enhancement).
-- **Negative**: `Option<Child>` adds a branch to every `try_wait`/`wait`/`signal` call. Negligible — these are I/O-bound operations.
+- **Negative**: Optional child PID adds a branch to every wait/signal call. Negligible — these are I/O-bound operations.
 
 ## Alternatives Considered
 

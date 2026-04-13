@@ -37,7 +37,7 @@ With features enabled, the library could directly apply security policies via sy
 
 Cyrius has no equivalent of Cargo feature gates (`#[cfg(feature = "...")]`). In the Cyrius port, AGNOS ecosystem dependencies are handled via `include` directives:
 
-- **libro** is integrated directly via `include "src/audit.cyr"`. The audit module is always compiled in — there is no conditional compilation. The current implementation uses a shim (`audit.cyr`) pending the libro port (blocked on majra).
+- **libro 1.0.3** is integrated directly — 8 modules (error, hasher, entry, verify, query, retention, chain, export) are always compiled in via `cyrius deps`. No conditional compilation. The full SHA-256 audit chain is active; the historical shim was retired at v0.97.0.
 - **agnosys** security functions are included directly where needed. The dual-path (SafeCommand fallback vs. native syscall) is preserved via runtime logic rather than compile-time feature selection.
 
 The reusability concern from the original decision is addressed differently in Cyrius: consumers include only the modules they need by selecting which `.cyr` files to compile into their project. The "always compiled in" approach is acceptable for AGNOS-first deployments.

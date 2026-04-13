@@ -14,7 +14,7 @@ Thank you for your interest in contributing to Argonaut.
 
 ## Prerequisites
 
-- [Cyrius](https://github.com/MacCracken/cyrius) toolchain (cc3 + cyrius) v3.6.2+
+- [Cyrius](https://github.com/MacCracken/cyrius) toolchain v3.9.8+ (minimum; see `.cyrius-toolchain`)
 - Linux x86_64
 
 ## Build Commands

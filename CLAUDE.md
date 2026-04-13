@@ -5,9 +5,9 @@
 **Argonaut** (Greek: sailors of the Argo — one letter off from AGNOS) — Init system and service manager for AGNOS — boot sequencing, service lifecycle, health checks, runlevel switching, shutdown orchestration
 
 - **Type**: Cyrius application (ported from Rust library crate)
-- **Language**: Cyrius (compiled via `cc3`), ported from Rust (rust-old removed v0.96.1)
+- **Language**: Cyrius (compiled via `cyrius build`), ported from Rust (rust-old removed v0.96.1; historical context only)
 - **License**: GPL-3.0-only
-- **Version**: SemVer 1.0.0+
+- **Version**: 1.2.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -50,7 +50,7 @@ AGNOS boot (PID 1 / systemd delegate), stiva, sutra, daimon
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** Minimum 80%+ coverage target.
+- **Tests + benchmarks are the way.** 26 suites, 607 assertions. Minimum 80%+ coverage target.
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **Vec arena over HashMap** — when indices are known, direct access beats hashing.
@@ -58,6 +58,8 @@ AGNOS boot (PID 1 / systemd delegate), stiva, sutra, daimon
 - **Packed Result type** — zero-alloc on success path, heap-allocate errors only on cold path.
 - **SafeCommand for all process execution** — prevent shell injection.
 - **Cyrius language reference**: see `vidya/content/cyrius/` for canonical syntax, idioms, and porting patterns.
+- **Minimum toolchain**: cyrius 3.9.8 (see `.cyrius-toolchain`). Deps managed via `cyrius deps` from `cyrius.toml`.
+- **Binary**: ~378KB statically linked ELF x86_64. Libro 1.0.3 (8 modules, SHA-256 audit chain).
 
 ## Documentation Structure
 

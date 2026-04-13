@@ -51,7 +51,7 @@ argonaut (Cyrius library)
 
 | Decision | ADR | Rationale |
 |----------|-----|-----------|
-| Cyrius language | [ADR-001](../adrs/001-language-choice.md) | Sovereign toolchain, 373KB binary, no external deps |
+| Cyrius language | [ADR-001](../adrs/001-language-choice.md) | Sovereign toolchain, 378KB binary, no external deps |
 | SafeCommand abstraction | [ADR-002](../adrs/002-safe-command-abstraction.md) | Structural elimination of shell injection (CWE-78) |
 | Library + binary split | [ADR-003](../adrs/003-library-plus-binary-architecture.md) | Testable library (argonaut), PID 1 binary (kybernet) |
 | Edge boot security model | [ADR-004](../adrs/004-edge-boot-security-model.md) | dm-verity + LUKS + read-only rootfs |
@@ -125,9 +125,9 @@ ArgonautInit::new(config)
 | sigil | SHA-256, hex encoding, constant-time comparison (for libro) |
 | bigint | Arbitrary precision integers (for sigil) |
 | chrono | Timestamp formatting (RFC 3339) |
-| libro 1.0.2 | Cryptographic audit chain (7 core modules) |
+| libro 1.0.3 | Cryptographic audit chain (8 modules) |
 | sakshi_full 0.7.0 | Structured tracing (spans, ring buffer, UDP) |
 
 Cyrius stdlib: string, fmt, alloc, vec, str, syscalls, io, fs, process, hashmap, tagged, args, json, freelist.
 
-373KB statically linked ELF x86_64. No libc, no external runtime dependencies.
+~378KB statically linked ELF x86_64. No libc, no external runtime dependencies.

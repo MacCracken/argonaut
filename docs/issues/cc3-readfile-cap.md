@@ -46,3 +46,17 @@ Including all 19 libro modules exceeds the 131072 token limit. The READFILE cap 
 
 Compiler limits (READFILE, codebuf, token) all resolved. 16 of 19 libro modules compile and run.
 The remaining 3 (`file_store.cyr`, `patra_store.cyr`, `streaming.cyr`) reference `file_append_locked`, `file_lock_shared`, `file_unlock` which are not in argonaut's stdlib. These are patra/fs extended functions — adding `lib/patra.cyr` would resolve this.
+
+## Issue 4: Enum Table Overflow (3.9.8) — RESOLVED
+
+**Resolved in:** cc3 3.9.8 with `cyrius deps` + auto-include
+**Regression test:** `tests/tcyr/enum_overflow.tcyr` — 5/5 PASS
+
+**Root cause:** Not an enum table overflow. The test file used pre-namespaced
+include paths (`lib/error.cyr` instead of `lib/libro_error.cyr`). The libro
+modules weren't included, so their enums weren't defined. With `cyrius build`
+auto-include from `cyrius.toml`, all 520 enum variants across 57 enums resolve
+correctly. 27/27 test suites pass.
+
+**Lesson:** Always use `cyrius build` with `cyrius.toml` deps — manual includes
+with namespaced dep files will drift.

@@ -6,8 +6,8 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ## Current — v1.2.0
 
-26 test suites (607 assertions), 37 benchmarks, 378KB binary (cc3 3.8.0).
-Libro 1.0.2 — 8 modules included. SHA-256 audit chain, lifecycle recording, full query, JSONL/CSV export.
+26 test suites (607 assertions), 37 benchmarks, 378KB binary (cyrius 3.9.8).
+Libro 1.0.3 — 8 modules included. SHA-256 audit chain, lifecycle recording, full query, JSONL/CSV export.
 All P(-1) audit items resolved. Password hash upgraded to SHA-256.
 
 ---
@@ -60,9 +60,9 @@ Unblocked: libro 1.0.2 integrated in v1.0.0.
 - [x] Shutdown ordering tested (clean stop -> sync -> poweroff)
 - [x] Sakshi tracing integrated (sakshi_full 0.7.0)
 - [x] Cyrius port complete, rust-old removed (v0.96.1)
-- [x] Libro audit chain (real SHA-256, not shim) — v0.97.0
+- [x] Libro 1.0.3 audit chain (real SHA-256, not shim) — v0.97.0
 - [x] Lifecycle audit recording — v0.97.0
-- [x] 26 test suites, 606 assertions, 0 failures
+- [x] 26 test suites, 607 assertions, 0 failures
 
 ---
 

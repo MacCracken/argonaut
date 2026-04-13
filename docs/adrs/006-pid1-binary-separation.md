@@ -32,7 +32,7 @@ The two-process pattern follows industry practice:
 
 ## Consequences
 
-- **Positive**: Library remains free of OS primitives — 545 assertions across 22 suites run without root.
+- **Positive**: Library remains free of OS primitives — 607 assertions across 26 suites run without root.
 - **Positive**: kybernet is minimal — small audit surface for OS-level operations.
 - **Positive**: Library is reusable by other consumers (containers, playbooks, agents).
 - **Negative**: Integration testing requires kybernet.

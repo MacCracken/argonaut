@@ -4,7 +4,7 @@
 
 Argonaut is a PID 1 init system library for AGNOS. It manages service lifecycle, boot sequencing, health checks, shutdown orchestration, and security enforcement (seccomp, Landlock, capabilities). It runs as the first userspace process with full system privileges.
 
-Written in Cyrius, compiled to a 373KB statically linked ELF binary. No libc, no external runtime dependencies.
+Written in Cyrius, compiled via `cyrius build` to a ~378KB statically linked ELF binary. No libc, no external runtime dependencies.
 
 ## Attack Surface
 
@@ -18,7 +18,7 @@ Written in Cyrius, compiled to a 373KB statically linked ELF binary. No libc, no
 | Edge boot (dm-verity) | Rootfs integrity bypass | Device path validation, hash length checks |
 | Edge boot (LUKS) | Key material exposure | Input validation only — key handling delegated to cryptsetup |
 | Tmpfiles | Symlink/traversal attacks | Path validation rejects `..` and non-absolute paths |
-| Audit chain | Tamper-evident logging | SHA-256 hash-linked entries via libro 1.0.2 |
+| Audit chain | Tamper-evident logging | SHA-256 hash-linked entries via libro 1.0.3 |
 | Seccomp/Landlock | Policy bypass | Command generation only — enforcement delegated to kernel |
 | HTTP health checks | Non-http:// schemes | Rejects URLs that don't start with `http://` |
 
@@ -26,7 +26,8 @@ Written in Cyrius, compiled to a 373KB statically linked ELF binary. No libc, no
 
 | Version | Supported |
 |---------|-----------|
-| 1.0.x   | Yes |
+| 1.2.x   | Yes |
+| 1.0.x   | Security fixes only |
 | 0.9x.x  | No |
 
 ## Reporting a Vulnerability

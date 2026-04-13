@@ -6,7 +6,7 @@ Based on research into s6, dinit, systemd, runit, OpenRC, and other production i
 
 | Feature | Why | Status |
 |---------|-----|--------|
-| Zombie reaping (SIGCHLD) | PID 1 MUST reap all children, not just tracked services. Orphans become zombies. | Deferred to kybernet (PID 1 binary) — **kybernet v0.50.0 boots QEMU with real AGNOS binaries** |
+| Zombie reaping (SIGCHLD) | PID 1 MUST reap all children, not just tracked services. Orphans become zombies. | Deferred to kybernet (PID 1 binary) — **kybernet 1.0.1 depends on argonaut 1.2.0** |
 | Signal forwarding | PID 1 receives all signals. Must forward SIGTERM/SIGINT/SIGHUP to services. | Deferred to kybernet (PID 1 binary) |
 | Parallel service startup | Independent services should start concurrently. Toposort gives the data; need wave-based executor. | **Implemented** (v0.8.0) — `resolve_service_waves`, `boot_execution_plan_waves` |
 | Cgroup-per-service | Clean process killing (kill cgroup, not PID), resource accounting, OOM priority. | Deferred to kybernet (PID 1 binary) |
@@ -73,4 +73,4 @@ argonaut-manager (uses argonaut Cyrius library):
   socket activation
 ```
 
-This two-process split means a bug in the service manager doesn't kernel-panic the system. s6, dinit, and systemd all use this pattern. kybernet at v0.50.0 boots QEMU with real AGNOS binaries using the argonaut library.
+This two-process split means a bug in the service manager doesn't kernel-panic the system. s6, dinit, and systemd all use this pattern. kybernet 1.0.1 boots QEMU with real AGNOS binaries using the argonaut 1.2.0 library.
