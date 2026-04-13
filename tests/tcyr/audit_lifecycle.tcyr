@@ -35,13 +35,14 @@ fn sakshi_span_exit() { return 0; }
 fn sakshi_span_depth() { return 0; }
 
 # Libro core chain
-include "lib/libro/error.cyr"
-include "lib/libro/hasher.cyr"
-include "lib/libro/entry.cyr"
-include "lib/libro/verify.cyr"
-include "lib/libro/query.cyr"
-include "lib/libro/retention.cyr"
-include "lib/libro/chain.cyr"
+include "lib/error.cyr"
+include "lib/hasher.cyr"
+include "lib/entry.cyr"
+include "lib/verify.cyr"
+include "lib/query.cyr"
+include "lib/retention.cyr"
+include "lib/chain.cyr"
+include "lib/export.cyr"
 
 # Argonaut (audit before init)
 include "src/types.cyr"

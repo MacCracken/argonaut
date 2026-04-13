@@ -4,29 +4,28 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## Current — v1.1.0
+## Current — v1.2.0
 
-26 test suites (606 assertions), 37 benchmarks, 378KB binary (cc3 3.8.0).
-Libro 1.0.2 integrated — SHA-256 audit chain with lifecycle recording.
-P(-1) audit: 11 fixes across security, correctness, memory safety.
+26 test suites (607 assertions), 37 benchmarks, 378KB binary (cc3 3.8.0).
+Libro 1.0.2 — 8 modules included. SHA-256 audit chain, lifecycle recording, full query, JSONL/CSV export.
+All P(-1) audit items resolved. Password hash upgraded to SHA-256.
 
 ---
 
 ## Post-1.0 — Remaining Known Issues
 
-- [ ] `security.cyr` password hash uses FNV-1a (non-cryptographic) — replace with real KDF when stdlib supports it
 - [ ] `bench_main.cyr` crashes during init construction loop at high iteration counts (cc3 string buffer issue #16)
 
 ---
 
 ## Post-1.0 — Libro Extended Features
 
+- [x] QueryFilter time range support (after/before epoch filtering) — v1.2.0
+- [x] QueryFilter agent_id support — v1.2.0
+- [x] Libro export (JSONL/CSV audit trail export) — v1.2.0
 - [ ] Wire AuditChain persistence (libro FileStore — write to disk, needs patra lock fns)
-- [ ] QueryFilter time range support (after/before epoch filtering)
-- [ ] QueryFilter agent_id support
 - [ ] Libro signing module (Ed25519 signed entries)
 - [ ] Libro merkle module (Merkle tree for chain batches)
-- [ ] Libro export (JSONL/CSV audit trail export)
 - [ ] Include all 19 libro modules (16 compile on cc3 3.6.2, 3 need patra lock fns)
 
 ---

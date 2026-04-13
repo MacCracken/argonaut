@@ -35,22 +35,22 @@ fn sakshi_span_exit() { return 0; }
 fn sakshi_span_depth() { return 0; }
 
 # Libro — 16 of 19 modules (excludes file_store, patra_store, streaming)
-include "lib/libro/error.cyr"
-include "lib/libro/hasher.cyr"
-include "lib/libro/entry.cyr"
-include "lib/libro/verify.cyr"
-include "lib/libro/query.cyr"
-include "lib/libro/retention.cyr"
-include "lib/libro/chain.cyr"
-include "lib/libro/store.cyr"
-include "lib/libro/export.cyr"
-include "lib/libro/review.cyr"
-include "lib/libro/merkle.cyr"
-include "lib/libro/signing.cyr"
-include "lib/libro/anchoring.cyr"
-include "lib/libro/timestamping.cyr"
-include "lib/libro/proof.cyr"
-include "lib/libro/kernel_audit.cyr"
+include "lib/error.cyr"
+include "lib/hasher.cyr"
+include "lib/entry.cyr"
+include "lib/verify.cyr"
+include "lib/query.cyr"
+include "lib/retention.cyr"
+include "lib/chain.cyr"
+include "lib/store.cyr"
+include "lib/export.cyr"
+include "lib/review.cyr"
+include "lib/merkle.cyr"
+include "lib/signing.cyr"
+include "lib/anchoring.cyr"
+include "lib/timestamping.cyr"
+include "lib/proof.cyr"
+include "lib/kernel_audit.cyr"
 
 fn main() {
     alloc_init();

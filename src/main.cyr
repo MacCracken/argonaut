@@ -31,13 +31,14 @@ include "lib/sigil.cyr"
 # Full libro has 19 modules; argonaut uses the core chain API.
 # Signing, merkle, anchoring, timestamping, proof, stores, export,
 # review, streaming, kernel_audit available if needed later.
-include "lib/libro/error.cyr"
-include "lib/libro/hasher.cyr"
-include "lib/libro/entry.cyr"
-include "lib/libro/verify.cyr"
-include "lib/libro/query.cyr"
-include "lib/libro/retention.cyr"
-include "lib/libro/chain.cyr"
+include "lib/error.cyr"
+include "lib/hasher.cyr"
+include "lib/entry.cyr"
+include "lib/verify.cyr"
+include "lib/query.cyr"
+include "lib/retention.cyr"
+include "lib/chain.cyr"
+include "lib/export.cyr"
 
 # Argonaut modules
 include "src/types.cyr"

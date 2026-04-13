@@ -1,6 +1,19 @@
+[package]
 name = "argonaut"
-version = "1.1.0"
+version = "1.2.1"
+description = "Init system and service manager for AGNOS"
 license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "3.9.2"
+
+[build]
 entry = "src/main.cyr"
 output = "argonaut"
-description = "argonaut — Cyrius port"
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "fs", "process", "hashmap", "tagged", "args", "json", "fnptr", "sakshi_full", "freelist", "bigint", "chrono", "sigil", "assert", "bench"]
+
+[deps.libro]
+path = "../libro"
+tag = "1.0.2"
+modules = ["src/error.cyr", "src/hasher.cyr", "src/entry.cyr", "src/verify.cyr", "src/query.cyr", "src/retention.cyr", "src/chain.cyr", "src/export.cyr"]

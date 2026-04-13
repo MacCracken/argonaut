@@ -145,6 +145,38 @@ fn audit_log_query(log, source, min_severity) {
     return chain_query(log, q);
 }
 
+# Full query: all QueryFilter fields
+# Pass 0 for unused fields, -1 for unused severity fields.
+fn audit_log_query_full(log, source, min_sev, agent, after, before) {
+    var q = query_new();
+    if (source != 0) { query_source(q, str_from(source)); }
+    if (min_sev >= 0) { query_min_severity(q, min_sev); }
+    if (agent != 0) { query_agent_id(q, str_from(agent)); }
+    if (after > 0) { query_after(q, after); }
+    if (before > 0) { query_before(q, before); }
+    return chain_query(log, q);
+}
+
+# Record with agent_id
+fn audit_log_record_with_agent(log, service, event_type, agent) {
+    var severity = audit_event_severity(event_type);
+    var source = str_from("argonaut");
+    var action = str_from(event_type_str(event_type));
+    var details = str_from(service);
+    return chain_append_with_agent(
+    log, severity, source, action, details, str_from(agent));
+}
+
+# Export audit log to file descriptor as JSONL
+fn audit_log_export_jsonl(log, fd) {
+    return export_jsonl(chain_entries(log), fd);
+}
+
+# Export audit log to file descriptor as CSV
+fn audit_log_export_csv(log, fd) {
+    return export_csv(chain_entries(log), fd);
+}
+
 # =========================================================================
 # Entry accessors — bridge to libro's entry_*() functions
 # =========================================================================
@@ -157,6 +189,7 @@ fn audit_entry_source(e)    { return entry_source(e); }
 fn audit_entry_action(e)    { return entry_action(e); }
 fn audit_entry_prev_hash(e) { return entry_prev_hash(e); }
 fn audit_entry_hash(e)      { return entry_hash(e); }
+fn audit_entry_agent_id(e)  { return entry_agent_id(e); }
 
 # Service name is stored in the details field
 fn audit_entry_service(e)   { return entry_details(e); }

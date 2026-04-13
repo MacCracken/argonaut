@@ -90,16 +90,13 @@ fn capability_setpriv_cmd(caps_to_drop, binary, args) {
 # Emergency shell authentication
 # =========================================================================
 
-# Simple non-cryptographic hash (SipHash-like) for password verification.
-# WARNING: Not cryptographically secure. Production should use proper crypto.
+# SHA-256 password hash via sigil. Returns 64-char hex Str.
 fn password_hash(data, len) {
-    var h = 2166136261;  # FNV-1a 32-bit offset basis
-    for (var i = 0; i < len; i = i + 1) {
-        var c = load8(data + i);
-        h = h ^ c;
-        h = h * 16777619;  # FNV-1a 32-bit prime
-    }
-    return h;
+    var ctx = sha256_init();
+    sha256_update(ctx, data, len);
+    var digest = alloc(32);
+    sha256_finalize(ctx, digest);
+    return hex_encode_str(digest, 32);
 }
 
 # Constant-time comparison to prevent timing attacks
@@ -121,13 +118,8 @@ fn verify_emergency_auth(config, password_input) {
 
     var input_data = str_data(password_input);
     var input_len = str_len(password_input);
-    var input_hash = password_hash(input_data, input_len);
+    var hash_str = password_hash(input_data, input_len);
 
-    # Compare hash values
-    var stored_data = str_data(stored_hash);
-    var stored_len = str_len(stored_hash);
-
-    var hash_str = str_from_int(input_hash);
     # Constant-time comparison to prevent timing oracle
     return constant_time_eq_str(hash_str, stored_hash);
 }

@@ -7,6 +7,35 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
+## [1.2.1] — 2026-04-12
+
+### Changed
+- **Dependencies via `cyrius deps`** — no more manually copied vendored libs
+- `cyrius.toml` now declares `[deps]` with `stdlib` list and `[deps.libro]` pointing to `../libro`
+- Libro modules resolved from sibling repo into `lib/` (was manually copied to `lib/libro/`)
+- Include paths: `lib/libro/X.cyr` → `lib/X.cyr` (all source and test files updated)
+- Removed `lib/libro/` directory (19 manually copied files)
+- Removed `lib/patra.cyr` (unused, was manually copied)
+- Minimum cyrius toolchain: 3.9.2 (for `cyrius deps` support)
+
+---
+
+## [1.2.0] — 2026-04-12
+
+### Added
+- `audit_log_query_full(log, source, min_sev, agent, after, before)` — full QueryFilter bridge with time range and agent_id filtering
+- `audit_log_record_with_agent(log, service, event_type, agent)` — audit recording with agent attribution
+- `audit_log_export_jsonl(log, fd)` — JSONL export to file descriptor
+- `audit_log_export_csv(log, fd)` — CSV export to file descriptor
+- `audit_entry_agent_id(e)` accessor
+- libro `export.cyr` included in build chain (8 libro modules total)
+
+### Changed
+- **Security**: `password_hash` upgraded from FNV-1a (32-bit, non-cryptographic) to SHA-256 via sigil. Returns 64-char hex Str. `verify_emergency_auth` now compares SHA-256 digests with constant-time comparison. This was the last remaining known issue from the P(-1) audit.
+- Test suites: 26 (607 assertions, +1 for SHA-256 hash length check)
+
+---
+
 ## [1.1.0] — 2026-04-12
 
 ### Fixed
