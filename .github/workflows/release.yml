@@ -66,8 +66,17 @@ jobs:
 
       - name: Run tests
         run: |
-          cyrius test 2>&1 | tee /tmp/test_output
-          tail -1 /tmp/test_output | grep "0 failed"
+          pass=0; fail=0
+          for t in tests/tcyr/*.tcyr; do
+            if cyrius test "$t" 2>&1 | tail -1 | grep -q "0 failed"; then
+              pass=$((pass + 1))
+            else
+              fail=$((fail + 1))
+              echo "FAIL: $t"
+            fi
+          done
+          echo "$pass passed, $fail failed"
+          test $fail -eq 0
 
       - name: Extract changelog
         run: |
