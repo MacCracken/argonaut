@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 env:
-  CYRIUS_VERSION: "3.9.2"
+  CYRIUS_TOOLCHAIN: ".cyrius-toolchain"
 
 jobs:
   # ── CI Gate (must pass before release) ──
@@ -41,6 +41,8 @@ jobs:
 
       - name: Install Cyrius toolchain
         run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
@@ -49,26 +51,25 @@ jobs:
           cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+
+      - name: Resolve dependencies
+        run: cyrius deps
 
       - name: Build x86_64 binary
         run: |
           mkdir -p build
-          cat src/main.cyr | cc3 > build/argonaut 2>/tmp/cc3_stderr
-          if [ $? -ne 0 ]; then
-            cat /tmp/cc3_stderr
-            exit 1
-          fi
-          chmod +x build/argonaut
+          cyrius build src/main.cyr build/argonaut
           echo "argonaut: $(wc -c < build/argonaut) bytes"
           cp build/argonaut argonaut-x86_64
 
-      - name: Smoke test
+      - name: Run tests
         run: |
-          ./argonaut-x86_64 | grep -q "all systems nominal"
-          echo "PASS: smoke test"
+          cyrius test 2>&1 | tee /tmp/test_output
+          tail -1 /tmp/test_output | grep "0 failed"
 
       - name: Extract changelog
-        id: changelog
         run: |
           VERSION="${GITHUB_REF_NAME}"
           BODY=$(awk "/^## \\[$VERSION\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md)

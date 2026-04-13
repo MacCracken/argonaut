@@ -1,6 +1,7 @@
 # assert.cyr — test assertion library
 # Usage: include "lib/assert.cyr"
-# Requires: string.cyr, fmt.cyr
+include "lib/string.cyr"
+include "lib/fmt.cyr"
 #
 # Now that comparisons work in function arguments, assert(x == 42, "name") works.
 

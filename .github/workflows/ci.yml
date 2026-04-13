@@ -12,7 +12,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CYRIUS_VERSION: "3.9.2"
+  # Reads from .cyrius-toolchain. Override with CYRIUS_VERSION env.
+  CYRIUS_TOOLCHAIN: ".cyrius-toolchain"
 
 jobs:
   # ── Build ──
@@ -24,6 +25,8 @@ jobs:
 
       - name: Install Cyrius toolchain
         run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
@@ -32,19 +35,16 @@ jobs:
           cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+
+      - name: Resolve dependencies
+        run: cyrius deps
 
       - name: Build argonaut
         run: |
           mkdir -p build
-          cat src/main.cyr | cc3 > build/argonaut 2>/tmp/cc3_stderr
-          if [ $? -ne 0 ]; then
-            cat /tmp/cc3_stderr
-            exit 1
-          fi
-          chmod +x build/argonaut
+          cyrius build src/main.cyr build/argonaut
           echo "argonaut: $(wc -c < build/argonaut) bytes"
-          # Show warnings but don't fail on them
-          grep -v '^$' /tmp/cc3_stderr 2>/dev/null || true
 
       - name: Smoke test
         run: |
@@ -67,6 +67,8 @@ jobs:
 
       - name: Install Cyrius toolchain
         run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
@@ -75,6 +77,7 @@ jobs:
           cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
       - name: Format check
         run: |
@@ -99,17 +102,14 @@ jobs:
       - name: Scan for dangerous patterns
         run: |
           WARN=0
-          # Check for raw execve outside process_mgmt.cyr
           if grep -rn 'syscall(59' src/ 2>/dev/null | grep -v "# " | grep -v process_mgmt; then
             echo "WARN: raw execve outside process_mgmt"
             WARN=1
           fi
-          # Check for hardcoded paths that bypass validation
           if grep -rn '"/etc/shadow"' src/ 2>/dev/null; then
             echo "WARN: direct shadow file access"
             WARN=1
           fi
-          # Check for unwrapped shell commands
           if grep -rn 'system(' src/ 2>/dev/null | grep -v "# "; then
             echo "WARN: raw system() call (use SafeCommand)"
             WARN=1
@@ -118,7 +118,7 @@ jobs:
 
   # ── Tests ──
   test:
-    name: Test
+    name: Test (607 assertions)
     needs: [build]
     runs-on: ubuntu-latest
     steps:
@@ -126,6 +126,8 @@ jobs:
 
       - name: Install Cyrius toolchain
         run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
@@ -134,40 +136,19 @@ jobs:
           cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
-      - name: Run test suite
+      - name: Resolve dependencies
+        run: cyrius deps
+
+      - name: Run test suites
         run: |
-          pass=0; fail=0; total_assertions=0
-          for tcyr in tests/tcyr/*.tcyr; do
-            [ -f "$tcyr" ] || continue
-            name=$(basename "$tcyr" .tcyr)
-            cat "$tcyr" | cc3 2>/dev/null > /tmp/test_$name
-            if [ $? -ne 0 ]; then
-              err=$(cat "$tcyr" | cc3 2>&1 > /dev/null | head -1)
-              echo "  CFAIL: $name ($err)"
-              fail=$((fail + 1))
-              continue
-            fi
-            chmod +x /tmp/test_$name
-            output=$(/tmp/test_$name 2>&1)
-            ec=$?
-            a=$(echo "$output" | grep -o '[0-9]* passed' | grep -o '[0-9]*' || echo 0)
-            if [ "$ec" -eq 0 ]; then
-              echo "  PASS: $name ($a assertions)"
-              pass=$((pass + 1))
-              total_assertions=$((total_assertions + a))
-            else
-              echo "  FAIL: $name (exit $ec)"
-              fail=$((fail + 1))
-            fi
-          done
-          echo ""
-          echo "$pass passed, $fail failed, $total_assertions assertions"
-          test $fail -eq 0
+          cyrius test 2>&1 | tee /tmp/test_output
+          tail -1 /tmp/test_output | grep "0 failed"
 
   # ── Benchmarks ──
   benchmarks:
-    name: Benchmarks
+    name: Benchmarks (37)
     needs: [build]
     runs-on: ubuntu-latest
     steps:
@@ -175,6 +156,8 @@ jobs:
 
       - name: Install Cyrius toolchain
         run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
@@ -183,6 +166,10 @@ jobs:
           cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+
+      - name: Resolve dependencies
+        run: cyrius deps
 
       - name: Run benchmarks
         run: |
@@ -209,7 +196,7 @@ jobs:
       - name: Check required docs exist
         run: |
           MISSING=0
-          for doc in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md LICENSE; do
+          for doc in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md LICENSE CLAUDE.md; do
             if [ -f "$doc" ]; then
               echo "  OK: $doc"
             else
@@ -229,4 +216,4 @@ jobs:
             echo "FAIL: VERSION != cyrius.toml"
             exit 1
           fi
-          echo "Version consistent"
+          echo "Version consistent: $VERSION"
