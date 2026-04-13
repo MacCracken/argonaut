@@ -7,6 +7,13 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
+## [1.0.1] — 2026-04-12
+
+### Fixed
+- Added `lib/fnptr.cyr` to include chain — suppresses `undefined function 'fncall2'` warning from `hashmap.cyr`'s `map_iter`. The function was never called at runtime but produced a compiler warning on every build.
+
+---
+
 ## [1.0.0] — 2026-04-12
 
 ### Summary
