@@ -4,41 +4,7 @@
 # Boot sequencing, service lifecycle, health checks,
 # runlevel switching, shutdown orchestration.
 
-# Standard library
-include "lib/string.cyr"
-include "lib/fmt.cyr"
-include "lib/alloc.cyr"
-include "lib/vec.cyr"
-include "lib/str.cyr"
-include "lib/syscalls.cyr"
-include "lib/io.cyr"
-include "lib/fs.cyr"
-include "lib/process.cyr"
-include "lib/hashmap.cyr"
-include "lib/tagged.cyr"
-include "lib/args.cyr"
-include "lib/json.cyr"
-include "lib/fnptr.cyr"
-include "lib/sakshi_full.cyr"
-include "lib/freelist.cyr"
-
-# Libro dependencies (SHA-256 via sigil, timestamps)
-include "lib/bigint.cyr"
-include "lib/chrono.cyr"
-include "lib/sigil.cyr"
-
-# Libro 1.0.2 — cryptographic audit chain (core modules only)
-# Full libro has 19 modules; argonaut uses the core chain API.
-# Signing, merkle, anchoring, timestamping, proof, stores, export,
-# review, streaming, kernel_audit available if needed later.
-include "lib/error.cyr"
-include "lib/hasher.cyr"
-include "lib/entry.cyr"
-include "lib/verify.cyr"
-include "lib/query.cyr"
-include "lib/retention.cyr"
-include "lib/chain.cyr"
-include "lib/export.cyr"
+# Stdlib + deps auto-included via cyrius.toml
 
 # Argonaut modules
 include "src/types.cyr"
