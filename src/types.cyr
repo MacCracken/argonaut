@@ -175,6 +175,14 @@ enum HealthCheckType {
     HC_PROCESS_ALIVE;
 }
 
+fn health_check_type_str(t) {
+    if (t == HC_HTTP_GET) { return "http"; }
+    if (t == HC_TCP_CONNECT) { return "tcp"; }
+    if (t == HC_COMMAND) { return "command"; }
+    if (t == HC_PROCESS_ALIVE) { return "process-alive"; }
+    return "unknown";
+}
+
 # =========================================================================
 # Health check
 # =========================================================================

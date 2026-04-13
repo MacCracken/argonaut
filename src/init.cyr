@@ -265,6 +265,9 @@ fn init_start_simple(init, name, ms, sd) {
         if (load64(result + 16) == 0) {  # not passed
             managed_svc_set_state(ms, STATE_FAILED);
             process_kill(pid);
+            # Reap the killed child to avoid zombie leak (PID 1 responsibility)
+            var _wb[8];
+            sys_waitpid(pid, &_wb, 0);
             proc_table_remove(svc_def_name(sd));
             audit_log_record(load64(init + 40), name, EVT_READY_FAILED);
             return 0 - 1;

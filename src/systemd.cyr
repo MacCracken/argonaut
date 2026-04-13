@@ -107,7 +107,14 @@ fn generate_unit(svc) {
 
     # [Service] section
     str_builder_add_cstr(sb, "[Service]\n");
-    str_builder_add_cstr(sb, "Type=notify\n");
+    var svc_type = svc_def_service_type(svc);
+    if (svc_type == SVC_FORKING) {
+        str_builder_add_cstr(sb, "Type=forking\n");
+    } elif (svc_type == SVC_ONESHOT) {
+        str_builder_add_cstr(sb, "Type=oneshot\n");
+    } else {
+        str_builder_add_cstr(sb, "Type=notify\n");
+    }
 
     # ExecStart
     str_builder_add_cstr(sb, "ExecStart=");

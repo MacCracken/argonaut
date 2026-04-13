@@ -128,5 +128,6 @@ fn verify_emergency_auth(config, password_input) {
     var stored_len = str_len(stored_hash);
 
     var hash_str = str_from_int(input_hash);
-    return str_eq(hash_str, stored_hash);
+    # Constant-time comparison to prevent timing oracle
+    return constant_time_eq_str(hash_str, stored_hash);
 }

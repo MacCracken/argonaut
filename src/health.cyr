@@ -139,11 +139,11 @@ fn execute_health_check(service_name, hc, pid) {
         # HTTP GET: connect, send GET request, validate status line
         var url_data = str_data(target);
         var url_len = str_len(target);
-        # Skip "http://"
-        var offset = 0;
-        if (str_starts_with(target, "http://")) {
-            offset = 7;
+        # Require http:// — reject https and other schemes
+        if (str_starts_with(target, "http://") == 0) {
+            return 0;
         }
+        var offset = 7;
         # Parse host and port
         var colon_pos = 0 - 1;
         var slash_pos = url_len;
@@ -255,7 +255,7 @@ fn execute_health_check(service_name, hc, pid) {
 
     var result = alloc(sizeof(HealthCheckResult));
     store64(result, service_name);
-    store64(result + 8, str_from(boot_stage_str(0)));  # placeholder
+    store64(result + 8, str_from(health_check_type_str(check_type)));
     store64(result + 16, passed);
     store64(result + 24, latency);
     store64(result + 32, message);
@@ -292,6 +292,7 @@ fn execute_ready_check(service_name, rc, pid) {
     store64(hc + 8, target);
     store64(hc + 16, port);
     store64(hc + 24, 0);        # interval (unused)
+    store64(hc + 32, timeout);  # timeout_ms
     store64(hc + 40, 0);        # retries (unused)
 
     sakshi_debug(str_data(service_name), str_len(service_name));

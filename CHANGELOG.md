@@ -9,13 +9,27 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ## [1.0.2] — 2026-04-12
 
+### Fixed — P(-1) Audit
+- **Security**: `health.cyr` — non-http:// URLs now rejected (was: silently corrupt port parsing)
+- **Security**: `security.cyr` — `verify_emergency_auth` uses `constant_time_eq_str` (was: `str_eq` timing oracle)
+- **Correctness**: `health.cyr` — `execute_ready_check` initializes `timeout_ms` field (was: uninitialized heap garbage)
+- **Correctness**: `init.cyr` — zombie prevention: `sys_waitpid` called after SIGKILL on ready-check failure
+- **Correctness**: `systemd.cyr` — `generate_unit` emits correct `Type=` per service type (was: always `Type=notify`)
+- **Correctness**: `health.cyr` — `HealthCheckResult.check_type_str` set from `health_check_type_str()` (was: placeholder `"mount-filesystems"`)
+
+### Added
+- `health_check_type_str(t)` — human-readable strings for `HealthCheckType` enum
+
 ### Changed
 - Minimum cc3 version: 3.8.0
 - `cyrfmt` applied to all source files — zero format issues
 - `cyrlint` clean — zero warnings (was 6 line-length violations)
 - `src/boot.cyr`: long `boot_step_new` calls split to stay under 120 chars
 - `src/types.cyr`: emergency shell banner built via `str_builder` (was single 120+ char string literal)
-- `src/test_modules.cyr`: long verity test line split
+- `scripts/bench-history.sh` rewritten for Cyrius (was: cargo bench)
+- `docs/guides/quickstart.md` rewritten for Cyrius (was: Rust)
+- `SECURITY.md` updated: libro SHA-256, supported versions, http-only health checks
+- `CONTRIBUTING.md`: minimum cc3 version updated to 3.6.2+
 
 ---
 
