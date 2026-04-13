@@ -4,22 +4,17 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## Current — v1.0.2
+## Current — v1.1.0
 
 26 test suites (606 assertions), 37 benchmarks, 378KB binary (cc3 3.8.0).
 Libro 1.0.2 integrated — SHA-256 audit chain with lifecycle recording.
-P(-1) audit complete: 6 fixes (security, correctness), all docs updated for Cyrius.
+P(-1) audit: 11 fixes across security, correctness, memory safety.
 
 ---
 
-## Post-1.0 — Known Issues (from P(-1) audit)
+## Post-1.0 — Remaining Known Issues
 
-- [ ] `resolve_service_order` cycle detection counts external dep nodes — false "cycle" if a service lists a dep not in the registered set (H3)
-- [ ] `fleet_registration_from_system` stores pointers to stack buffers in heap struct — use-after-return if `str_trim` returns a view (M2, edge_boot.cyr)
-- [ ] TCP health check does not verify `SO_ERROR` after non-blocking connect — false positive on ECONNREFUSED (L1, health.cyr)
-- [ ] `notify_try_recv` allocates 1KB per poll tick, never freed — steady leak without GC (L2, notify.cyr)
-- [ ] `init_reap_services` packs results using `sizeof(CrashAction)` for a 3-field triple — fragile if CrashAction struct grows (M3, init.cyr)
-- [ ] `security.cyr` password hash uses FNV-1a (non-cryptographic) — replace with real KDF when stdlib supports it (H2 partial)
+- [ ] `security.cyr` password hash uses FNV-1a (non-cryptographic) — replace with real KDF when stdlib supports it
 - [ ] `bench_main.cyr` crashes during init construction loop at high iteration counts (cc3 string buffer issue #16)
 
 ---

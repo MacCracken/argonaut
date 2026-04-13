@@ -7,6 +7,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pr
 
 ---
 
+## [1.1.0] — 2026-04-12
+
+### Fixed
+- **Correctness**: `resolve_service_order` / `resolve_service_waves` — external dependency targets now get `in_degree` entries; cycle detection uses `map_count(in_degree)` instead of `vec_len(svc_defs)`. Previously, a service depending on an unregistered service would cause a false "cycle" detection and return zero services in the startup plan.
+- **Memory**: `fleet_registration_from_system` — `str_clone` on stack-buffered Str values (machine-id, hostname). Was storing pointers to stack memory that became dangling after function return.
+- **Correctness**: TCP health check verifies `SO_ERROR` via `getsockopt` after non-blocking connect. Previously returned false-positive success on ECONNREFUSED (socket becomes writable on both success and refusal).
+- **Memory**: `notify_try_recv` — static 1KB buffer allocated once on first call. Was allocating 1KB per poll tick with no reuse (steady leak without GC).
+
+### Changed
+- `ReapResult` struct added for `init_reap_services` return values (was reusing `sizeof(CrashAction)` coincidentally — fragile if CrashAction struct grew)
+
+---
+
 ## [1.0.2] — 2026-04-12
 
 ### Fixed — P(-1) Audit

@@ -292,21 +292,21 @@ fn validate_edge_profile(boot_result, max_memory_mb) {
 fn fleet_registration_from_system(boot_result) {
     var reg = alloc(sizeof(FleetRegistration));
 
-    # Read machine-id
+    # Read machine-id (clone to heap — buf is on stack)
     var buf[256];
     var n = file_read_all("/etc/machine-id", &buf, 255);
     if (n > 0) {
         store8(&buf + n, 0);
-        store64(reg, str_trim(str_new(&buf, n)));
+        store64(reg, str_clone(str_trim(str_new(&buf, n))));
     } else {
         store64(reg, str_from(""));
     }
 
-    # Read hostname
+    # Read hostname (clone to heap — buf is on stack)
     n = file_read_all("/etc/hostname", &buf, 255);
     if (n > 0) {
         store8(&buf + n, 0);
-        store64(reg + 8, str_trim(str_new(&buf, n)));
+        store64(reg + 8, str_clone(str_trim(str_new(&buf, n))));
     } else {
         store64(reg + 8, str_from(""));
     }

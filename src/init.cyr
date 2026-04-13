@@ -439,8 +439,7 @@ fn init_reap_services(init) {
             }
 
             var action = on_service_crash(ms, code);
-            # Pack result: name, code, action
-            var result = alloc(sizeof(CrashAction));
+            var result = alloc(sizeof(ReapResult));
             store64(result, load64(pair));
             store64(result + 8, code);
             store64(result + 16, action);

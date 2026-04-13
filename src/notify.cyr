@@ -117,13 +117,18 @@ fn notify_bind(path) {
     return fd;
 }
 
+# Shared recv buffer — allocated once on first call
+var _notify_recv_buf = 0;
+
 # Try to receive a notification without blocking.
 # Returns a NotifyMessage ptr, or 0 if no message available.
 fn notify_try_recv(fd) {
-    var buf = alloc(1024);
-    var n = sys_read(fd, buf, 1024);
+    if (_notify_recv_buf == 0) {
+        _notify_recv_buf = alloc(1024);
+    }
+    var n = sys_read(fd, _notify_recv_buf, 1024);
     if (n <= 0) { return 0; }
-    return notify_parse(buf, n);
+    return notify_parse(_notify_recv_buf, n);
 }
 
 # Drain pending notifications, up to limit.

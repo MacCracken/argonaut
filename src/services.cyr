@@ -248,6 +248,11 @@ fn build_dep_graph(svc_defs, in_degree, dependents) {
             var deg = map_get(in_degree, name);
             map_set(in_degree, name, deg + 1);
 
+            # Ensure dep target has an in_degree entry (0 if external)
+            if (map_has(in_degree, dep) == 0) {
+                map_set(in_degree, dep, 0);
+            }
+
             var dep_list = map_get(dependents, dep);
             if (dep_list == 0) {
                 dep_list = vec_new();
@@ -299,7 +304,8 @@ fn resolve_service_order(svc_defs) {
         }
     }
 
-    if (vec_len(ordered) != count) {
+    # Cycle detection: compare against total graph nodes (includes external deps)
+    if (vec_len(ordered) != map_count(in_degree)) {
         return 0;  # cycle detected
     }
 
@@ -311,17 +317,17 @@ fn resolve_service_order(svc_defs) {
 # =========================================================================
 
 fn resolve_service_waves(svc_defs) {
-    var count = vec_len(svc_defs);
-    if (count == 0) { return vec_new(); }
+    if (vec_len(svc_defs) == 0) { return vec_new(); }
 
     var in_degree = map_new();
     var dependents = map_new();
     build_dep_graph(svc_defs, in_degree, dependents);
 
+    var total_nodes = map_count(in_degree);
     var waves = vec_new();
     var resolved = 0;
 
-    while (resolved < count) {
+    while (resolved < total_nodes) {
         var wave = vec_new();
         var keys = map_keys(in_degree);
 

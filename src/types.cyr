@@ -584,6 +584,12 @@ struct CrashAction {
     reason;         # Str ptr for CRASH_GIVE_UP
 }
 
+struct ReapResult {
+    name;           # Str ptr (service name)
+    exit_code;      # i64
+    action;         # CrashAction ptr
+}
+
 # =========================================================================
 # Service definition — static configuration for a managed service
 # =========================================================================
