@@ -11,7 +11,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CSV="${PROJECT_DIR}/bench-history.csv"
-CC="${CC:-$HOME/.cyrius/bin/cc3}"
 LABEL="${1:-$(git -C "${PROJECT_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'unknown')}"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -22,13 +21,15 @@ fi
 
 echo "=== Argonaut Benchmark Run: ${LABEL} @ ${TIMESTAMP} ==="
 
-# Compile bench_main
+# Build bench_main via cyrius (auto-resolves manifest deps + applies DCE).
+# cc3 was renamed cc5 at v5.0.0; use the toolchain-aware build command
+# instead of piping a single source file at a raw cc.
 cd "${PROJECT_DIR}"
-cat src/bench_main.cyr | "${CC}" 2>/dev/null > /tmp/argonaut_bench
-chmod +x /tmp/argonaut_bench
+mkdir -p build
+CYRIUS_DCE=1 cyrius build src/bench_main.cyr build/argonaut_bench >/dev/null
 
 # Run and capture output
-BENCH_OUTPUT=$(/tmp/argonaut_bench 2>&1 || true)
+BENCH_OUTPUT=$(./build/argonaut_bench 2>&1 || true)
 echo "${BENCH_OUTPUT}"
 
 # Parse output lines like:

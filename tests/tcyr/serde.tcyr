@@ -129,10 +129,11 @@ var bp = json_parse(str_from("{\"name\":\"test\",\"value\":\"42\"}"));
 assert(json_get(bp, str_from("name")) != 0, "json get name");
 assert_eq(json_get_int(bp, str_from("value")), 42, "json get int");
 
-var bld = vec_new();
-vec_push(bld, json_pair_new(str_from("k1"), str_from("v1")));
-vec_push(bld, json_pair_new(str_from("k2"), str_from("v2")));
-var built = json_build(bld);
+# Manual str_builder build (avoid stdlib json_build — name collides with
+# patra.cyr's 6-arg json_build; patra wins the late-bind).
+var bsb = str_builder_new();
+str_builder_add_cstr(bsb, "{\"k1\":\"v1\",\"k2\":\"v2\"}");
+var built = str_builder_build(bsb);
 assert(str_contains(built, str_from("k1")), "built k1");
 assert(str_contains(built, str_from("v1")), "built v1");
 

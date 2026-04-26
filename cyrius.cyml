@@ -1,0 +1,49 @@
+[package]
+name = "argonaut"
+version = "${file:VERSION}"
+description = "Init system and service manager for AGNOS"
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/argonaut"
+language = "cyrius"
+cyrius = "5.7.5"
+
+[build]
+entry = "src/main.cyr"
+output = "build/argonaut"
+
+[deps]
+stdlib = [
+    "string",
+    "fmt",
+    "alloc",
+    "vec",
+    "str",
+    "syscalls",
+    "io",
+    "fs",
+    "process",
+    "hashmap",
+    "tagged",
+    "args",
+    "json",
+    "fnptr",
+    "sakshi",
+    "freelist",
+    "bigint",
+    "chrono",
+    "sigil",
+    "ct",
+    "keccak",
+    "assert",
+    "bench",
+]
+
+[deps.patra]
+git = "https://github.com/MacCracken/patra.git"
+tag = "1.1.1"
+modules = ["dist/patra.cyr"]
+
+[deps.libro]
+git = "https://github.com/MacCracken/libro.git"
+tag = "2.0.5"
+modules = ["dist/libro.cyr"]
