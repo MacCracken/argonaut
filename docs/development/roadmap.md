@@ -7,55 +7,65 @@ work only.
 
 ---
 
-## Current — v1.4.0 (shipped 2026-04-26)
+## Current — v1.5.0 (shipped 2026-04-27)
 
-P(-1) hardening minor. Eight audit findings landed with regression
-tests, three deferred to 1.4.x patches with helpers in place. CLAUDE.md
-split into durable rules + `state.md` volatile snapshot. See
-[`docs/audit/2026-04-26-audit.md`](../audit/2026-04-26-audit.md) for
-the full report and [CHANGELOG 1.4.0](../../CHANGELOG.md#140--2026-04-26)
-for the disposition.
+PID-1 readiness minor. Closes the three audit deferrals from
+1.4.0 (MEDIUM-1, MEDIUM-3, LOW-3) with regression coverage.
+QEMU PID-1 boot harness (gating end-to-end M3 / L3 validation
+per the audit) and the HIGH-1 host resolver slip to 1.6.0. See
+[CHANGELOG 1.5.0](../../CHANGELOG.md#150--2026-04-27) for the
+full disposition.
+
+### Audit deferrals — closed in 1.5.0
+
+- [x] **MEDIUM-1** — `notify_try_recv_authenticated` (recvmsg +
+  SCM_CREDENTIALS) added to `src/notify.cyr`; `notify_bind`
+  enables `SO_PASSCRED`; `init_notify_bind` opt-in + `notify_fd`
+  field on `ArgonautInit`; `init_poll_health` drains
+  authenticated messages when the fd is registered.
+- [x] **MEDIUM-3** — `proc_table_reap_orphans` (bounded
+  `waitpid(-1, ..., WNOHANG)` loop) added; `argonaut_init_new`
+  calls `prctl(PR_SET_CHILD_SUBREAPER, 1)`; `init_reap_services`
+  drains orphans after tracked-PID reaping.
+- [x] **LOW-3** — `fork_exec_service` child now `setsid`s and
+  `dup2`s stdout / stderr to `/dev/null` after the existing stdin
+  redirect.
 
 ---
 
-## Next — v1.5.0 — PID-1 readiness
+## Next — v1.6.0 — QEMU harness + health-check resolver
 
-Theme: graduate from systemd-delegate to a credible PID-1 candidate
-for the AGNOS boot path. This rolls up the 1.4.x audit deferrals
-into one coherent minor and unblocks the AGNOS-boot consumer.
-
-### Audit deferrals (from 2026-04-26 audit)
-
-- [ ] **MEDIUM-1** — wire `notify_recv_authenticated`
-  (`SO_PEERCRED` / `SCM_CREDENTIALS`) into `init_poll_health`. Helper
-  shipped unwired in 1.4.0; consumer adoption is the remaining work.
-- [ ] **MEDIUM-3** — `proc_table_reap_orphans` +
-  `prctl(PR_SET_CHILD_SUBREAPER)` enrol in `argonaut_init_new`.
-  Gated on the QEMU PID-1 boot test harness (below).
-- [ ] **LOW-3** — `setsid` + stdout/stderr `dup2` in
-  `fork_exec_service`. Same QEMU-harness gating as MEDIUM-3.
+Theme: end-to-end validate the PID-1 surface, restore the
+non-loopback health-check feature, and clean up the stdlib
+quirk that blocks shell-exec testing.
 
 ### Infrastructure
 
-- [ ] **QEMU PID-1 boot harness** — minimal initramfs that runs
-  argonaut as PID 1, asserts service waves come up, asserts orphan
-  reap behaviour. Unlocks MEDIUM-3 / LOW-3 testing.
+- [ ] **QEMU PID-1 boot harness** — minimal initramfs + kernel
+  boot + assertion harness that runs argonaut as PID 1.
+  Validates M3 (orphan reap under real PID-1 reparenting) and
+  L3 (controlling-TTY decoupling) end-to-end. Sibling repo
+  [kybernet](https://github.com/MacCracken/kybernet) has the
+  shape under `qemu/` — pull pattern, not code.
+- [ ] **`lib/process.cyr` `exec_env` Str/cstr fix** — upstream
+  stdlib issue. Blocks unit-level shell-exec testing across
+  `health_exec.tcyr` and `audit-l3-fork-setsid`. File against
+  the cyrius stdlib; consume via toolchain bump.
+
+### Audit follow-ups
+
+- [ ] **HIGH-1 follow-up** — replace the 1.4.0
+  reject-non-loopback gate in health checks with a real host
+  resolver (dotted-quad parser + `gethostbyname` or
+  `getaddrinfo`). Restores the feature surface the 1.4.0 fix
+  had to drop.
 
 ### Re-audit
 
-- [ ] Per the 2026-04-26 audit's re-audit triggers, graduating to
-  true PID 1 is one of the four. Schedule a fresh P(-1) pass before
-  tagging 1.5.0.
-
----
-
-## v1.6.0 — health-check resolver
-
-- [ ] **HIGH-1 follow-up** — replace the localhost-only health-check
-  gate (introduced in 1.4.0) with a real host resolver. Either
-  dotted-quad parser + AAAA literal handling, or a minimal
-  `gethostbyname`/`getaddrinfo` consumer. Restores the feature surface
-  the 1.4.0 fix had to drop to preserve the safety property.
+- [ ] One of the 2026-04-26 audit's four re-audit triggers is
+  argonaut graduating to true PID 1. The QEMU harness lands
+  that ground; schedule a fresh P(-1) pass before tagging
+  1.6.0.
 
 ---
 

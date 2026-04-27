@@ -148,11 +148,26 @@ fn fork_exec_service(svc_def) {
 
     if (pid == 0) {
         # Child process
-        # Redirect stdin to /dev/null
-        var devnull = sys_open("/dev/null", 0, 0);  # O_RDONLY
-        if (devnull >= 0) {
-            sys_dup2(devnull, 0);
-            sys_close(devnull);
+        # L3: detach from argonaut's controlling TTY so signals on the
+        # parent terminal (e.g. ^C when argonaut is foregrounded for
+        # testing) don't reach service children, and so each service
+        # gets its own session. Non-fatal — already-session-leader
+        # callers return EPERM and we proceed.
+        syscall(112);   # SYS_setsid
+
+        # Redirect stdin to /dev/null and (L3) replace stdout / stderr
+        # so service log output stops mixing into argonaut's stdio.
+        # Production wiring should swap /dev/null for the journal fd.
+        var devnull_r = sys_open("/dev/null", 0, 0);   # O_RDONLY
+        if (devnull_r >= 0) {
+            sys_dup2(devnull_r, 0);
+            sys_close(devnull_r);
+        }
+        var devnull_w = sys_open("/dev/null", 1, 0);   # O_WRONLY
+        if (devnull_w >= 0) {
+            sys_dup2(devnull_w, 1);
+            sys_dup2(devnull_w, 2);
+            sys_close(devnull_w);
         }
 
         # Exec the binary
@@ -382,6 +397,25 @@ fn proc_table_reap() {
     }
 
     return exited;
+}
+
+# proc_table_reap_orphans — M3 (PID-1 reaper).
+# When argonaut runs as PID 1 (or as a subreaper enrolled via
+# `prctl(PR_SET_CHILD_SUBREAPER, 1)`), it inherits orphans whose original
+# parents exited (services that re-fork, daemons whose parents exit, etc.).
+# These never appear in `g_proc_table`, so `proc_table_reap` skips them
+# and they accumulate as zombies. This loop drains *any* exited child
+# via `waitpid(-1, ..., WNOHANG)` until ESRCH (-10) or 0 (no waitable).
+# Returns the count of orphans reaped.
+fn proc_table_reap_orphans() {
+    var n = 0;
+    for (var guard = 0; guard < 256; guard = guard + 1) {
+        var status_buf[8];
+        var ret = sys_waitpid(0 - 1, &status_buf, WNOHANG);
+        if (ret <= 0) { break; }   # 0 = no exited child; <0 = ECHILD/ESRCH
+        n = n + 1;
+    }
+    return n;
 }
 
 # =========================================================================

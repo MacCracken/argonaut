@@ -94,6 +94,139 @@ fn main() {
     var msg_b = load64(r2 + 32);
     assert(str_contains(msg_b, str_from("non-loopback")), "high1: HTTP message names finding");
 
+    # =====================================================================
+    # M1 — sd_notify SO_PEERCRED check (notify_try_recv_authenticated)
+    # =====================================================================
+    test_group("audit-m1-notify-cred");
+
+    # socketpair(AF_UNIX=1, SOCK_DGRAM=2, 0, &fds)
+    var fds[8];
+    var sp = syscall(53, 1, 2, 0, &fds);
+    if (sp == 0) {
+        var rfd = load32(&fds);
+        var sfd = load32(&fds + 4);
+
+        # Enable SO_PASSCRED on receiver so kernel attaches SCM_CREDENTIALS.
+        var one[4];
+        store32(&one, 1);
+        syscall(54, rfd, 1, 16, &one, 4);   # setsockopt(SOL_SOCKET=1, SO_PASSCRED=16)
+
+        # Send a notify datagram from sfd; kernel stamps sender PID.
+        var msg = "READY=1\n";
+        syscall(44, sfd, msg, 8, 0, 0, 0);   # sendto(sfd, msg, 8, 0, NULL, 0)
+
+        # Recv with expected = [my_pid] → cred matches → parse + return msg.
+        var my_pid = sys_getpid();
+        var ok_pids = vec_new();
+        vec_push(ok_pids, my_pid);
+        var nm_ok = notify_try_recv_authenticated(rfd, ok_pids);
+        assert(nm_ok != 0, "m1: cred-matched datagram parsed");
+        assert_eq(load64(nm_ok), 1, "m1: parsed READY=1");
+
+        # Send again; recv with wrong pid set → drop, return 0.
+        syscall(44, sfd, msg, 8, 0, 0, 0);
+        var bad_pids = vec_new();
+        vec_push(bad_pids, my_pid + 99999);
+        var nm_bad = notify_try_recv_authenticated(rfd, bad_pids);
+        assert_eq(nm_bad, 0, "m1: cred-mismatched datagram dropped");
+
+        # Empty queue → 0.
+        var nm_empty = notify_try_recv_authenticated(rfd, ok_pids);
+        assert_eq(nm_empty, 0, "m1: empty queue returns 0");
+
+        sys_close(rfd);
+        sys_close(sfd);
+    }
+
+    # pid_in_vec sanity (decoupled from socketpair availability)
+    var pv = vec_new();
+    vec_push(pv, 100);
+    vec_push(pv, 200);
+    assert_eq(pid_in_vec(pv, 100), 1, "m1: pid_in_vec hit head");
+    assert_eq(pid_in_vec(pv, 200), 1, "m1: pid_in_vec hit tail");
+    assert_eq(pid_in_vec(pv, 300), 0, "m1: pid_in_vec miss");
+    assert_eq(pid_in_vec(0, 100),  0, "m1: pid_in_vec rejects null vec");
+
+    # =====================================================================
+    # M3 — generic-waitpid reaper for orphans (proc_table_reap_orphans)
+    # =====================================================================
+    test_group("audit-m3-reaper-orphans");
+
+    # Enrol as subreaper so the grandchild orphans up to us, not init.
+    syscall(157, 36, 1, 0, 0, 0);   # SYS_prctl(PR_SET_CHILD_SUBREAPER=36, 1)
+
+    var fpid = sys_fork();
+    if (fpid == 0) {
+        # Child: fork grandchild, then exit immediately so grandchild orphans.
+        var gc = sys_fork();
+        if (gc == 0) {
+            # Grandchild: sleep 50ms so child exits first, then exit.
+            var ts[16];
+            store64(&ts, 0);
+            store64(&ts + 8, 50000000);
+            syscall(35, &ts, 0);
+            sys_exit(0);
+        }
+        sys_exit(0);
+    }
+
+    # Parent: reap our direct child immediately.
+    var st_c[8];
+    sys_waitpid(fpid, &st_c, 0);
+
+    # Wait long enough for the grandchild to also exit.
+    var ts2[16];
+    store64(&ts2, 0);
+    store64(&ts2 + 8, 200000000);   # 200ms
+    syscall(35, &ts2, 0);
+
+    var n_orphans = proc_table_reap_orphans();
+    assert(n_orphans >= 1, "m3: orphan reaped via waitpid(-1)");
+
+    # Idempotent: second call with no waiters → 0; bounded loop, no hang.
+    var n_empty = proc_table_reap_orphans();
+    assert_eq(n_empty, 0, "m3: empty queue returns 0");
+
+    # =====================================================================
+    # L3 — fork_exec_service setsid (child becomes session leader)
+    # =====================================================================
+    test_group("audit-l3-fork-setsid");
+
+    # Validate the platform setsid syscall used by fork_exec_service:
+    # in a forked child, after syscall(112), getsid(0) returns the
+    # child's own PID — i.e. the child became a session leader and is
+    # now decoupled from any controlling TTY inherited from the parent.
+    # End-to-end verification that fork_exec_service actually invokes
+    # setsid before exec is gated on the QEMU PID-1 harness in 1.6.0
+    # (the existing exec_env Str/cstr quirk noted in health_exec.tcyr
+    # blocks unit-level shell exec testing).
+    var sid_path = "/tmp/argonaut-l3-sid";
+    syscall(87, sid_path);
+
+    var l3_pid = sys_fork();
+    if (l3_pid == 0) {
+        syscall(112);                     # SYS_setsid
+        var sid = syscall(124, 0);        # SYS_getsid(0)
+        var sfd = sys_open(sid_path, 65, 384);   # O_WRONLY|O_CREAT, 0o600
+        if (sfd >= 0) {
+            var sbuf[24];
+            var sl = fmt_int_buf(sid, &sbuf);
+            sys_write(sfd, &sbuf, sl);
+            sys_close(sfd);
+        }
+        sys_exit(0);
+    }
+    var st_l[8];
+    sys_waitpid(l3_pid, &st_l, 0);
+
+    var rb = alloc(64);
+    var rn = file_read_all(sid_path, rb, 64);
+    assert(rn > 0, "l3: child wrote sid file");
+    var rs = str_to_int(str_new(rb, rn));
+    assert_eq(rs, l3_pid, "l3: setsid → child sid == child pid");
+
+    syscall(87, sid_path);
+
     return assert_summary();
 }
 

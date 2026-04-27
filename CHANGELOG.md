@@ -7,6 +7,113 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.0] — 2026-04-27
+
+PID-1 readiness minor — closes the three audit deferrals from
+[`docs/audit/2026-04-26-audit.md`](docs/audit/2026-04-26-audit.md)
+(MEDIUM-1, MEDIUM-3, LOW-3) with regression coverage. The QEMU
+PID-1 boot harness that the audit gated end-to-end M3 / L3
+validation on slips to 1.6.0; the syscall-level fixes themselves
+ship now so consumers (kybernet, AGNOS boot) can adopt them
+ahead of the harness.
+
+### Security
+
+- **[MEDIUM-1]** sd_notify peer-credential check now wired.
+  `notify_bind` enables `SO_PASSCRED` on the AF_UNIX/SOCK_DGRAM
+  socket; new `notify_try_recv_authenticated(fd, expected_pids)`
+  uses `recvmsg` + `SCM_CREDENTIALS` and drops any datagram whose
+  kernel-stamped sender PID isn't in the expected set. New
+  `init_notify_bind(init, path)` opt-in + `init_notify_fd(init)`
+  accessor; `init_poll_health` drains authenticated messages when
+  a notify fd is registered. Closes the spoof primitive flagged
+  against `READY=1` / `WATCHDOG=1` injection. `pid_in_vec` helper
+  in `src/notify.cyr`.
+- **[MEDIUM-3]** generic-`waitpid` reaper for orphans landed.
+  `argonaut_init_new` now calls
+  `prctl(PR_SET_CHILD_SUBREAPER, 1)` (non-fatal — kernels < 3.4
+  return EINVAL and we fall back to tracked-PID-only reaping).
+  `proc_table_reap_orphans()` drains `waitpid(-1, ..., WNOHANG)`
+  in a bounded loop (256-iter guard) and is called from
+  `init_reap_services` after the existing tracked reap. Resolves
+  the zombie accumulation gap when argonaut graduates from
+  systemd-delegate to true PID 1.
+- **[LOW-3]** `fork_exec_service` now `setsid`s the child and
+  redirects stdout / stderr to `/dev/null` after the existing
+  stdin redirect. Service log output stops mixing into argonaut's
+  stdio; signals on argonaut's controlling TTY (e.g. `^C` when
+  foregrounded for testing) no longer reach service children.
+  Production wiring should swap `/dev/null` for a journal fd.
+
+### Added
+
+- **`notify_try_recv_authenticated(fd, expected_pids)`** in
+  `src/notify.cyr` — `recvmsg` + `SCM_CREDENTIALS` peer-cred
+  variant of `notify_try_recv`.
+- **`pid_in_vec(pids, pid)`** in `src/notify.cyr` — linear
+  membership test for tiny pid sets.
+- **`proc_table_reap_orphans()`** in `src/process_mgmt.cyr` —
+  bounded `waitpid(-1, ..., WNOHANG)` drain.
+- **`init_notify_bind(init, path)` + `init_notify_fd(init)`** in
+  `src/init.cyr` — opt-in sd_notify socket binding for consumers
+  that want per-service authenticated `READY=1` / `WATCHDOG=1`
+  observation in their poll loop.
+- **`notify_fd` field on `ArgonautInit`** (offset 48). The struct
+  grows from 48 → 56 bytes; downstream consumers that allocate
+  the struct via `argonaut_init_new` pick this up transparently.
+- **3 new groups in `tests/tcyr/audit_findings.tcyr`** —
+  `audit-m1-notify-cred` (7 assertions, real socketpair +
+  PASSCRED + cross-PID drop test), `audit-m3-reaper-orphans` (3
+  assertions, fork-and-orphan grandchild collected via subreaper +
+  reap_orphans), `audit-l3-fork-setsid` (3 assertions, child
+  `getsid(0)` after `syscall(112)` equals own PID — platform
+  validation; end-to-end via QEMU in 1.6.0).
+
+### Changed
+
+- **27 test suites / 649 assertions** (was 27 / 637; +12 across
+  the M1 / M3 / L3 groups).
+- **Binary 650 KB → 652 KB** (`CYRIUS_DCE=1`) for the
+  `notify_try_recv_authenticated` recvmsg path, the orphan reaper
+  loop, the prctl + setsid + dup2 syscalls, and the
+  `init_notify_bind` opt-in surface.
+
+### Deferred to 1.6.0
+
+- **QEMU PID-1 boot harness** — minimal initramfs + kernel boot
+  + assertion harness that runs argonaut as PID 1 and validates
+  the M3 / L3 integration end-to-end (orphan reap under real
+  PID-1 reparenting; service detached from controlling TTY).
+  Tracked in [`docs/development/roadmap.md`](docs/development/roadmap.md).
+- **HIGH-1 follow-up** — real host resolver for non-loopback
+  health checks. The 1.4.0 fix rejects non-loopback targets
+  explicitly; the resolver restores the feature surface.
+
+### Verified
+
+- `cyrius lint` clean across `src/*.cyr`, `tests/tcyr/*.tcyr`,
+  `tests/bcyr/*.bcyr`.
+- `cyrius fmt --check` clean across all sources.
+- `cyrius deps --verify` → 2 verified, 0 failed.
+- Full test sweep: 27 suites, 649 assertions, 0 failures.
+- `CYRIUS_DCE=1 cyrius build` produces 652584-byte ELF;
+  `./build/argonaut` exits 0 with the standard sakshi span trace.
+
+### Notes
+
+- The audit-1.4.0 disposition table claimed M1's helper shipped
+  unwired in 1.4.0. It hadn't actually landed — 1.5.0 ships both
+  the helper and the `init_poll_health` wiring in one go.
+- The `lib/process.cyr` `exec_env` Str/cstr quirk noted in
+  `tests/tcyr/health_exec.tcyr` (Str pointers passed where the
+  kernel wants `char*`) blocks unit-level shell-exec testing of
+  the L3 fix path. The audit explicitly gated this on the QEMU
+  harness; the 1.5.0 L3 regression test validates the platform
+  setsid syscall directly. Filing the `exec_env` cleanup as a
+  stdlib upstream issue is on the 1.6.0 plate.
+
+---
+
 ## [1.4.0] — 2026-04-26
 
 P(-1) hardening minor — full security audit cycle, CLAUDE.md split into

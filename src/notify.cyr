@@ -114,11 +114,67 @@ fn notify_bind(path) {
     # Set non-blocking
     syscall(72, fd, 4, 2048);  # fcntl F_SETFL O_NONBLOCK
 
+    # M1: enable SO_PASSCRED so recvmsg() with SCM_CREDENTIALS gives us
+    # the kernel-stamped sender credentials. notify_try_recv_authenticated
+    # below relies on this for the per-datagram peer-cred check.
+    var one[4];
+    store32(&one, 1);
+    syscall(54, fd, 1, 16, &one, 4);   # setsockopt(fd, SOL_SOCKET=1, SO_PASSCRED=16, &one, 4)
+
     return fd;
 }
 
 # Shared recv buffer — allocated once on first call
 var _notify_recv_buf = 0;
+
+# pid_in_vec — linear membership test for tiny pid sets (running services).
+fn pid_in_vec(pids, pid) {
+    if (pids == 0) { return 0; }
+    for (var i = 0; i < vec_len(pids); i = i + 1) {
+        if (vec_get(pids, i) == pid) { return 1; }
+    }
+    return 0;
+}
+
+# notify_try_recv_authenticated — M1 (sd_notify SO_PEERCRED check).
+# recvmsg() variant that requires the SCM_CREDENTIALS ancillary the
+# kernel attaches when SO_PASSCRED is enabled (notify_bind sets it).
+# Drops any datagram whose sender PID is NOT in the expected_pids vec —
+# blocks the spoofing primitive where a local attacker on the notify
+# socket fakes READY=1 / WATCHDOG=1 for a service they don't own.
+# Returns NotifyMessage ptr on accept; 0 on (no message OR rejected).
+fn notify_try_recv_authenticated(fd, expected_pids) {
+    if (_notify_recv_buf == 0) {
+        _notify_recv_buf = alloc(1024);
+    }
+    # iovec { base, len }
+    var iov[16];
+    store64(&iov, _notify_recv_buf);
+    store64(&iov + 8, 1024);
+    # control buffer for one SCM_CREDENTIALS (cmsghdr 16 + ucred 12, aligned to 32)
+    var ctrl[32];
+    memset(&ctrl, 0, 32);
+    # msghdr { name, namelen, iov, iovlen, control, controllen, flags }
+    var mh[56];
+    memset(&mh, 0, 56);
+    store64(&mh + 16, &iov);     # msg_iov
+    store64(&mh + 24, 1);        # msg_iovlen
+    store64(&mh + 32, &ctrl);    # msg_control
+    store64(&mh + 40, 32);       # msg_controllen
+    # recvmsg(fd, &mh, MSG_DONTWAIT=64)
+    var n = syscall(47, fd, &mh, 64);
+    if (n <= 0) { return 0; }
+    # Require an SCM_CREDENTIALS cmsg. Drop on missing/wrong type so a
+    # caller that forgets SO_PASSCRED can't slip messages through.
+    var ctrllen = load64(&mh + 40);
+    if (ctrllen < 16) { return 0; }
+    var cmsg_level = load32(&ctrl + 8);
+    var cmsg_type  = load32(&ctrl + 12);
+    if (cmsg_level != 1 || cmsg_type != 2) { return 0; }   # SOL_SOCKET=1, SCM_CREDENTIALS=2
+    var sender_pid = load32(&ctrl + 16);
+    if (pid_in_vec(expected_pids, sender_pid) == 0) { return 0; }
+    return notify_parse(_notify_recv_buf, n);
+}
 
 # Try to receive a notification without blocking.
 # Returns a NotifyMessage ptr, or 0 if no message available.

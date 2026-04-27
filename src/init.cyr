@@ -13,6 +13,7 @@ struct ArgonautInit {
     boot_started;        # epoch ms (0 = not started)
     boot_completed;      # epoch ms (0 = not completed)
     audit_log;           # libro AuditChain ptr
+    notify_fd;           # M1 — sd_notify socket fd, -1 = not bound
 }
 
 fn argonaut_init_new(config) {
@@ -46,14 +47,34 @@ fn argonaut_init_new(config) {
     store64(init + 24, 0);  # boot_started
     store64(init + 32, 0);  # boot_completed
     store64(init + 40, audit_log_new());  # audit_log
+    store64(init + 48, 0 - 1);            # notify_fd (M1) — opt-in via init_notify_bind
 
     proc_table_init();
+
+    # M3: enrol as a child subreaper so orphans whose original parents
+    # exited get reparented to argonaut (rather than the literal PID 1
+    # under a systemd-delegate consumer). Non-fatal — kernels predating
+    # PR_SET_CHILD_SUBREAPER (Linux < 3.4) just return EINVAL and we
+    # continue with tracked-PID reaping only.
+    syscall(157, 36, 1, 0, 0, 0);   # SYS_prctl(PR_SET_CHILD_SUBREAPER=36, 1)
 
     sakshi_span_exit();
     return init;
 }
 
 fn init_audit_log(init) { return load64(init + 40); }
+fn init_notify_fd(init) { return load64(init + 48); }
+
+# init_notify_bind — opt-in sd_notify socket binding (M1).
+# Consumers (kybernet, AGNOS PID-1 boot) call this to enable
+# authenticated notify polling. Returns the fd or -1 on bind failure.
+# notify_bind enables SO_PASSCRED so init_poll_health's drain loop
+# can verify SCM_CREDENTIALS sender PIDs.
+fn init_notify_bind(init, path) {
+    var fd = notify_bind(path);
+    store64(init + 48, fd);
+    return fd;
+}
 
 # =========================================================================
 # Boot step management
@@ -419,6 +440,11 @@ fn init_restart_service(init, name, stop_timeout_ms) {
 
 fn init_reap_services(init) {
     var exited = proc_table_reap();
+    # M3: drain orphans whose original parents exited (services that
+    # re-fork, daemons whose parents exit). Tracked PIDs handled above;
+    # this catches anything reparented to us via PR_SET_CHILD_SUBREAPER
+    # (or our PID-1 status, when graduated).
+    proc_table_reap_orphans();
     var results = vec_new();
 
     for (var i = 0; i < vec_len(exited); i = i + 1) {
@@ -611,6 +637,28 @@ fn init_poll_health(init, tracker) {
                 }
                 vec_push(results, result);
             }
+        }
+    }
+
+    # M1: drain authenticated sd_notify messages for running services.
+    # SO_PEERCRED check via SCM_CREDENTIALS drops any datagram whose
+    # sender PID isn't in the running-services set, blocking the spoof
+    # vector once /run/argonaut is reachable. For 1.5.0 we consume +
+    # discard the verified messages; full READY/WATCHDOG/MAINPID
+    # propagation into managed state ships with the QEMU PID-1 harness.
+    var nfd = load64(init + 48);
+    if (nfd > 0) {
+        var expected = vec_new();
+        for (var j = 0; j < vec_len(keys); j = j + 1) {
+            var msj = map_get(svc_map, vec_get(keys, j));
+            var pidj = managed_svc_pid(msj);
+            if (pidj > 0 && managed_svc_state(msj) == STATE_RUNNING) {
+                vec_push(expected, pidj);
+            }
+        }
+        for (var dg = 0; dg < 32; dg = dg + 1) {
+            var nm = notify_try_recv_authenticated(nfd, expected);
+            if (nm == 0) { break; }
         }
     }
 
