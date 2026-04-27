@@ -2,7 +2,7 @@
 include "tests/test_header.cyr"
 fn main() {
     alloc_init();
-test_group("edge-validate");
+    test_group("edge-validate");
     # --- Edge boot ---
     var cmds = configure_readonly_rootfs();
     assert_eq(vec_len(cmds), 5, "rootfs 5 cmds");
@@ -14,7 +14,7 @@ test_group("edge-validate");
 
     assert_eq(verify_rootfs_integrity(str_from(""), str_from("/dev/x"), hash), 0, "verity empty dev");
     assert_eq(verify_rootfs_integrity(str_from("/dev/x"), str_from("/dev/y"),
-        str_from("short")), 0, "verity short hash");
+    str_from("short")), 0, "verity short hash");
     assert_eq(verify_rootfs_integrity(str_from("/tmp/x"), str_from("/dev/y"), hash), 0, "verity bad dev");
 
     assert(validate_device_path(str_from("/dev/sda1")), "devpath ok");

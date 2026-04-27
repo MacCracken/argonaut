@@ -6,9 +6,11 @@
 
 ## Version
 
-**1.4.0** (in flight — P(-1) hardening pass: docs/audit/2026-04-26-audit.md
-cycle, CLAUDE.md split into durable rules + this state.md, regression
-tests added for audit findings).
+**1.4.0** (shipped 2026-04-26 — P(-1) hardening minor:
+docs/audit/2026-04-26-audit.md cycle, CLAUDE.md split into durable
+rules + this state.md, eight audit findings landed with regression
+tests, three deferred to 1.5.0 (PID-1 readiness minor) with helpers
+in place).
 
 **1.3.0** (shipped 2026-04-26 — toolchain + dep bump. Cyrius 4.5.0 → 5.7.5;
 libro 1.0.3 → 2.0.5 (single-module `dist/libro.cyr`); manifest
@@ -25,14 +27,19 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **641 KB** statically linked ELF x86_64 (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`)
-- Was 378 KB at 1.2.0; +263 KB at 1.3.0 for libro 2.0's signing /
-  anchoring / merkle / streaming surface + the patra dep
+- **650 KB** statically linked ELF x86_64 (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`)
+- Was 378 KB at 1.2.0, 641 KB at 1.3.0; +9 KB at 1.4.0 for the
+  audit-finding validation helpers (`is_hex64`,
+  `validate_mapper_name`, `is_localhost_target`),
+  `read_pid_file_safe`, and the tightened HTTP path / status parsing
 - Dead-code floor: ~1430 unreachable functions NOPed under DCE
 
 ## Suites
 
-- **26 .tcyr suites / 607 assertions** (0 failures on cyrius 5.7.6)
+- **27 .tcyr suites / 637 assertions** (0 failures on cyrius 5.7.6).
+  +1 suite / +30 assertions over 1.3.0 for the audit regressions
+  (`tests/tcyr/audit_findings.tcyr` — HIGH-1 localhost gate, LOW-1
+  mapper-name predicate, LOW-2 hex64 predicate)
 - **2 .bcyr binaries** (`tests/bcyr/argonaut.bcyr`, `tests/bcyr/api.bcyr`)
 - **37 benchmarks** wired into `src/bench_main.cyr`; history in `bench-history.csv`
 
@@ -60,12 +67,20 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## In-flight
 
-- 1.4.0 P(-1) hardening pass — see `docs/audit/2026-04-26-audit.md`
+- **1.5.0 — PID-1 readiness minor.** Rolls up the three 1.4.0 audit
+  deferrals (M1 sd_notify SO_PEERCRED wiring, M3 generic-waitpid
+  reaper + subreaper enrol, L3 setsid + dup2 in
+  `fork_exec_service`) plus the QEMU PID-1 boot test harness that
+  M3/L3 are gated on. See [`roadmap.md`](roadmap.md) for scope.
+- Release-hook gap — 1.4.0 shipped without auto-bumping this file
+  (state.md was hand-corrected during 1.4.0 closeout). File against
+  the release workflow before 1.5.0.
 - Stale `src/test_*.cyr` stub cleanup (predate `tests/tcyr/`)
 - Patra `json_build/6` namespace upstream — file an issue against patra rather than continue working around it
 
 ## Recent shipped
 
+- **1.4.0** (2026-04-26) — P(-1) hardening minor; eight audit findings landed (2 HIGH, 1 MEDIUM, 5 LOW), three deferred to 1.5.0; CLAUDE.md durable / state.md volatile split
 - **1.3.0** (2026-04-26) — toolchain + dep bump (cyrius 5.7.5, libro 2.0.5, cyrius.cyml manifest, lockfile)
 - **1.2.0** (2026-04-13) — libro 1.0.2 SHA-256 audit chain integration, lifecycle audit recording, P(-1) scaffold hardening
 - **1.0.0** (2026-04-12) — first 1.x release; full pre-1.0 feature set complete

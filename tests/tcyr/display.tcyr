@@ -3,67 +3,67 @@ include "tests/test_header.cyr"
 fn main() {
     alloc_init();
 
-test_group("disp-types");
+    test_group("disp-types");
 
-# --- BootMode display all ---
-assert(streq(boot_mode_str(BOOT_SERVER), "server"), "bm srv");
-assert(streq(boot_mode_str(BOOT_DESKTOP), "desktop"), "bm dsk");
-assert(streq(boot_mode_str(BOOT_MINIMAL), "minimal"), "bm min");
-assert(streq(boot_mode_str(BOOT_EDGE), "edge"), "bm edg");
-assert(streq(boot_mode_str(BOOT_RECOVERY), "recovery"), "bm rec");
+    # --- BootMode display all ---
+    assert(streq(boot_mode_str(BOOT_SERVER), "server"), "bm srv");
+    assert(streq(boot_mode_str(BOOT_DESKTOP), "desktop"), "bm dsk");
+    assert(streq(boot_mode_str(BOOT_MINIMAL), "minimal"), "bm min");
+    assert(streq(boot_mode_str(BOOT_EDGE), "edge"), "bm edg");
+    assert(streq(boot_mode_str(BOOT_RECOVERY), "recovery"), "bm rec");
 
-# --- BootStage display all ---
-assert(streq(boot_stage_str(STAGE_MOUNT_FS), "mount-filesystems"), "bs mnt");
-assert(streq(boot_stage_str(STAGE_DEVICE_MGR), "start-device-manager"), "bs dev");
-assert(streq(boot_stage_str(STAGE_VERIFY_ROOTFS), "verify-rootfs"), "bs vfy");
-assert(streq(boot_stage_str(STAGE_SECURITY), "start-security"), "bs sec");
-assert(streq(boot_stage_str(STAGE_DATABASE), "start-database-services"), "bs db");
-assert(streq(boot_stage_str(STAGE_AGENT_RUNTIME), "start-agent-runtime"), "bs agt");
-assert(streq(boot_stage_str(STAGE_LLM_GATEWAY), "start-llm-gateway"), "bs llm");
-assert(streq(boot_stage_str(STAGE_MODEL_SERVICES), "start-model-services"), "bs mdl");
-assert(streq(boot_stage_str(STAGE_COMPOSITOR), "start-compositor"), "bs cmp");
-assert(streq(boot_stage_str(STAGE_SHELL), "start-shell"), "bs shl");
-assert(streq(boot_stage_str(STAGE_BOOT_COMPLETE), "boot-complete"), "bs fin");
+    # --- BootStage display all ---
+    assert(streq(boot_stage_str(STAGE_MOUNT_FS), "mount-filesystems"), "bs mnt");
+    assert(streq(boot_stage_str(STAGE_DEVICE_MGR), "start-device-manager"), "bs dev");
+    assert(streq(boot_stage_str(STAGE_VERIFY_ROOTFS), "verify-rootfs"), "bs vfy");
+    assert(streq(boot_stage_str(STAGE_SECURITY), "start-security"), "bs sec");
+    assert(streq(boot_stage_str(STAGE_DATABASE), "start-database-services"), "bs db");
+    assert(streq(boot_stage_str(STAGE_AGENT_RUNTIME), "start-agent-runtime"), "bs agt");
+    assert(streq(boot_stage_str(STAGE_LLM_GATEWAY), "start-llm-gateway"), "bs llm");
+    assert(streq(boot_stage_str(STAGE_MODEL_SERVICES), "start-model-services"), "bs mdl");
+    assert(streq(boot_stage_str(STAGE_COMPOSITOR), "start-compositor"), "bs cmp");
+    assert(streq(boot_stage_str(STAGE_SHELL), "start-shell"), "bs shl");
+    assert(streq(boot_stage_str(STAGE_BOOT_COMPLETE), "boot-complete"), "bs fin");
 
-# --- BootStage ord all ---
-assert(STAGE_MOUNT_FS < STAGE_DEVICE_MGR, "o 0<1");
-assert(STAGE_DEVICE_MGR < STAGE_VERIFY_ROOTFS, "o 1<2");
-assert(STAGE_VERIFY_ROOTFS < STAGE_SECURITY, "o 2<3");
-assert(STAGE_SECURITY < STAGE_DATABASE, "o 3<4");
-assert(STAGE_DATABASE < STAGE_AGENT_RUNTIME, "o 4<5");
-assert(STAGE_AGENT_RUNTIME < STAGE_LLM_GATEWAY, "o 5<6");
-assert(STAGE_LLM_GATEWAY < STAGE_MODEL_SERVICES, "o 6<7");
-assert(STAGE_MODEL_SERVICES < STAGE_COMPOSITOR, "o 7<8");
-assert(STAGE_COMPOSITOR < STAGE_SHELL, "o 8<9");
-assert(STAGE_SHELL < STAGE_BOOT_COMPLETE, "o 9<10");
+    # --- BootStage ord all ---
+    assert(STAGE_MOUNT_FS < STAGE_DEVICE_MGR, "o 0<1");
+    assert(STAGE_DEVICE_MGR < STAGE_VERIFY_ROOTFS, "o 1<2");
+    assert(STAGE_VERIFY_ROOTFS < STAGE_SECURITY, "o 2<3");
+    assert(STAGE_SECURITY < STAGE_DATABASE, "o 3<4");
+    assert(STAGE_DATABASE < STAGE_AGENT_RUNTIME, "o 4<5");
+    assert(STAGE_AGENT_RUNTIME < STAGE_LLM_GATEWAY, "o 5<6");
+    assert(STAGE_LLM_GATEWAY < STAGE_MODEL_SERVICES, "o 6<7");
+    assert(STAGE_MODEL_SERVICES < STAGE_COMPOSITOR, "o 7<8");
+    assert(STAGE_COMPOSITOR < STAGE_SHELL, "o 8<9");
+    assert(STAGE_SHELL < STAGE_BOOT_COMPLETE, "o 9<10");
 
-# --- ServiceState display all ---
-assert(streq(service_state_str(STATE_STOPPED), "stopped"), "ss stp");
-assert(streq(service_state_str(STATE_STARTING), "starting"), "ss str");
-assert(streq(service_state_str(STATE_RUNNING), "running"), "ss run");
-assert(streq(service_state_str(STATE_STOPPING), "stopping"), "ss stn");
-assert(streq(service_state_str(STATE_FAILED), "failed"), "ss fal");
+    # --- ServiceState display all ---
+    assert(streq(service_state_str(STATE_STOPPED), "stopped"), "ss stp");
+    assert(streq(service_state_str(STATE_STARTING), "starting"), "ss str");
+    assert(streq(service_state_str(STATE_RUNNING), "running"), "ss run");
+    assert(streq(service_state_str(STATE_STOPPING), "stopping"), "ss stn");
+    assert(streq(service_state_str(STATE_FAILED), "failed"), "ss fal");
 
-# --- ServiceState valid_transition comprehensive ---
-assert(valid_transition(STATE_STOPPED, STATE_STOPPED), "vt s=s");
-assert(valid_transition(STATE_STOPPED, STATE_STARTING), "vt s>t");
-# (Comprehensive state transitions tested in test_init)
+    # --- ServiceState valid_transition comprehensive ---
+    assert(valid_transition(STATE_STOPPED, STATE_STOPPED), "vt s=s");
+    assert(valid_transition(STATE_STOPPED, STATE_STARTING), "vt s>t");
+    # (Comprehensive state transitions tested in test_init)
 
-# --- ServiceType display all ---
-assert(streq(service_type_str(SVC_SIMPLE), "simple"), "st sim");
-assert(streq(service_type_str(SVC_FORKING), "forking"), "st frk");
-# SVC_ONESHOT tested in test_types
-assert_eq(SVC_SIMPLE, 0, "st d=0");
+    # --- ServiceType display all ---
+    assert(streq(service_type_str(SVC_SIMPLE), "simple"), "st sim");
+    assert(streq(service_type_str(SVC_FORKING), "forking"), "st frk");
+    # SVC_ONESHOT tested in test_types
+    assert_eq(SVC_SIMPLE, 0, "st d=0");
 
-# --- ShutdownType display all ---
-assert(streq(shutdown_type_str(SHUTDOWN_POWEROFF), "poweroff"), "sd po");
-assert(streq(shutdown_type_str(SHUTDOWN_REBOOT), "reboot"), "sd rb");
-assert(streq(shutdown_type_str(SHUTDOWN_HALT), "halt"), "sd ht");
-assert(streq(shutdown_type_str(SHUTDOWN_KEXEC), "kexec"), "sd kx");
+    # --- ShutdownType display all ---
+    assert(streq(shutdown_type_str(SHUTDOWN_POWEROFF), "poweroff"), "sd po");
+    assert(streq(shutdown_type_str(SHUTDOWN_REBOOT), "reboot"), "sd rb");
+    assert(streq(shutdown_type_str(SHUTDOWN_HALT), "halt"), "sd ht");
+    assert(streq(shutdown_type_str(SHUTDOWN_KEXEC), "kexec"), "sd kx");
 
-# (Enum values and landlock display tested in test_modules)
+    # (Enum values and landlock display tested in test_modules)
 
-# (Capability, runlevel, health, restart, resource tests in other suites)
+    # (Capability, runlevel, health, restart, resource tests in other suites)
 
     return assert_summary();
 }

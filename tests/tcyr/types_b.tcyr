@@ -2,66 +2,66 @@
 include "tests/test_header.cyr"
 fn main() {
     alloc_init();
-test_group("svc-cfg-rl");
-# --- Default services ---
-var min_v = default_services(BOOT_MINIMAL);
-assert_eq(vec_len(min_v), 1, "min 1 svc");
-assert(svcs_has_name(min_v, "daimon"), "min daimon");
+    test_group("svc-cfg-rl");
+    # --- Default services ---
+    var min_v = default_services(BOOT_MINIMAL);
+    assert_eq(vec_len(min_v), 1, "min 1 svc");
+    assert(svcs_has_name(min_v, "daimon"), "min daimon");
 
-var srv_v = default_services(BOOT_SERVER);
-assert_eq(vec_len(srv_v), 5, "srv 5 svcs");
-assert(svcs_has_name(srv_v, "postgres"), "srv postgres");
-assert(svcs_has_name(srv_v, "redis"), "srv redis");
-assert(svcs_has_name(srv_v, "ifran"), "srv ifran");
+    var srv_v = default_services(BOOT_SERVER);
+    assert_eq(vec_len(srv_v), 5, "srv 5 svcs");
+    assert(svcs_has_name(srv_v, "postgres"), "srv postgres");
+    assert(svcs_has_name(srv_v, "redis"), "srv redis");
+    assert(svcs_has_name(srv_v, "ifran"), "srv ifran");
 
-var dsk_v = default_services(BOOT_DESKTOP);
-assert_eq(vec_len(dsk_v), 7, "dsk 7 svcs");
-assert(svcs_has_name(dsk_v, "aethersafha"), "dsk comp");
-assert(svcs_has_name(dsk_v, "agnoshi"), "dsk shell");
+    var dsk_v = default_services(BOOT_DESKTOP);
+    assert_eq(vec_len(dsk_v), 7, "dsk 7 svcs");
+    assert(svcs_has_name(dsk_v, "aethersafha"), "dsk comp");
+    assert(svcs_has_name(dsk_v, "agnoshi"), "dsk shell");
 
-var edge_v = default_services(BOOT_EDGE);
-assert_eq(vec_len(edge_v), 1, "edge 1 svc");
-assert(1 - svcs_has_name(edge_v, "postgres"), "edge no pg");
+    var edge_v = default_services(BOOT_EDGE);
+    assert_eq(vec_len(edge_v), 1, "edge 1 svc");
+    assert(1 - svcs_has_name(edge_v, "postgres"), "edge no pg");
 
-assert_eq(vec_len(default_services(BOOT_RECOVERY)), 0, "rec 0 svcs");
+    assert_eq(vec_len(default_services(BOOT_RECOVERY)), 0, "rec 0 svcs");
 
-# --- Config defaults ---
-var cfg = argonaut_config_default();
-assert_eq(config_boot_mode(cfg), BOOT_DESKTOP, "cfg mode dsk");
-assert_eq(config_boot_timeout(cfg), 30000, "cfg boot timeout");
-assert_eq(config_shutdown_timeout(cfg), 10000, "cfg sd timeout");
-assert_eq(config_log_console(cfg), 1, "cfg log console");
-assert_eq(config_verify_boot(cfg), 1, "cfg verify boot");
+    # --- Config defaults ---
+    var cfg = argonaut_config_default();
+    assert_eq(config_boot_mode(cfg), BOOT_DESKTOP, "cfg mode dsk");
+    assert_eq(config_boot_timeout(cfg), 30000, "cfg boot timeout");
+    assert_eq(config_shutdown_timeout(cfg), 10000, "cfg sd timeout");
+    assert_eq(config_log_console(cfg), 1, "cfg log console");
+    assert_eq(config_verify_boot(cfg), 1, "cfg verify boot");
 
-# --- Edge boot config ---
-var ec = edge_config_default();
-assert_eq(load64(ec), 1, "ec readonly");
-assert_eq(load64(ec + 8), 1, "ec luks");
-assert_eq(load64(ec + 24), 3000, "ec max boot");
+    # --- Edge boot config ---
+    var ec = edge_config_default();
+    assert_eq(load64(ec), 1, "ec readonly");
+    assert_eq(load64(ec + 8), 1, "ec luks");
+    assert_eq(load64(ec + 24), 3000, "ec max boot");
 
-# --- Restart config ---
-var rc = restart_config_default();
-assert_eq(backoff_delay(rc, 0), 1000, "bo 0");
-assert_eq(backoff_delay(rc, 1), 2000, "bo 1");
-assert_eq(backoff_delay(rc, 2), 4000, "bo 2");
-assert_eq(backoff_delay(rc, 3), 8000, "bo 3");
-assert_eq(backoff_delay(rc, 4), 16000, "bo 4");
-assert_eq(backoff_delay(rc, 5), 30000, "bo 5 cap");
-assert(1 - restart_limit_exceeded(rc, 4), "lim ok 4");
-assert(restart_limit_exceeded(rc, 5), "lim hit 5");
+    # --- Restart config ---
+    var rc = restart_config_default();
+    assert_eq(backoff_delay(rc, 0), 1000, "bo 0");
+    assert_eq(backoff_delay(rc, 1), 2000, "bo 1");
+    assert_eq(backoff_delay(rc, 2), 4000, "bo 2");
+    assert_eq(backoff_delay(rc, 3), 8000, "bo 3");
+    assert_eq(backoff_delay(rc, 4), 16000, "bo 4");
+    assert_eq(backoff_delay(rc, 5), 30000, "bo 5 cap");
+    assert(1 - restart_limit_exceeded(rc, 4), "lim ok 4");
+    assert(restart_limit_exceeded(rc, 5), "lim hit 5");
 
-# --- Runlevel ---
-assert_eq(runlevel_to_boot_mode(RL_CONSOLE), BOOT_SERVER, "rl c->srv");
-assert_eq(runlevel_to_boot_mode(RL_GRAPHICAL), BOOT_DESKTOP, "rl g->dsk");
-assert_eq(runlevel_to_boot_mode(RL_EDGE), BOOT_EDGE, "rl e->edge");
-assert_eq(boot_mode_to_runlevel(BOOT_SERVER), RL_CONSOLE, "srv->c");
-assert_eq(boot_mode_to_runlevel(BOOT_DESKTOP), RL_GRAPHICAL, "dsk->g");
-assert_eq(runlevel_level(RL_EMERGENCY), 0, "rl lvl 0");
-assert_eq(runlevel_level(RL_CONSOLE), 3, "rl lvl 3");
-assert_eq(runlevel_level(RL_GRAPHICAL), 5, "rl lvl 5");
-assert_eq(runlevel_level(RL_EDGE), 8, "rl lvl 8");
-assert(streq(runlevel_str(RL_EMERGENCY), "emergency"), "rl str em");
-assert(streq(runlevel_str(RL_CONSOLE), "console"), "rl str con");
+    # --- Runlevel ---
+    assert_eq(runlevel_to_boot_mode(RL_CONSOLE), BOOT_SERVER, "rl c->srv");
+    assert_eq(runlevel_to_boot_mode(RL_GRAPHICAL), BOOT_DESKTOP, "rl g->dsk");
+    assert_eq(runlevel_to_boot_mode(RL_EDGE), BOOT_EDGE, "rl e->edge");
+    assert_eq(boot_mode_to_runlevel(BOOT_SERVER), RL_CONSOLE, "srv->c");
+    assert_eq(boot_mode_to_runlevel(BOOT_DESKTOP), RL_GRAPHICAL, "dsk->g");
+    assert_eq(runlevel_level(RL_EMERGENCY), 0, "rl lvl 0");
+    assert_eq(runlevel_level(RL_CONSOLE), 3, "rl lvl 3");
+    assert_eq(runlevel_level(RL_GRAPHICAL), 5, "rl lvl 5");
+    assert_eq(runlevel_level(RL_EDGE), 8, "rl lvl 8");
+    assert(streq(runlevel_str(RL_EMERGENCY), "emergency"), "rl str em");
+    assert(streq(runlevel_str(RL_CONSOLE), "console"), "rl str con");
 
     return assert_summary();
 }

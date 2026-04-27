@@ -3,81 +3,81 @@ include "tests/test_header.cyr"
 fn main() {
     alloc_init();
 
-test_group("init-state-deps");
+    test_group("init-state-deps");
 
-# --- State transitions ---
-assert(valid_transition(STATE_STOPPED, STATE_STARTING), "s->st");
-assert(valid_transition(STATE_STARTING, STATE_RUNNING), "st->r");
-assert(valid_transition(STATE_STARTING, STATE_FAILED), "st->f");
-assert(valid_transition(STATE_RUNNING, STATE_STOPPING), "r->sp");
-assert(valid_transition(STATE_RUNNING, STATE_FAILED), "r->f");
-assert(valid_transition(STATE_STOPPING, STATE_STOPPED), "sp->s");
-assert(valid_transition(STATE_FAILED, STATE_STARTING), "f->st");
-assert(valid_transition(STATE_FAILED, STATE_STOPPED), "f->s");
-assert(1 - valid_transition(STATE_STOPPED, STATE_RUNNING), "s->r bad");
-assert(valid_transition(STATE_RUNNING, STATE_RUNNING), "same ok");
+    # --- State transitions ---
+    assert(valid_transition(STATE_STOPPED, STATE_STARTING), "s->st");
+    assert(valid_transition(STATE_STARTING, STATE_RUNNING), "st->r");
+    assert(valid_transition(STATE_STARTING, STATE_FAILED), "st->f");
+    assert(valid_transition(STATE_RUNNING, STATE_STOPPING), "r->sp");
+    assert(valid_transition(STATE_RUNNING, STATE_FAILED), "r->f");
+    assert(valid_transition(STATE_STOPPING, STATE_STOPPED), "sp->s");
+    assert(valid_transition(STATE_FAILED, STATE_STARTING), "f->st");
+    assert(valid_transition(STATE_FAILED, STATE_STOPPED), "f->s");
+    assert(1 - valid_transition(STATE_STOPPED, STATE_RUNNING), "s->r bad");
+    assert(valid_transition(STATE_RUNNING, STATE_RUNNING), "same ok");
 
-# --- Init lifecycle ---
-var init = minimal_init();
-assert(init_set_service_state(init, "daimon", STATE_STARTING), "daimon->st");
-assert_eq(init_get_service_state(init, "daimon"), STATE_STARTING, "is starting");
-assert(init_set_service_state(init, "daimon", STATE_RUNNING), "daimon->r");
-assert(init_set_service_state(init, "daimon", STATE_STOPPING), "daimon->sp");
-assert(init_set_service_state(init, "daimon", STATE_STOPPED), "daimon->s");
+    # --- Init lifecycle ---
+    var init = minimal_init();
+    assert(init_set_service_state(init, "daimon", STATE_STARTING), "daimon->st");
+    assert_eq(init_get_service_state(init, "daimon"), STATE_STARTING, "is starting");
+    assert(init_set_service_state(init, "daimon", STATE_RUNNING), "daimon->r");
+    assert(init_set_service_state(init, "daimon", STATE_STOPPING), "daimon->sp");
+    assert(init_set_service_state(init, "daimon", STATE_STOPPED), "daimon->s");
 
-# Invalid: stopped -> running
-var init2 = minimal_init();
-assert(1 - init_set_service_state(init2, "daimon", STATE_RUNNING), "s->r blocked");
-assert_eq(init_get_service_state(init2, "daimon"), STATE_STOPPED, "still stopped");
+    # Invalid: stopped -> running
+    var init2 = minimal_init();
+    assert(1 - init_set_service_state(init2, "daimon", STATE_RUNNING), "s->r blocked");
+    assert_eq(init_get_service_state(init2, "daimon"), STATE_STOPPED, "still stopped");
 
-# Unknown service
-assert(1 - init_set_service_state(init2, "nope", STATE_RUNNING), "unknown blocked");
+    # Unknown service
+    assert(1 - init_set_service_state(init2, "nope", STATE_RUNNING), "unknown blocked");
 
-# --- Dependency blocking ---
-var sinit = server_init();
-assert(1 - init_set_service_state(sinit, "llm-gateway", STATE_STARTING), "gw blocked");
-init_set_service_state(sinit, "postgres", STATE_STARTING);
-init_set_service_state(sinit, "postgres", STATE_RUNNING);
-init_set_service_state(sinit, "redis", STATE_STARTING);
-init_set_service_state(sinit, "redis", STATE_RUNNING);
-init_set_service_state(sinit, "daimon", STATE_STARTING);
-assert(1 - init_set_service_state(sinit, "llm-gateway", STATE_STARTING), "gw still blocked");
-init_set_service_state(sinit, "daimon", STATE_RUNNING);
-assert(init_set_service_state(sinit, "llm-gateway", STATE_STARTING), "gw allowed");
+    # --- Dependency blocking ---
+    var sinit = server_init();
+    assert(1 - init_set_service_state(sinit, "llm-gateway", STATE_STARTING), "gw blocked");
+    init_set_service_state(sinit, "postgres", STATE_STARTING);
+    init_set_service_state(sinit, "postgres", STATE_RUNNING);
+    init_set_service_state(sinit, "redis", STATE_STARTING);
+    init_set_service_state(sinit, "redis", STATE_RUNNING);
+    init_set_service_state(sinit, "daimon", STATE_STARTING);
+    assert(1 - init_set_service_state(sinit, "llm-gateway", STATE_STARTING), "gw still blocked");
+    init_set_service_state(sinit, "daimon", STATE_RUNNING);
+    assert(init_set_service_state(sinit, "llm-gateway", STATE_STARTING), "gw allowed");
 
-# --- Dependency resolution ---
-var chain = vec_new();
-var dc = vec_new();
-vec_push(dc, str_from("b"));
-vec_push(chain, dummy_svc(str_from("c"), dc));
-var db = vec_new();
-vec_push(db, str_from("a"));
-vec_push(chain, dummy_svc(str_from("b"), db));
-vec_push(chain, dummy_svc(str_from("a"), 0));
-var order = resolve_service_order(chain);
-assert(order != 0, "chain resolves");
-assert_eq(order_pos(order, "a"), 0, "a first");
-assert_eq(order_pos(order, "b"), 1, "b second");
-assert_eq(order_pos(order, "c"), 2, "c third");
+    # --- Dependency resolution ---
+    var chain = vec_new();
+    var dc = vec_new();
+    vec_push(dc, str_from("b"));
+    vec_push(chain, dummy_svc(str_from("c"), dc));
+    var db = vec_new();
+    vec_push(db, str_from("a"));
+    vec_push(chain, dummy_svc(str_from("b"), db));
+    vec_push(chain, dummy_svc(str_from("a"), 0));
+    var order = resolve_service_order(chain);
+    assert(order != 0, "chain resolves");
+    assert_eq(order_pos(order, "a"), 0, "a first");
+    assert_eq(order_pos(order, "b"), 1, "b second");
+    assert_eq(order_pos(order, "c"), 2, "c third");
 
-# Cycle detection
-var cyc = vec_new();
-var da = vec_new();
-vec_push(da, str_from("b"));
-vec_push(cyc, dummy_svc(str_from("a"), da));
-var dbb = vec_new();
-vec_push(dbb, str_from("a"));
-vec_push(cyc, dummy_svc(str_from("b"), dbb));
-assert_eq(resolve_service_order(cyc), 0, "cycle detected");
+    # Cycle detection
+    var cyc = vec_new();
+    var da = vec_new();
+    vec_push(da, str_from("b"));
+    vec_push(cyc, dummy_svc(str_from("a"), da));
+    var dbb = vec_new();
+    vec_push(dbb, str_from("a"));
+    vec_push(cyc, dummy_svc(str_from("b"), dbb));
+    assert_eq(resolve_service_order(cyc), 0, "cycle detected");
 
-# Desktop order
-var dsk = default_services(BOOT_DESKTOP);
-var dsk_o = resolve_service_order(dsk);
-assert(dsk_o != 0, "dsk resolves");
-assert(order_pos(dsk_o, "daimon") < order_pos(dsk_o, "llm-gateway"), "dai<gw");
-assert(order_pos(dsk_o, "daimon") < order_pos(dsk_o, "aethersafha"), "dai<comp");
-assert(order_pos(dsk_o, "aethersafha") < order_pos(dsk_o, "agnoshi"), "comp<shell");
-assert(order_pos(dsk_o, "llm-gateway") < order_pos(dsk_o, "ifran"), "gw<ifran");
+    # Desktop order
+    var dsk = default_services(BOOT_DESKTOP);
+    var dsk_o = resolve_service_order(dsk);
+    assert(dsk_o != 0, "dsk resolves");
+    assert(order_pos(dsk_o, "daimon") < order_pos(dsk_o, "llm-gateway"), "dai<gw");
+    assert(order_pos(dsk_o, "daimon") < order_pos(dsk_o, "aethersafha"), "dai<comp");
+    assert(order_pos(dsk_o, "aethersafha") < order_pos(dsk_o, "agnoshi"), "comp<shell");
+    assert(order_pos(dsk_o, "llm-gateway") < order_pos(dsk_o, "ifran"), "gw<ifran");
 
     return assert_summary();
 }
