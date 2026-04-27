@@ -89,7 +89,7 @@ fn notify_bind(path) {
     sys_unlink(str_data(path));
 
     # Ensure parent directory exists
-    sys_mkdir("/run/argonaut", 493);  # 0o755
+    sys_mkdir("/run/argonaut", 448);  # 0o700 — argonaut-internal; no other process should traverse
 
     # socket(AF_UNIX=1, SOCK_DGRAM=2, 0)
     var fd = syscall(41, 1, 2, 0);

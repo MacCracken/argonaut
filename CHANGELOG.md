@@ -7,6 +7,156 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.4.0] — 2026-04-26
+
+P(-1) hardening minor — full security audit cycle, CLAUDE.md split into
+durable rules + a `docs/development/state.md` volatile snapshot, eight
+audit findings landed with regression tests. CVE / 0day landscape
+research scoped to 2025–2026 init / service-manager class
+(systemd-coredump CVE-2025-4598, snap-confine × systemd-tmpfiles
+CVE-2026-3888, systemd-machined CVE-2026-4105, sd_notify spoofing
+class). Two HIGH, three MEDIUM (one shipped, two deferred to 1.4.x
+patches with helpers in place), four LOW. Full report in
+[`docs/audit/2026-04-26-audit.md`](docs/audit/2026-04-26-audit.md).
+
+### Security
+
+- **[HIGH-1]** `src/health.cyr` — `check_tcp_connect` and HTTP_GET
+  hardcoded the destination address to `127.0.0.1` while pretending
+  to consult the caller-supplied host argument. Health checks against
+  any non-loopback target silently probed localhost, so the supervisor
+  could mark a service "healthy" based on an unrelated localhost
+  responder. Until a resolver lands, both paths now reject any host
+  string that isn't `127.0.0.1`, `localhost`, or `::1` — explicit
+  failure with a "non-loopback target" message instead of a
+  misleading green badge. New helper: `is_localhost_target(host)` in
+  `src/security.cyr`.
+- **[HIGH-2]** `src/notify.cyr:92` — `sys_mkdir("/run/argonaut", 493)`
+  created the notify-socket parent directory mode 0o755, leaving the
+  AF_UNIX sd_notify socket reachable by every local user. Combined
+  with the absence of a peer-credential check (MEDIUM-1, see below),
+  any local process could inject fake `READY=1` / `MAINPID=<pid>`
+  notifications. Mode tightened to **0o700** (`sys_mkdir(...,
+  448)`). One-line fix; argonaut is the only consumer of
+  `/run/argonaut`.
+- **[MEDIUM-2]** `src/health.cyr` HTTP_GET — the request `path` was a
+  raw pointer into the URL Str's data buffer with no NUL terminator,
+  then passed to `str_builder_add_cstr` which reads until NUL. The
+  GET line therefore contained undefined trailing bytes whenever the
+  URL had a path component. Now heap-allocates a `path_len + 1`
+  buffer, `memcpy`s the path bytes, NUL-terminates, and emits the
+  copy.
+- **[MEDIUM-4]** `src/process_mgmt.cyr` `read_pid_file` — same class
+  as CVE-2025-4598's PID-recycling primitive, applied to argonaut's
+  pid-file consumption: file content was trusted without verifying
+  the file's owner uid or rejecting world-writable mode bits. New
+  `read_pid_file_safe(path, expected_uid)` opens via `sys_open` +
+  `SYS_FSTAT`, rejects mode `& 0o022` and `st_uid != expected_uid`
+  before parsing the integer. The legacy `read_pid_file` now
+  delegates with `expected_uid = -1` (skip-check) so existing
+  callers keep working; production wiring should pass the service's
+  expected runtime uid in a 1.4.x patch.
+- **[LOW-1]** `src/edge_boot.cyr` `unlock_luks` — `mapped_name` was
+  checked for non-empty only, allowing slashes / control bytes to
+  flow through into the `/dev/mapper/<name>` path. Now validated
+  against `[a-zA-Z0-9_-]{1,32}` via the new `validate_mapper_name`
+  predicate (matches yukti's sysfs-basename rule).
+- **[LOW-2]** `src/edge_boot.cyr` `verify_rootfs_integrity` —
+  `root_hash` length was checked but its character set wasn't.
+  Cryptsetup's positional argv catches this in practice; defense in
+  depth says reject early. New `is_hex64(s)` predicate enforces
+  exactly 64 chars in `[0-9a-fA-F]`.
+- **[LOW-4]** `src/process_mgmt.cyr` `load_env_file` — env files
+  larger than the 8 KB read buffer were silently truncated.
+  `lseek(SEEK_END)` probe in front of the read fails with a
+  distinct return code when the file exceeds 8 KB, so misconfigured
+  env files don't ship as silently-half-loaded.
+- **[LOW-5]** `src/health.cyr` HTTP response status parser — code
+  positions were hardcoded to offsets 9–11, valid only for
+  `HTTP/1.x ` prefixes. Now finds the first space and parses the
+  three digits after it; any HTTP/x.y prefix length parses
+  correctly.
+
+### Deferred to 1.4.x patches (regression in audit, helper unwired)
+
+- **[MEDIUM-1]** sd_notify peer-credential check via `recvmsg` +
+  `SCM_CREDENTIALS`. Demoted from HIGH-class once HIGH-2 closed the
+  socket-reachability primitive. The protocol-level
+  `SO_PEERCRED` / `NotifyAccess=` model is still the right
+  defense-in-depth; helper function lands in 1.4.x with the
+  `init_poll_health` wiring.
+- **[MEDIUM-3]** Generic-`waitpid` reaper for orphans. Required only
+  when argonaut runs as actual PID 1 (the AGNOS boot path); dormant
+  under the systemd-delegate consumer. Plumbing
+  (`prctl(PR_SET_CHILD_SUBREAPER)` enrol + a `waitpid(-1, ...,
+  WNOHANG)` sweep) lands together with the QEMU-PID-1 boot test
+  harness in 1.4.x.
+- **[LOW-3]** `fork_exec_service` `setsid` + stdout/stderr `dup2`.
+  Same gating as MEDIUM-3 — needs the QEMU harness to validate
+  that decoupling from the controlling TTY doesn't break the
+  current test fixtures.
+
+### Added
+
+- **`docs/audit/2026-04-26-audit.md`** — full P(-1) audit report
+  (external CVE landscape, 12 findings, disposition table,
+  re-audit triggers).
+- **`docs/development/state.md`** — live state snapshot (version,
+  toolchain, binary size, suites, bench snapshot, dep pins,
+  consumers, in-flight). Refreshed every release per the
+  CLAUDE.md split.
+- **`tests/tcyr/audit_findings.tcyr`** — 30 assertions across 3
+  groups (HIGH-1 localhost gate, LOW-1 mapper-name predicate,
+  LOW-2 hex64 predicate). Each finding has at least one positive
+  + one negative case; HIGH-1 has end-to-end
+  `execute_health_check` assertions confirming non-loopback TCP
+  and HTTP targets return `passed = 0` with the explicit
+  "non-loopback" message.
+- **Validation helpers** in `src/security.cyr`: `is_hex64(s)`,
+  `validate_mapper_name(name)`, `is_localhost_target(host)`. All
+  pure / reusable.
+- **`read_pid_file_safe(path, expected_uid)`** in
+  `src/process_mgmt.cyr` — the M4 fix; legacy `read_pid_file`
+  delegates.
+
+### Changed
+
+- **`CLAUDE.md` rewritten** to the agnosticos
+  `example_claude.md` template — durable rules only (project
+  identity, goal, key principles, hard constraints, P(-1) /
+  work loop / security hardening / closeout process, cyrius
+  conventions, CI/release rules, doc tree). Volatile state moved
+  to `docs/development/state.md`. Adds the new
+  CLAUDE-file-mandated `Rules (Hard Constraints)` and `Cyrius
+  Conventions` sections; the `# DO NOT` block from prior
+  versions is folded into the new Rules section.
+- **`docs/development/state.md` is now the live state snapshot**
+  and the source of truth for current version / binary size /
+  suite count / bench snapshot / consumer status.
+- **27 test suites / 637 assertions** (was 26 / 607; +1 suite
+  + 30 assertions for the audit regressions).
+- **Binary 641 KB → 650 KB** (CYRIUS_DCE=1) for the validation
+  helpers + `read_pid_file_safe` + tightened HTTP path / status
+  parsing.
+
+### Verified
+
+- Pre-audit baseline `bench-history.csv` label
+  `v1.4.0-pre-audit`; post-audit `v1.4.0-post-audit`. All 29
+  benchmarks within noise band; no regressions, small
+  improvements on `init_new_desktop` (27 → 26 µs),
+  `mark_all_steps_complete` (79 → 76 µs), `plan_shutdown_*`
+  (22 → 20 µs).
+- `cyrius lint` clean across `src/*.cyr`, `tests/tcyr/*.tcyr`,
+  `tests/bcyr/*.bcyr`.
+- `cyrius fmt --check` clean across `src/*.cyr`.
+- `cyrius deps --verify` → "2 verified, 0 failed".
+- Full test sweep: 27 suites, 637 assertions, 0 failures.
+- Smoke test: "argonaut: all systems nominal" on
+  `./build/argonaut`.
+
+---
+
 ## [1.3.0] — 2026-04-26
 
 Toolchain + dep bump release. Cyrius 4.5.0 → 5.7.5, libro 1.0.3 →

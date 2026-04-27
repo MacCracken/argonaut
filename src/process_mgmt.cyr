@@ -12,6 +12,14 @@
 # Lines starting with # are comments. Empty lines ignored.
 # Values optionally quoted with " or '.
 fn load_env_file(path, env_map) {
+    # L4: reject silently-truncated env files. file_read_all caps the
+    # read at the buffer size; >8 KB env files would silently lose
+    # the tail. Probe the file size first via lseek and fail loud.
+    var probe_fd = sys_open(str_data(path), 0, 0);
+    if (probe_fd < 0) { return 0 - 1; }
+    var sz = syscall(SYS_LSEEK, probe_fd, 0, 2);   # SEEK_END
+    sys_close(probe_fd);
+    if (sz > 8191) { return 0 - 2; }   # distinct error: file too large
     var buf = alloc(8192);
     var n = file_read_all(str_data(path), buf, 8192);
     if (n <= 0) { return 0 - 1; }
@@ -381,17 +389,49 @@ fn proc_table_reap() {
 # =========================================================================
 
 fn read_pid_file(path) {
-    var buf[64];
-    var n = file_read_all(str_data(path), &buf, 63);
-    if (n <= 0) { return 0 - 1; }
-    store8(&buf + n, 0);  # null terminate
+    return read_pid_file_safe(path, 0 - 1);   # -1 owner = back-compat: skip ownership check
+}
 
-    # Parse integer from trimmed content
+# read_pid_file_safe — M4 (CVE-2025-4598 class).
+# Reads the pid integer from `path` AND verifies the file is owned
+# by `expected_uid` and is not group/other-writable. Pass -1 as
+# `expected_uid` to skip the ownership check (legacy callers).
+# Pass 0 to require root ownership; the production wiring should
+# pass the service's expected runtime uid.
+fn read_pid_file_safe(path, expected_uid) {
+    var fd = sys_open(str_data(path), 0, 0);   # O_RDONLY
+    if (fd < 0) { return 0 - 1; }
+
+    # fstat(fd, &stat_buf) — stat layout via the cyrius 5.x Stat enum
+    var stat_buf[144];
+    var st_ret = syscall(SYS_FSTAT, fd, &stat_buf);
+    if (st_ret < 0) {
+        sys_close(fd);
+        return 0 - 1;
+    }
+    var st_mode = load32(&stat_buf + 24);
+    var st_uid  = load32(&stat_buf + 28);
+
+    # Reject group- or other-writable pid files (mode & 0o022 = 18 dec).
+    if ((st_mode & 18) != 0) {
+        sys_close(fd);
+        return 0 - 1;
+    }
+    # Reject ownership mismatch when caller specified an expected uid.
+    if (expected_uid >= 0 && st_uid != expected_uid) {
+        sys_close(fd);
+        return 0 - 1;
+    }
+
+    # Read pid integer.
+    var buf[64];
+    var n = sys_read(fd, &buf, 63);
+    sys_close(fd);
+    if (n <= 0) { return 0 - 1; }
+    store8(&buf + n, 0);
+
     var pid = str_to_int(str_new(&buf, n));
     if (pid <= 0) { return 0 - 1; }
-
-    # Check process is alive
     if (process_alive(pid) == 0) { return 0 - 1; }
-
     return pid;
 }

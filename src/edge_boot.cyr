@@ -73,7 +73,7 @@ fn verify_rootfs_integrity(root_device, hash_device, root_hash) {
     if (str_len(root_device) == 0 || str_len(hash_device) == 0 || str_len(root_hash) == 0) {
         return 0;
     }
-    if (str_len(root_hash) != 64) { return 0; }
+    if (is_hex64(root_hash) == 0) { return 0; }   # L2: hex-charset enforcement
     if (validate_device_path(root_device) == 0) { return 0; }
     if (validate_device_path(hash_device) == 0) { return 0; }
 
@@ -104,7 +104,7 @@ fn verify_rootfs_integrity(root_device, hash_device, root_hash) {
 
 fn unlock_luks(encrypted_device, mapped_name) {
     if (validate_device_path(encrypted_device) == 0) { return 0; }
-    if (str_len(mapped_name) == 0) { return 0; }
+    if (validate_mapper_name(mapped_name) == 0) { return 0; }   # L1: charset/length check
 
     var cmds = vec_new();
     var cmd = safe_cmd_new(str_from("cryptsetup"));

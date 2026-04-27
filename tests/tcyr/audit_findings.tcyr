@@ -1,0 +1,101 @@
+# audit_findings.tcyr — regression tests for the 1.4.0 P(-1) audit
+# (docs/audit/2026-04-26-audit.md). Each `test_group` block targets one
+# finding; comments cite the severity tag.
+
+include "tests/test_header.cyr"
+
+fn main() {
+    alloc_init();
+
+    # =====================================================================
+    # is_hex64 — defensive validation of dm-verity root hashes (LOW-2)
+    # =====================================================================
+    test_group("audit-low2-is_hex64");
+
+    var h_lower = str_from("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    var h_upper = str_from("0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF");
+    var h_mixed = str_from("0123456789aBcDeF0123456789AbCdEf0123456789abcdef0123456789ABCDEF");
+    assert_eq(is_hex64(h_lower), 1, "is_hex64: 64 lowercase hex");
+    assert_eq(is_hex64(h_upper), 1, "is_hex64: 64 uppercase hex");
+    assert_eq(is_hex64(h_mixed), 1, "is_hex64: mixed-case hex");
+
+    var h_short = str_from("deadbeef");
+    var h_long = str_from("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef00");
+    assert_eq(is_hex64(h_short), 0, "is_hex64: rejects short");
+    assert_eq(is_hex64(h_long),  0, "is_hex64: rejects long");
+
+    var h_dash = str_from("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc--ef");
+    var h_inj  = str_from("--injected-arg-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-dead");
+    assert_eq(is_hex64(h_dash), 0, "is_hex64: rejects '-' in hash");
+    assert_eq(is_hex64(h_inj),  0, "is_hex64: rejects argv-injection-shaped");
+
+    var h_space = str_from("0123456789abcdef 123456789abcdef0123456789abcdef0123456789abcdef");
+    assert_eq(is_hex64(h_space), 0, "is_hex64: rejects whitespace");
+
+    # =====================================================================
+    # validate_mapper_name — LUKS mapped-device alias (LOW-1)
+    # =====================================================================
+    test_group("audit-low1-mapper_name");
+
+    assert_eq(validate_mapper_name(str_from("agnos-data")),    1, "mapper: agnos-data");
+    assert_eq(validate_mapper_name(str_from("verified_root")), 1, "mapper: verified_root");
+    assert_eq(validate_mapper_name(str_from("a")),             1, "mapper: 1-char ok");
+
+    assert_eq(validate_mapper_name(str_from("")),               0, "mapper: rejects empty");
+    assert_eq(validate_mapper_name(str_from("../../../etc")),   0, "mapper: rejects ../");
+    assert_eq(validate_mapper_name(str_from("foo/bar")),        0, "mapper: rejects slash");
+    assert_eq(validate_mapper_name(str_from("foo bar")),        0, "mapper: rejects space");
+    assert_eq(validate_mapper_name(str_from("foo;rm")),         0, "mapper: rejects ';'");
+    assert_eq(validate_mapper_name(str_from("name\nwith\nnl")), 0, "mapper: rejects newline");
+
+    var long_name = str_from("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");   # 33 chars
+    assert_eq(validate_mapper_name(long_name), 0, "mapper: rejects > 32 chars");
+
+    # =====================================================================
+    # is_localhost_target — health-check loopback gate (HIGH-1)
+    # =====================================================================
+    test_group("audit-high1-localhost_target");
+
+    assert_eq(is_localhost_target(str_from("127.0.0.1")), 1, "localhost: 127.0.0.1");
+    assert_eq(is_localhost_target(str_from("localhost")), 1, "localhost: localhost");
+    assert_eq(is_localhost_target(str_from("::1")),       1, "localhost: ::1");
+
+    assert_eq(is_localhost_target(str_from("example.com")),    0, "localhost: rejects example.com");
+    assert_eq(is_localhost_target(str_from("10.0.0.1")),       0, "localhost: rejects RFC1918");
+    assert_eq(is_localhost_target(str_from("192.168.1.1")),    0, "localhost: rejects RFC1918 #2");
+    assert_eq(is_localhost_target(str_from("localhost.attacker.com")), 0, "localhost: rejects subdomain trick");
+    assert_eq(is_localhost_target(str_from("")),               0, "localhost: rejects empty");
+
+    # End-to-end: execute_health_check with HC_TCP_CONNECT against a
+    # non-loopback target must report passed == 0 with the rejection
+    # message — the HIGH-1 silent-localhost-fallback class is gone.
+    var hc = alloc(sizeof(HealthCheck));
+    store64(hc, HC_TCP_CONNECT);
+    store64(hc + 8, str_from("example.com"));
+    store64(hc + 16, 80);
+    store64(hc + 24, 0);
+    store64(hc + 32, 100);
+    store64(hc + 40, 0);
+    var r = execute_health_check(str_from("svc"), hc, 0);
+    assert_eq(load64(r + 16), 0, "high1: TCP non-localhost target = not passed");
+    var msg_a = load64(r + 32);
+    assert(str_contains(msg_a, str_from("non-loopback")), "high1: TCP message names finding");
+
+    # And HTTP_GET against a non-loopback URL.
+    var hc2 = alloc(sizeof(HealthCheck));
+    store64(hc2,      HC_HTTP_GET);
+    store64(hc2 + 8,  str_from("http://example.com/healthz"));
+    store64(hc2 + 16, 0);
+    store64(hc2 + 24, 0);
+    store64(hc2 + 32, 100);
+    store64(hc2 + 40, 0);
+    var r2 = execute_health_check(str_from("svc"), hc2, 0);
+    assert_eq(load64(r2 + 16), 0, "high1: HTTP non-localhost = not passed");
+    var msg_b = load64(r2 + 32);
+    assert(str_contains(msg_b, str_from("non-loopback")), "high1: HTTP message names finding");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

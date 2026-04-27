@@ -123,3 +123,58 @@ fn verify_emergency_auth(config, password_input) {
     # Constant-time comparison to prevent timing oracle
     return constant_time_eq_str(hash_str, stored_hash);
 }
+
+# =========================================================================
+# Validation helpers (1.4.0 audit findings)
+# =========================================================================
+
+# is_hex64: 1 if s is exactly 64 hex characters [0-9a-fA-F], 0 otherwise.
+# Used to validate dm-verity root hashes before passing to veritysetup.
+# Defense-in-depth — argv-positional cryptsetup catches non-hex in
+# practice, but the project standard is to reject early. (LOW-2.)
+fn is_hex64(s) {
+    if (str_len(s) != 64) { return 0; }
+    var data = str_data(s);
+    for (var i = 0; i < 64; i = i + 1) {
+        var c = load8(data + i);
+        var ok = 0;
+        if (c >= 48 && c <= 57)  { ok = 1; }       # 0-9
+        if (c >= 65 && c <= 70)  { ok = 1; }       # A-F
+        if (c >= 97 && c <= 102) { ok = 1; }       # a-f
+        if (ok == 0) { return 0; }
+    }
+    return 1;
+}
+
+# validate_mapper_name: device-mapper alias must match
+# [a-zA-Z0-9_-]{1,32} — same predicate yukti uses for sysfs basenames.
+# Defends LUKS open against control-byte / slash injection in the
+# /dev/mapper/<name> path. (LOW-1.)
+fn validate_mapper_name(name) {
+    var len = str_len(name);
+    if (len == 0 || len > 32) { return 0; }
+    var data = str_data(name);
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(data + i);
+        var ok = 0;
+        if (c >= 48 && c <= 57)  { ok = 1; }
+        if (c >= 65 && c <= 90)  { ok = 1; }
+        if (c >= 97 && c <= 122) { ok = 1; }
+        if (c == 45 || c == 95)  { ok = 1; }  # - _
+        if (ok == 0) { return 0; }
+    }
+    return 1;
+}
+
+# is_localhost_target: 1 if the host string is one of the loopback
+# literals argonaut ships health checks against. The current TCP /
+# HTTP check implementation hardcodes 127.0.0.1; this predicate is
+# the gate that turns the silent-localhost-fallback (HIGH-1) into
+# an explicit acceptance condition. Non-loopback targets get a
+# clear rejection rather than a misleading "healthy" verdict.
+fn is_localhost_target(host) {
+    if (str_eq(host, str_from("127.0.0.1"))) { return 1; }
+    if (str_eq(host, str_from("localhost"))) { return 1; }
+    if (str_eq(host, str_from("::1")))       { return 1; }
+    return 0;
+}

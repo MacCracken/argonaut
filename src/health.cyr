@@ -127,11 +127,19 @@ fn execute_health_check(service_name, hc, pid) {
     var message = 0;
 
     if (check_type == HC_TCP_CONNECT) {
-        passed = check_tcp_connect(target, port, timeout);
-        if (passed) {
-            message = str_from("TCP connect succeeded");
+        # H1: hardcoded localhost — explicitly reject non-loopback targets
+        # so the supervisor never gets a misleading "healthy" verdict.
+        # Full DNS / dotted-quad resolution lands in a future minor.
+        if (is_localhost_target(target) == 0) {
+            passed = 0;
+            message = str_from("TCP check rejects non-loopback target (1.4.0)");
         } else {
-            message = str_from("TCP connect failed");
+            passed = check_tcp_connect(target, port, timeout);
+            if (passed) {
+                message = str_from("TCP connect succeeded");
+            } else {
+                message = str_from("TCP connect failed");
+            }
         }
     } elif (check_type == HC_PROCESS_ALIVE) {
         passed = check_process_alive(pid);
@@ -174,12 +182,35 @@ fn execute_health_check(service_name, hc, pid) {
             }
         }
 
-        # Extract path (default "/")
+        # H1: extract host and reject non-loopback. The legacy code
+        # ignored the host argument and unconditionally probed
+        # 127.0.0.1; a non-localhost target would have silently
+        # received a localhost-based verdict. Until the resolver
+        # lands, reject anything but the loopback literals.
+        var host_str = str_new(url_data + offset, host_end - offset);
+        if (is_localhost_target(host_str) == 0) {
+            var result = alloc(sizeof(HealthCheckResult));
+            store64(result, service_name);
+            store64(result + 8, str_from(health_check_type_str(check_type)));
+            store64(result + 16, 0);
+            store64(result + 24, 0);
+            store64(result + 32, str_from("HTTP check rejects non-loopback host (1.4.0)"));
+            store64(result + 40, now_ms());
+            return result;
+        }
+
+        # M2: heap-copy + NUL-terminate the path. The legacy code
+        # set `path` to a raw pointer into url_data, then passed it
+        # to str_builder_add_cstr which reads until NUL — undefined
+        # for Str-data pointers (not guaranteed NUL-terminated).
         var path = "/";
         var path_len = 1;
         if (slash_pos < url_len) {
-            path = url_data + slash_pos;
             path_len = url_len - slash_pos;
+            var path_buf = alloc(path_len + 1);
+            memcpy(path_buf, url_data + slash_pos, path_len);
+            store8(path_buf + path_len, 0);
+            path = path_buf;
         }
 
         # TCP connect
@@ -219,15 +250,22 @@ fn execute_health_check(service_name, hc, pid) {
                     var n = syscall(0, fd, &resp, 511);  # read
                     if (n > 0) {
                         store8(&resp + n, 0);
-                        # Parse "HTTP/1.x NNN" — status code at bytes 9-11
+                        # L5: parse status by finding the first space
+                        # rather than hardcoding offsets 9-11. Handles
+                        # any HTTP/x.y prefix length without misreading.
                         if (n >= 12 && load8(&resp) == 72 && load8(&resp + 1) == 84) {
-                            # Starts with "HT" (HTTP)
                             var status_code = 0;
-                            var d0 = load8(&resp + 9) - 48;
-                            var d1 = load8(&resp + 10) - 48;
-                            var d2 = load8(&resp + 11) - 48;
-                            if (d0 >= 0 && d0 <= 9 && d1 >= 0 && d1 <= 9 && d2 >= 0 && d2 <= 9) {
-                                status_code = d0 * 100 + d1 * 10 + d2;
+                            var sp = 0 - 1;
+                            for (var si = 0; si < n; si = si + 1) {
+                                if (load8(&resp + si) == 32) { sp = si; break; }
+                            }
+                            if (sp >= 0 && sp + 3 < n) {
+                                var d0 = load8(&resp + sp + 1) - 48;
+                                var d1 = load8(&resp + sp + 2) - 48;
+                                var d2 = load8(&resp + sp + 3) - 48;
+                                if (d0 >= 0 && d0 <= 9 && d1 >= 0 && d1 <= 9 && d2 >= 0 && d2 <= 9) {
+                                    status_code = d0 * 100 + d1 * 10 + d2;
+                                }
                             }
                             if (status_code >= 200 && status_code < 400) {
                                 passed = 1;
