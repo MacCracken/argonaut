@@ -13,6 +13,16 @@ cyrius-*.tar.gz
 *.tar.gz
 SHA256SUMS
 
+# qemu-user core dumps — `qemu-aarch64` writes
+# `qemu_<exe>_<ts>_<pid>.core` to cwd when an emulated binary
+# segfaults. Common during 1.5.4+ aarch64 sweeps (the documented
+# `audit_extended` known-failure under qemu segfaults at
+# `persist: open succeeds`). Also catch the generic patterns so
+# any future native core dumps don't sneak in.
+qemu_*.core
+core
+core.*
+
 # IDE / editor
 .idea/
 .vscode/
