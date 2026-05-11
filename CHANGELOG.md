@@ -7,6 +7,123 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.3] — 2026-05-10
+
+Libro extended surface — pulls forward libro 2.x audit-chain
+features argonaut had only consumed at the in-memory chain level
+(`src/audit.cyr`'s `audit_log_*` wrappers). New `src/audit_ext.cyr`
+adds opt-in **PatraStore persistence** (record-by-record
+write-through, chain replayed from disk on open), **snapshot
+signing** (Ed25519 / ML-DSA-65 / hybrid via libro `proof_build_signed`),
+and **merkle integrity** (root, inclusion proof, consistency proof
+wrappers). `argonaut_init_new` wires the persistent log when
+`config.audit_persist` is set; `init_audit_record` /
+`init_audit_flush` dispatch helpers route through the wrapper or
+the in-memory chain automatically.
+
+### Added
+
+- **`src/audit_ext.cyr`** — 1.5.3's headline module. Public API:
+  - **Persistence**: `audit_log_open_persistent(path)`,
+    `audit_log_record_persistent(pal, service, event_type)`,
+    `audit_log_record_persistent_with_agent(...)`,
+    `audit_log_flush_persistent(pal)`,
+    `audit_log_close_persistent(pal)`,
+    `audit_log_verify_persistent(pal)`. Backed by libro
+    `patrastore_*`; chain replay uses `chain_from_entries`
+    (preserves original `prev_hash` linkage — does NOT recompute,
+    so verify holds across reopens).
+  - **Merkle**: `audit_log_merkle_root(chain)`,
+    `audit_log_inclusion_proof(chain, index)`,
+    `audit_log_verify_inclusion(proof)`,
+    `audit_log_consistency_proof(chain, old_size)`,
+    `audit_log_verify_consistency(cp)`.
+  - **Signing**: `audit_log_keygen()` (Ed25519),
+    `audit_log_keygen_mldsa()` (FIPS 204 PQ),
+    `audit_log_keygen_hybrid()` (AND-mode),
+    `audit_log_sign_snapshot(chain, sk)`,
+    `audit_log_verify_snapshot(proof, vk)`,
+    `audit_log_signer_verifying_key(sk)`. Per-entry signing
+    deliberately not surfaced — sign at snapshot boundaries
+    (shutdown, runlevel transitions) for fixed cost vs.
+    per-record overhead.
+  - **`PersistentAuditLog` struct** (offsets +0 chain, +8 store,
+    +16 path; `pal_chain` / `pal_store` / `pal_path` accessors).
+    No `#derive(accessors)` — keeps the cu fn-count headroom.
+  - **`audit_ext_init()`** — one-shot guarded init for
+    `fl_init` / `ed25519_init` / `patra_init`. Called lazily by
+    every entry point in the module; safe to invoke directly
+    from consumer code if eager init is desired.
+- **`tests/tcyr/audit_extended.tcyr`** — 47 assertions across 4
+  groups: `audit-ext-merkle` (root, inclusion 0 + 3, oob,
+  empty-chain edges, consistency 2→4, cp oob); `audit-ext-sign-ed25519`
+  (keygen, snapshot sign, own-vk verify, wrong-vk reject, empty
+  / 0-input edges); `audit-ext-persist` (open / record / close /
+  reopen / replay / verify / extend / sign-over-replayed);
+  `audit-ext-init-integration` (default config = in-memory;
+  `config_set_audit_persist(1)` + `config_set_audit_path` →
+  persistent wrapper attached; replay round-trips through
+  `argonaut_init_new`).
+
+### Changed
+
+- **`src/types.cyr`** — `ArgonautConfig` grows 64 → 80 bytes:
+  `audit_persist` (offset +64, default 0) and `audit_path`
+  (offset +72, default `/var/log/argonaut.patra`). New
+  accessors `config_audit_persist` / `config_audit_path` and
+  fluent setters `config_set_audit_persist` /
+  `config_set_audit_path`. Default config keeps persistence
+  off — opt-in via the setters.
+- **`src/init.cyr`** — `ArgonautInit` grows 56 → 64 bytes with
+  a new `persistent_audit` slot at offset +56 (0 when in-memory
+  only). `argonaut_init_new` opens the PatraStore-backed log
+  when `config.audit_persist == 1`; on open failure (read-only
+  fs, bad path) it falls back to in-memory and leaves the
+  wrapper slot at 0 — init still completes, callers detect via
+  `init_audit_log_persistent(init) == 0`. `init + 40`
+  (existing `audit_log` chain ptr) stays a valid AuditChain
+  regardless of persistence mode (preserves backward
+  compatibility with consumers using `init_audit_log`).
+- **`src/main.cyr` + `tests/test_header.cyr`** —
+  `src/audit_ext.cyr` added to the include chain after
+  `src/audit.cyr` (audit_ext consumes the event-type enum +
+  severity mapping from audit.cyr).
+
+### Stats
+
+- **28 .tcyr suites / 720 assertions** pass under cyrius 5.10.34
+  (was 27 / 673 at 1.5.2; +1 suite / +47 assertions for
+  `audit_extended.tcyr`).
+- **Binary ~995 KB → ~1.00 MB** (1023544 bytes,
+  `CYRIUS_DCE=1`). +5 KB for the audit_ext wrapper module +
+  ArgonautInit slot growth + config fields; libro's
+  patra/sign/merkle paths were already linked (libro 2.6.2
+  pulls them transitively even when unused, eliminated by DCE
+  unless reachable from main).
+- Dead-code floor: ~2,140 unreachable functions NOPed under DCE
+  (was ~2,268 at 1.5.2 — the new module brings ~128 previously-
+  dead libro fns into the reachable set).
+
+### Deferred
+
+- **WitnessAnchor publishing** — libro's `anchor_new(tree, chain)`
+  + `anchor_with_prev(a, prev)` builds the cross-snapshot anchor
+  primitive. Out of scope for 1.5.3 (no consumer with a
+  cross-boot trust-pin mechanism yet); pick up when an AGNOS
+  federation protocol surfaces (libro's own roadmap calls this
+  out under "Ecosystem-blocked").
+- **Signing-key rotation / persistence** — current shape generates
+  an ephemeral signing key per `audit_log_keygen()` call.
+  Long-running argonaut sessions across boots will want a
+  durable key (libro `signing_key_from_seed` + sigil key
+  storage). Lands when kybernet wires a real key-management
+  surface; argonaut's API stays stable.
+- **Per-entry signing** — explicitly omitted per the 1.5.3
+  design note ("sign at snapshot boundaries, not on every
+  record"). Re-evaluate only if a consumer surfaces an
+  individual-entry trust requirement libro snapshot signing
+  can't cover.
+
 ## [1.5.2] — 2026-05-10
 
 Audit follow-up patch. Closes the 1.4.0 HIGH-1 deferral (the

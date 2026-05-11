@@ -22,6 +22,7 @@ include "src/security.cyr"
 include "src/systemd.cyr"
 include "src/tmpfiles.cyr"
 include "src/audit.cyr"
+include "src/audit_ext.cyr"
 include "src/init.cyr"
 
 # =========================================================================

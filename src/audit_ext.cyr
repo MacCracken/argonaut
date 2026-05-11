@@ -1,0 +1,258 @@
+# audit_ext.cyr — extended audit-chain surface (1.5.3)
+#
+# Wraps the libro 2.6.2 features `src/audit.cyr` doesn't expose:
+#
+#   - **Persistence** via PatraStore — opt-in record-by-record
+#     write-through; chain replayed from disk on open.
+#   - **Snapshot signing** — produces a libro IntegrityProof
+#     (merkle tree-head signed with Ed25519 / ML-DSA-65 / hybrid)
+#     for tamper-evident shutdown / runlevel records. Per-entry
+#     signing intentionally not surfaced — sign at snapshot
+#     boundaries, not on every record.
+#   - **Merkle integrity** — root hash, inclusion proofs,
+#     consistency proofs over a chain snapshot.
+#
+# Argonaut's `src/audit.cyr` `audit_log_*` API stays in-memory by
+# default (the no-extra-surface path most consumers want). Opt-in
+# to persistence / signing via `argonaut_config` flags wired in
+# `argonaut_init_new` (see `src/init.cyr`).
+
+# =========================================================================
+# Subsystem init — libro persistence + signing paths need these one-shot
+# inits before first use. argonaut's existing `audit_log_new` /
+# `audit_log_record` paths don't (chain itself is allocator-only).
+# Guarded with a static so callers can invoke `audit_ext_init` lazily
+# without worrying about double-init.
+
+var _audit_ext_inited = 0;
+
+fn audit_ext_init() {
+    if (_audit_ext_inited == 1) { return 0; }
+    fl_init();
+    ed25519_init();
+    patra_init();
+    _audit_ext_inited = 1;
+    return 0;
+}
+
+# =========================================================================
+# PersistentAuditLog — chain + backing PatraStore
+# =========================================================================
+
+# PersistentAuditLog layout (no #derive — keeps the fn-count
+# headroom; consumers access via load64 with explicit offsets):
+#   +0   chain   — in-memory AuditChain (libro chain_*)
+#   +8   store   — PatraStore handle
+#   +16  path    — Str (diagnostics only)
+struct PersistentAuditLog {
+    chain;
+    store;
+    path;
+}
+
+fn pal_chain(pal) { return load64(pal); }
+fn pal_store(pal) { return load64(pal + 8); }
+fn pal_path(pal)  { return load64(pal + 16); }
+
+# audit_log_open_persistent(path) — open or create a PatraStore-backed
+# audit log. On reopen, existing entries are loaded into the chain
+# (verified-on-load via `chain_from_entries` → `chain_verify`).
+# Returns the wrapper pointer or 0 on failure.
+fn audit_log_open_persistent(path) {
+    audit_ext_init();
+    var store = patrastore_open(path);
+    if (store == 0) { return 0; }
+
+    # Replay any prior entries — chain_from_entries preserves their
+    # original prev_hash linkage; we do NOT call chain_append on each
+    # (would recompute prev_hash and break verify).
+    var loaded = patrastore_load_all(store);
+    var chain = 0;
+    if (vec_len(loaded) == 0) {
+        chain = chain_new();
+    } else {
+        chain = chain_from_entries(loaded);
+    }
+
+    var pal = alloc(sizeof(PersistentAuditLog));
+    store64(pal,      chain);
+    store64(pal + 8,  store);
+    store64(pal + 16, path);
+    return pal;
+}
+
+# audit_log_record_persistent(pal, service, event_type) — append to both
+# the in-memory chain and the on-disk store. Returns the libro entry
+# pointer (for further wrapping / signing); caller is responsible for
+# flushing if durability across crashes is required.
+fn audit_log_record_persistent(pal, service, event_type) {
+    var chain = load64(pal);
+    var store = load64(pal + 8);
+    var severity = audit_event_severity(event_type);
+    var source = str_from("argonaut");
+    var action = str_from(event_type_str(event_type));
+    var details = str_from(service);
+    var e = chain_append(chain, severity, source, action, details);
+    patrastore_append(store, e);
+    return e;
+}
+
+# audit_log_record_persistent_with_agent — same shape with explicit
+# agent_id; matches the in-memory `audit_log_record_with_agent` API.
+fn audit_log_record_persistent_with_agent(pal, service, event_type, agent) {
+    var chain = load64(pal);
+    var store = load64(pal + 8);
+    var severity = audit_event_severity(event_type);
+    var source = str_from("argonaut");
+    var action = str_from(event_type_str(event_type));
+    var details = str_from(service);
+    var e = chain_append_with_agent(chain, severity, source, action, details,
+    str_from(agent));
+    patrastore_append(store, e);
+    return e;
+}
+
+# audit_log_flush_persistent(pal) — durability barrier. Forces any
+# buffered patra pages to disk. Pair with shutdown-step records before
+# poweroff so the audit chain reflects the final state.
+fn audit_log_flush_persistent(pal) {
+    return patrastore_flush(load64(pal + 8));
+}
+
+fn audit_log_close_persistent(pal) {
+    if (pal == 0) { return 0; }
+    patrastore_flush(load64(pal + 8));
+    patrastore_close(load64(pal + 8));
+    return 0;
+}
+
+# audit_log_verify_persistent(pal) — re-verify the chain integrity
+# against the in-memory state. Returns 1 on success, 0 on tampered or
+# broken linkage. Wraps libro's `chain_verify` (which returns 0 = OK,
+# nonzero ptr = error) and inverts to argonaut convention.
+fn audit_log_verify_persistent(pal) {
+    if (chain_verify(load64(pal)) == 0) { return 1; }
+    return 0;
+}
+
+# =========================================================================
+# Merkle integrity — snapshot-time
+# =========================================================================
+# Wraps libro's merkle tree over a chain's current entries. The tree
+# is built on demand (not maintained incrementally); cost is O(N) per
+# call, fine at shutdown / runlevel boundaries where this is invoked.
+
+# audit_log_merkle_root(chain) — return the hex SHA-256 merkle root
+# over the chain's entries, or 0 if the chain is empty.
+fn audit_log_merkle_root(chain) {
+    audit_ext_init();
+    var entries = chain_entries(chain);
+    if (vec_len(entries) == 0) { return 0; }
+    var tree = merkle_build(entries);
+    if (tree == 0) { return 0; }
+    return merkle_tree_root(tree);
+}
+
+# audit_log_inclusion_proof(chain, index) — produce an inclusion
+# proof for entry `index`. Returns the proof pointer (verify with
+# `audit_log_verify_inclusion`) or 0 if out of range / empty chain.
+fn audit_log_inclusion_proof(chain, index) {
+    audit_ext_init();
+    var entries = chain_entries(chain);
+    if (vec_len(entries) == 0) { return 0; }
+    if (index < 0) { return 0; }
+    if (index >= vec_len(entries)) { return 0; }
+    var tree = merkle_build(entries);
+    if (tree == 0) { return 0; }
+    return merkle_inclusion_proof(tree, index);
+}
+
+fn audit_log_verify_inclusion(proof) {
+    if (proof == 0) { return 0; }
+    return merkle_verify_proof(proof);
+}
+
+# audit_log_consistency_proof(chain, old_size) — produce a
+# consistency proof between the current chain and a prior snapshot
+# of length `old_size`. Used by consumers that pin a chain head
+# across boots and need to prove the new chain extends the old.
+fn audit_log_consistency_proof(chain, old_size) {
+    audit_ext_init();
+    var entries = chain_entries(chain);
+    if (old_size < 0 || old_size > vec_len(entries)) { return 0; }
+    var tree = merkle_build(entries);
+    if (tree == 0) { return 0; }
+    return merkle_consistency_proof(tree, old_size);
+}
+
+fn audit_log_verify_consistency(cp) {
+    if (cp == 0) { return 0; }
+    return merkle_verify_consistency(cp);
+}
+
+# =========================================================================
+# Snapshot signing
+# =========================================================================
+# Sign the merkle tree-head of the current chain. Produces an
+# IntegrityProof (libro `proof_build_signed`) bundling tree-head,
+# signature, verifying-key hex, and entries. Verify with
+# `audit_log_verify_snapshot`.
+#
+# Per-entry signing is deliberately omitted from argonaut's
+# surface: snapshot signing covers the same threat model (tampered
+# chain rejected at verify) at fixed cost, while per-entry signing
+# pays the signature-overhead on every record.
+
+# audit_log_keygen() — Ed25519. Most consumers; smallest footprint.
+fn audit_log_keygen() {
+    audit_ext_init();
+    return signing_key_generate();
+}
+
+# audit_log_keygen_mldsa() — ML-DSA-65 (FIPS 204 post-quantum).
+# ~4 KB sk / ~2 KB pk / ~3 KB sig — switch when PQ-readiness matters.
+fn audit_log_keygen_mldsa() {
+    audit_ext_init();
+    return signing_key_generate_mldsa();
+}
+
+# audit_log_keygen_hybrid() — Ed25519 + ML-DSA-65 in AND-mode.
+# Verifies require BOTH algorithms to validate — safe migration
+# path while one half stays classical.
+fn audit_log_keygen_hybrid() {
+    audit_ext_init();
+    return signing_key_generate_hybrid();
+}
+
+# audit_log_sign_snapshot(chain, sk) — build a signed IntegrityProof
+# over the current chain. Caller stores or transmits; verify side
+# uses the matching verifying key from `signing_key_verifying_hex(sk)`.
+fn audit_log_sign_snapshot(chain, sk) {
+    audit_ext_init();
+    if (sk == 0) { return 0; }
+    return proof_build_signed(chain, sk);
+}
+
+# audit_log_verify_snapshot(proof, vk) — verify the signed
+# IntegrityProof's tree-head signature + structural integrity.
+# Returns 1 on success, 0 on signature mismatch / structural error.
+# libro's `proof_verify_signed` returns a `ProofVerification`
+# struct with per-aspect booleans (tree-head sig, chain integrity,
+# root match, inclusions, optional consistency / anchor); we
+# collapse to a single boolean via `pv_is_valid`. Callers that
+# need per-aspect breakdown can reach in directly via libro.
+fn audit_log_verify_snapshot(proof, vk) {
+    if (proof == 0) { return 0; }
+    if (vk == 0) { return 0; }
+    var pv = proof_verify_signed(proof, vk);
+    if (pv == 0) { return 0; }
+    return pv_is_valid(pv);
+}
+
+# audit_log_signer_verifying_key(sk) — extract the verifying-key
+# pointer matching `sk`. Stable wrapper so consumers don't reach
+# into the libro signing_key struct directly.
+fn audit_log_signer_verifying_key(sk) {
+    if (sk == 0) { return 0; }
+    return verifying_key_from_signing(sk);
+}

@@ -12,8 +12,9 @@ struct ArgonautInit {
     services;            # map of name (cstr) -> ManagedService ptr
     boot_started;        # epoch ms (0 = not started)
     boot_completed;      # epoch ms (0 = not completed)
-    audit_log;           # libro AuditChain ptr
+    audit_log;           # libro AuditChain ptr (in-memory)
     notify_fd;           # M1 — sd_notify socket fd, -1 = not bound
+    persistent_audit;    # 1.5.3 — PersistentAuditLog wrapper, 0 = in-memory only
 }
 
 fn argonaut_init_new(config) {
@@ -46,7 +47,29 @@ fn argonaut_init_new(config) {
     store64(init + 16, svc_map);
     store64(init + 24, 0);  # boot_started
     store64(init + 32, 0);  # boot_completed
-    store64(init + 40, audit_log_new());  # audit_log
+
+    # Audit log: in-memory by default; opt-in PatraStore persistence
+    # (1.5.3) when `config.audit_persist == 1`. `init + 40` is always
+    # a usable AuditChain pointer (callers using `init_audit_log`
+    # see chain semantics regardless of persistence); `init + 56` is
+    # the wrapper ptr (0 if in-memory) used by the dispatch helpers
+    # `init_audit_record` / `init_audit_flush`.
+    if (config_audit_persist(config) == 1) {
+        var pal = audit_log_open_persistent(config_audit_path(config));
+        if (pal == 0) {
+            # Persistence requested but failed (read-only fs, bad path);
+            # fall back to in-memory so init still completes. Caller
+            # checks `init_audit_log_persistent(init) == 0` to detect.
+            store64(init + 40, audit_log_new());
+            store64(init + 56, 0);
+        } else {
+            store64(init + 40, pal_chain(pal));
+            store64(init + 56, pal);
+        }
+    } else {
+        store64(init + 40, audit_log_new());
+        store64(init + 56, 0);
+    }
     store64(init + 48, 0 - 1);            # notify_fd (M1) — opt-in via init_notify_bind
 
     proc_table_init();
@@ -64,6 +87,30 @@ fn argonaut_init_new(config) {
 
 fn init_audit_log(init) { return load64(init + 40); }
 fn init_notify_fd(init) { return load64(init + 48); }
+
+# 1.5.3 — opt-in persistent audit log accessors.
+# `init_audit_log_persistent(init)` returns the PersistentAuditLog
+# wrapper ptr (0 if config.audit_persist was off or open failed).
+# Use `init_audit_record(init, ...)` to record events that should be
+# write-through to disk; it dispatches to in-memory or PatraStore
+# automatically. `init_audit_flush(init)` forces fsync if persistent
+# (no-op otherwise) — call before shutdown so the chain reflects the
+# final state.
+fn init_audit_log_persistent(init) { return load64(init + 56); }
+
+fn init_audit_record(init, service, event_type) {
+    var pal = load64(init + 56);
+    if (pal == 0) {
+        return audit_log_record(load64(init + 40), service, event_type);
+    }
+    return audit_log_record_persistent(pal, service, event_type);
+}
+
+fn init_audit_flush(init) {
+    var pal = load64(init + 56);
+    if (pal == 0) { return 0; }
+    return audit_log_flush_persistent(pal);
+}
 
 # init_notify_bind — opt-in sd_notify socket binding (M1).
 # Consumers (kybernet, AGNOS PID-1 boot) call this to enable

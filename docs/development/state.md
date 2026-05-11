@@ -6,6 +6,19 @@
 
 ## Version
 
+**1.5.3** (shipped 2026-05-10 — libro extended surface. New
+`src/audit_ext.cyr` adds opt-in PatraStore persistence
+(record-by-record write-through, chain replayed via
+`chain_from_entries` to preserve `prev_hash` linkage), snapshot
+signing (Ed25519 / ML-DSA-65 / hybrid via libro
+`proof_build_signed` — sign at boundaries, not per-record), and
+merkle root + inclusion / consistency proof wrappers.
+`ArgonautConfig` grows with `audit_persist` + `audit_path` fields
+(default off); `argonaut_init_new` opens the persistent log when
+configured and falls back to in-memory on open failure. New
+`init_audit_record` / `init_audit_flush` dispatch helpers route
+through the wrapper or chain automatically.)
+
 **1.5.2** (shipped 2026-05-10 — HIGH-1 host resolver follow-up
 patch. `src/resolver.cyr` adds a strict IPv4 dotted-quad parser
 (rejects CVE-2021-29923-style leading-zero ambiguity) +
@@ -60,21 +73,24 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **~995 KB** statically linked ELF x86_64 (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1018624 bytes)
+- **~1.00 MB** statically linked ELF x86_64 (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1023544 bytes)
 - Was 378 KB at 1.2.0, 641 KB at 1.3.0, 650 KB at 1.4.0, 652 KB at
-  1.5.0, ~990 KB at 1.5.1; +4 KB at 1.5.2 for `src/resolver.cyr`
-  (`parse_ipv4`, `lookup_etc_hosts`, `resolve_host_ipv4`,
-  `write_ipv4_octets`) offset by removal of `src/compat.cyr`.
-- Dead-code floor: ~2,268 unreachable functions NOPed under DCE
-  (was ~2,262 at 1.5.1)
+  1.5.0, ~990 KB at 1.5.1, ~995 KB at 1.5.2; +5 KB at 1.5.3 for
+  the `src/audit_ext.cyr` wrapper module + new ArgonautInit slot
+  + config fields. libro's patra/sign/merkle paths were already
+  linked transitively; DCE now retains them since they're
+  reachable from the public surface.
+- Dead-code floor: ~2,140 unreachable functions NOPed under DCE
+  (was ~2,268 at 1.5.2 — audit_ext brings ~128 previously-dead
+  libro fns into the reachable set)
 
 ## Suites
 
-- **27 .tcyr suites / 673 assertions** (0 failures on cyrius 5.10.34).
-  +24 assertions over 1.5.1 for the new `audit-high1-resolver`
-  group in `tests/tcyr/audit_findings.tcyr` (parse_ipv4 accept /
-  reject cases, /etc/hosts resolution, end-to-end TCP / HTTP
-  failure-mode discrimination).
+- **28 .tcyr suites / 720 assertions** (0 failures on cyrius 5.10.34).
+  +1 suite / +47 assertions over 1.5.2 for the new
+  `audit_extended.tcyr` (4 groups: audit-ext-merkle,
+  audit-ext-sign-ed25519, audit-ext-persist,
+  audit-ext-init-integration).
 - **2 .bcyr binaries** (`tests/bcyr/argonaut.bcyr`, `tests/bcyr/api.bcyr`)
 - **37 benchmarks** wired into `src/bench_main.cyr`; history in `bench-history.csv`
 
@@ -104,20 +120,20 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## In-flight
 
-- **1.5.3 — Libro extended surface.** Pull forward libro 2.x
-  audit-chain features argonaut hasn't adopted yet (AuditChain
-  on-disk persistence via PatraStore, Ed25519 entry signing,
-  merkle batching). `src/audit.cyr` wrappers currently consume
-  only the in-memory chain.
 - **1.5.4 — Cross-arch.** Restore aarch64 builds; CI step
   mirroring agnosys / agnostik pattern. Gated on a CI runner
   with aarch64 capacity.
 - **1.5.5 — Closeout P(-1) audit.** Arc-closing security re-pass
-  before 1.6.0 tagging.
+  before 1.6.0 tagging. Covers the libro extended surface
+  (persistence, signing, merkle) added in 1.5.3 + cross-arch
+  syscall surface added in 1.5.4.
 - **1.6.x — QEMU PID-1 harness + carry-forwards.** Validates M3
   (orphan reap under real PID-1 reparenting) and L3
   (controlling-TTY decoupling) on a minimal initramfs harness;
-  also lands the deferred `audit_log_new` rename.
+  also lands the deferred `audit_log_new` rename, WitnessAnchor
+  publishing (gated on consumer demand + AGNOS federation
+  protocol), and durable signing-key rotation (gated on
+  kybernet's key-management surface).
 - **Upstream — `lib/process.cyr` exec_env Str/cstr quirk** —
   filed at 1.5.2 in cyrius repo
   (`docs/development/issues/2026-05-10-process-exec-str-cstr-ambiguity.md`).
@@ -133,6 +149,7 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Recent shipped
 
+- **1.5.3** (2026-05-10) — libro extended surface: `src/audit_ext.cyr` adds opt-in PatraStore persistence, Ed25519/MLDSA/hybrid snapshot signing, merkle root + inclusion / consistency proofs; `argonaut_init_new` integration via `config.audit_persist`; `init_audit_record` / `init_audit_flush` dispatch helpers
 - **1.5.2** (2026-05-10) — HIGH-1 host resolver follow-up: `src/resolver.cyr` adds IPv4 dotted-quad parser + /etc/hosts scan; health checks route via `resolve_host_ipv4`; HTTP Host: header echoes configured host; `exec_env` Str/cstr quirk filed upstream; 1.5.1 compat shim retired (sigil 3.0.1 dist re-pub restored `ct_eq`)
 - **1.5.1** (2026-05-10) — toolchain + dep refresh patch: cyrius 5.7.5 → 5.10.34, libro 2.0.5 → 2.6.2, patra 1.1.1 → 1.9.3; `/lib/` gitignored; CI/release workflows aligned with 5.10 pattern; `src/compat.cyr` shims `ct_eq` for libro
 - **1.5.0** (2026-04-27) — PID-1 readiness minor; closes the three 1.4.0 audit deferrals (M1 sd_notify SO_PEERCRED wiring, M3 orphan reaper + subreaper enrol, L3 setsid + stdout/stderr dup2)

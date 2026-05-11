@@ -7,50 +7,28 @@ work only.
 
 ---
 
-## Current — v1.5.2 (shipped 2026-05-10)
+## Current — v1.5.3 (shipped 2026-05-10)
 
-HIGH-1 host-resolver follow-up patch. `src/resolver.cyr` adds a
-strict IPv4 dotted-quad parser (rejects CVE-2021-29923-style
-leading-zero ambiguity) + `/etc/hosts` scan;
-`check_tcp_connect` and HTTP_GET route via `resolve_host_ipv4`
-rather than hardcoding 127.0.0.1, with distinct messages for
-resolver miss vs. connect failure vs. unreachable. HTTP `Host:`
-header echoes the configured host. `exec_env` Str/cstr quirk
-filed upstream as a cyrius issue. Side benefit: sigil 3.0.1's
-dist was re-published upstream between 1.5.1 ship and 1.5.2
-work-start with `ct_eq` restored, so the 1.5.1 `src/compat.cyr`
-shim + `[deps.argonaut_compat]` self-dep retire one minor early.
-See [CHANGELOG 1.5.2](../../CHANGELOG.md#152--2026-05-10) for
-full disposition.
+Libro extended surface. New `src/audit_ext.cyr` adds opt-in
+PatraStore persistence (record-by-record write-through, chain
+replayed via `chain_from_entries` to preserve `prev_hash`
+linkage), snapshot signing (Ed25519 / ML-DSA-65 / hybrid via
+libro `proof_build_signed`), and merkle root + inclusion /
+consistency proof wrappers. `argonaut_init_new` wires the
+persistent log when `config.audit_persist` is set; new
+`init_audit_record` / `init_audit_flush` dispatch helpers route
+through the wrapper or in-memory chain automatically. See
+[CHANGELOG 1.5.3](../../CHANGELOG.md#153--2026-05-10) for full
+disposition.
 
-The 1.5.x arc continues: libro extended surface (1.5.3) →
-cross-arch (1.5.4) → closeout audit (1.5.5). 1.6.x picks up the
-QEMU harness and the carry-forward cleanups.
-
----
-
-## Next — v1.5.3 — Libro extended surface
-
-Theme: pull forward the libro 2.x audit-chain features argonaut
-hasn't adopted yet. Libro 2.6.2 ships the signing / anchoring /
-merkle / streaming surface; argonaut's `audit_log_*` wrappers in
-`src/audit.cyr` currently consume only the in-memory chain APIs.
-
-- [ ] **AuditChain on-disk persistence** — wire libro's PatraStore
-  audit-entry persistence so the chain survives across argonaut
-  restarts. Default to off; opt-in via `argonaut_config` flag.
-- [ ] **Signed audit entries** — adopt libro's signing module
-  (Ed25519 entry signatures) for tamper-evident shutdown /
-  runlevel records. Key management via sigil.
-- [ ] **Merkle batching** — libro's merkle module for chain
-  batches; cuts verify cost on long-running argonaut sessions
-  (relevant once persistence lands and chains span boots).
-- [ ] Regression coverage in `tests/tcyr/audit_*.tcyr` for each
-  feature; bench impact tracked in `bench-history.csv`.
+The 1.5.x arc continues: cross-arch (1.5.4) → closeout audit
+(1.5.5). 1.6.x picks up the QEMU harness and carry-forward
+cleanups (compat-shim drop, audit_log_new rename, anchor publish,
+durable signing-key rotation).
 
 ---
 
-## v1.5.4 — Cross-arch
+## Next — v1.5.4 — Cross-arch
 
 Theme: restore aarch64 builds. `cc5_aarch64` has shipped in the
 toolchain since 5.5.x; argonaut hasn't been cross-built since

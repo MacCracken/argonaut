@@ -736,6 +736,8 @@ struct ArgonautConfig {
     verify_on_boot;      # 1/0
     edge_boot;           # ptr to EdgeBootConfig
     tmpfiles;            # vec of tmpfile entries
+    audit_persist;       # 1/0 — opt-in PatraStore audit-log persistence (1.5.3)
+    audit_path;          # Str — on-disk path when audit_persist == 1
 }
 
 fn argonaut_config_default() {
@@ -748,6 +750,8 @@ fn argonaut_config_default() {
     store64(cfg + 40, 1);
     store64(cfg + 48, edge_config_default());
     store64(cfg + 56, vec_new());
+    store64(cfg + 64, 0);                              # audit_persist off by default
+    store64(cfg + 72, str_from("/var/log/argonaut.patra"));   # default path; unused when audit_persist == 0
     return cfg;
 }
 
@@ -759,6 +763,11 @@ fn config_log_console(cfg)        { return load64(cfg + 32); }
 fn config_verify_boot(cfg)        { return load64(cfg + 40); }
 fn config_edge(cfg)               { return load64(cfg + 48); }
 fn config_tmpfiles(cfg)           { return load64(cfg + 56); }
+fn config_audit_persist(cfg)      { return load64(cfg + 64); }
+fn config_audit_path(cfg)         { return load64(cfg + 72); }
+
+fn config_set_audit_persist(cfg, on)   { store64(cfg + 64, on); return cfg; }
+fn config_set_audit_path(cfg, path)    { store64(cfg + 72, path); return cfg; }
 
 # =========================================================================
 # Argonaut stats — snapshot of init-system statistics

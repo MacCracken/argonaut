@@ -1,0 +1,190 @@
+# audit_extended.tcyr — regression coverage for the 1.5.3 libro
+# extended surface (`src/audit_ext.cyr`): PatraStore persistence,
+# merkle integrity, snapshot signing.
+#
+# The 1.5.x arc theme item ("libro extended surface"): pull forward
+# libro 2.x audit-chain features argonaut had only consumed at the
+# in-memory chain level. Persistence + signing are opt-in via the
+# `config.audit_persist` flag and the `audit_log_*` extended
+# functions; this test exercises them directly without going
+# through argonaut_init_new.
+
+include "tests/test_header.cyr"
+
+fn main() {
+    alloc_init();
+
+    # =====================================================================
+    # Merkle integrity — root + inclusion proof + consistency proof
+    # =====================================================================
+    test_group("audit-ext-merkle");
+
+    var chain = chain_new();
+    chain_append(chain, SEV_INFO, str_from("argonaut"),
+    str_from("Starting"), str_from("daimon"));
+    chain_append(chain, SEV_INFO, str_from("argonaut"),
+    str_from("Started"),  str_from("daimon"));
+    chain_append(chain, SEV_WARNING, str_from("argonaut"),
+    str_from("Restarting"), str_from("daimon"));
+    chain_append(chain, SEV_INFO, str_from("argonaut"),
+    str_from("Started"),  str_from("daimon"));
+
+    var root = audit_log_merkle_root(chain);
+    assert(root != 0, "merkle: root non-null for non-empty chain");
+    assert_eq(str_len(root), 64, "merkle: hex SHA-256 root is 64 chars");
+
+    # Inclusion proof for each entry verifies.
+    var proof0 = audit_log_inclusion_proof(chain, 0);
+    assert(proof0 != 0, "merkle: inclusion proof for entry 0 builds");
+    assert_eq(audit_log_verify_inclusion(proof0), 1, "merkle: inclusion 0 verifies");
+
+    var proof3 = audit_log_inclusion_proof(chain, 3);
+    assert(proof3 != 0, "merkle: inclusion proof for entry 3 builds");
+    assert_eq(audit_log_verify_inclusion(proof3), 1, "merkle: inclusion 3 verifies");
+
+    # Out-of-range index returns 0.
+    assert_eq(audit_log_inclusion_proof(chain, 100), 0, "merkle: oob index = 0");
+    assert_eq(audit_log_inclusion_proof(chain, 0 - 1), 0, "merkle: negative idx = 0");
+
+    # Empty chain returns 0 root / 0 proof.
+    var empty = chain_new();
+    assert_eq(audit_log_merkle_root(empty), 0, "merkle: empty chain root = 0");
+    assert_eq(audit_log_inclusion_proof(empty, 0), 0, "merkle: empty chain proof = 0");
+
+    # Consistency proof between two snapshots of the same chain.
+    # old_size = 2 captures the first two entries; the proof must
+    # verify against the current 4-entry chain.
+    var cp = audit_log_consistency_proof(chain, 2);
+    assert(cp != 0, "merkle: consistency proof builds");
+    assert_eq(audit_log_verify_consistency(cp), 1, "merkle: consistency 2→4 verifies");
+
+    # Consistency oob: old_size > current size → 0.
+    assert_eq(audit_log_consistency_proof(chain, 99), 0, "merkle: cp oob = 0");
+
+    # =====================================================================
+    # Snapshot signing — Ed25519
+    # =====================================================================
+    test_group("audit-ext-sign-ed25519");
+
+    var sk = audit_log_keygen();
+    assert(sk != 0, "sign: Ed25519 keygen produces sk");
+
+    var proof = audit_log_sign_snapshot(chain, sk);
+    assert(proof != 0, "sign: snapshot proof builds");
+
+    var vk = audit_log_signer_verifying_key(sk);
+    assert(vk != 0, "sign: vk extracted from sk");
+
+    assert_eq(audit_log_verify_snapshot(proof, vk), 1, "sign: signed snapshot verifies with own vk");
+
+    # Different key → verify fails.
+    var sk2 = audit_log_keygen();
+    var vk2 = audit_log_signer_verifying_key(sk2);
+    assert_eq(audit_log_verify_snapshot(proof, vk2), 0, "sign: wrong vk rejected");
+
+    # Empty chain → no proof.
+    assert_eq(audit_log_sign_snapshot(empty, sk), 0, "sign: empty chain → 0");
+
+    # 0 sk / 0 vk → 0.
+    assert_eq(audit_log_sign_snapshot(chain, 0), 0, "sign: 0 sk → 0");
+    assert_eq(audit_log_verify_snapshot(proof, 0), 0, "sign: 0 vk → 0");
+    assert_eq(audit_log_verify_snapshot(0, vk), 0, "sign: 0 proof → 0");
+
+    # =====================================================================
+    # PatraStore persistence — open, record, close, reopen, verify
+    # =====================================================================
+    test_group("audit-ext-persist");
+
+    var path = str_from("/tmp/argonaut_audit_ext.patra");
+    syscall(87, str_data(path));   # unlink any prior
+
+    var pal = audit_log_open_persistent(path);
+    assert(pal != 0, "persist: open succeeds");
+    assert(pal_chain(pal) != 0, "persist: chain attached");
+    assert(pal_store(pal) != 0, "persist: store attached");
+    assert_eq(chain_len(pal_chain(pal)), 0, "persist: new log starts empty");
+
+    var e1 = audit_log_record_persistent(pal, "daimon", EVT_STARTING);
+    assert(e1 != 0, "persist: record returns entry");
+    assert_eq(chain_len(pal_chain(pal)), 1, "persist: chain grew to 1");
+
+    audit_log_record_persistent(pal, "daimon", EVT_STARTED);
+    audit_log_record_persistent(pal, "redis", EVT_STARTING);
+    audit_log_record_persistent(pal, "redis", EVT_STARTED);
+    assert_eq(chain_len(pal_chain(pal)), 4, "persist: chain grew to 4");
+
+    audit_log_record_persistent_with_agent(pal, "postgres", EVT_STARTING,
+    "fleet-agent");
+    assert_eq(chain_len(pal_chain(pal)), 5, "persist: with_agent appends too");
+
+    audit_log_flush_persistent(pal);
+    audit_log_close_persistent(pal);
+
+    # Reopen — chain replays from disk.
+    var pal2 = audit_log_open_persistent(path);
+    assert(pal2 != 0, "persist: reopen succeeds");
+    assert_eq(chain_len(pal_chain(pal2)), 5, "persist: replay restores 5 entries");
+    assert_eq(audit_log_verify_persistent(pal2), 1, "persist: replayed chain verifies");
+
+    # Existing entries: services land in `details` (via
+    # `audit_entry_service`). Confirm the first one round-tripped.
+    var first = vec_get(chain_entries(pal_chain(pal2)), 0);
+    assert(str_eq(audit_entry_service(first), str_from("daimon")), "persist: entry 0 details preserved");
+    assert(str_eq(audit_entry_action(first),  str_from("Starting")), "persist: entry 0 action preserved");
+
+    # Record more entries onto the replayed chain — they extend
+    # the existing hash linkage and still verify.
+    audit_log_record_persistent(pal2, "agnoshi", EVT_STARTING);
+    assert_eq(chain_len(pal_chain(pal2)), 6, "persist: append after replay");
+    assert_eq(audit_log_verify_persistent(pal2), 1, "persist: chain verifies after extend");
+
+    # Sign the extended chain — proves the signing path composes
+    # with the persistence path (no struct-shape mismatch).
+    var psk = audit_log_keygen();
+    var pproof = audit_log_sign_snapshot(pal_chain(pal2), psk);
+    assert(pproof != 0, "persist: sign over reloaded chain builds");
+    var pvk = audit_log_signer_verifying_key(psk);
+    assert_eq(audit_log_verify_snapshot(pproof, pvk), 1, "persist: signed reloaded snapshot verifies");
+
+    audit_log_close_persistent(pal2);
+    syscall(87, str_data(path));    # cleanup
+
+    # =====================================================================
+    # ArgonautInit integration — opt-in via config flag
+    # =====================================================================
+    test_group("audit-ext-init-integration");
+
+    # Default config: persistence off; init_audit_log_persistent == 0.
+    var c_off = argonaut_config_default();
+    var i_off = argonaut_init_new(c_off);
+    assert_eq(init_audit_log_persistent(i_off), 0, "init: default config = in-memory only");
+    assert(init_audit_log(i_off) != 0, "init: in-memory chain still attached");
+    assert_eq(init_audit_flush(i_off), 0, "init: flush no-op when in-memory");
+    init_audit_record(i_off, str_from("svc-a"), EVT_STARTING);
+    assert_eq(chain_len(init_audit_log(i_off)), 1, "init: record went to chain");
+
+    # Opt-in: audit_persist=1, audit_path=<tmp>.
+    var path2 = str_from("/tmp/argonaut_audit_ext_init.patra");
+    syscall(87, str_data(path2));
+    var c_on = argonaut_config_default();
+    config_set_audit_persist(c_on, 1);
+    config_set_audit_path(c_on, path2);
+    var i_on = argonaut_init_new(c_on);
+    assert(init_audit_log_persistent(i_on) != 0, "init: persist=1 → wrapper attached");
+    assert(init_audit_log(i_on) != 0, "init: chain still reachable via init_audit_log");
+    init_audit_record(i_on, str_from("svc-b"), EVT_STARTING);
+    init_audit_record(i_on, str_from("svc-b"), EVT_STARTED);
+    assert_eq(chain_len(init_audit_log(i_on)), 2, "init: persistent records grow chain");
+    init_audit_flush(i_on);
+    audit_log_close_persistent(init_audit_log_persistent(i_on));
+
+    # Re-open with same config: chain replays from disk.
+    var i_on2 = argonaut_init_new(c_on);
+    assert_eq(chain_len(init_audit_log(i_on2)), 2, "init: reopen replays prior entries");
+    audit_log_close_persistent(init_audit_log_persistent(i_on2));
+    syscall(87, str_data(path2));
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);
