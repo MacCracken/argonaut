@@ -7,50 +7,43 @@ work only.
 
 ---
 
-## Current — v1.6.0 (shipped 2026-05-10) — PID-1 graduation
+## Current — v1.6.2 (shipped 2026-05-10) — PID-1 harness extensions (partial)
 
-argonaut runs as `/sbin/init` under qemu via the new
-`qemu/build-initramfs.sh` + `qemu/boot-test.sh` harness
-(scaffold lifted from kybernet's pattern; standalone runtime).
-`src/main.cyr` adds a sleep-and-reap supervisor loop on
-`getpid() == 1` so the kernel doesn't panic when init returns.
-Three boot markers gate the smoke
-(`init system ready` → `all systems nominal` → `pid1 loop ready`).
-KVM + `+invtsc` required locally (sakshi clock_init panics
-without invariant TSC; qemu TCG doesn't expose it).
-`docs/architecture/002-qemu-pid1-harness.md` is the canonical
-reference. See
-[CHANGELOG 1.6.0](../../CHANGELOG.md#160--2026-05-10).
+`src/pid1_harness.cyr` adds opt-in self-test mode via
+`/proc/cmdline argonaut.harness=1`. **M3 end-to-end** validates
+orphan reap under real-PID-1 reparenting inside qemu;
+`src/main.cyr` signalfd-blocked SIGTERM/SIGINT/SIGCHLD wires
+clean shutdown via `sys_reboot(RB_POWER_OFF)`. Discovered + fixed
+a double-fork bug in `fork_exec_service` (pre-1.6.2 the nested
+`exec_env_str` fork made `setsid` apply to the wrong process).
+**L3 end-to-end deferred to 1.6.3** — prototyped but hit
+compounded blockers (dynamically-linked busybox → execve ENOENT
+unless ld-linux is bundled; then a parent-side waitpid hang
+specific to PID-1). See
+[CHANGELOG 1.6.2](../../CHANGELOG.md#162--2026-05-10).
 
-The 1.5.x arc is CLOSED — full audit in
-[`docs/audit/2026-05-10-audit.md`](../audit/2026-05-10-audit.md).
-1.6.x continues with M3/L3 end-to-end, signal-handled clean
-shutdown, the closeout re-audit, and the carry-forwards
-(cyrius pin → 5.10.44 + `exec_vec_str` migration; native
-aarch64; audit_log_new rename; anchor + key rotation).
+The next slot picks up L3 end-to-end and the arc-closing
+P(-1) audit.
 
 ---
 
-## Next — v1.6.1 — PID-1 coverage extensions
+## Next — v1.6.3 — L3 end-to-end + closeout P(-1) audit
 
-### End-to-end coverage
+### L3 end-to-end
 
-- [ ] **M3 end-to-end** — busybox helper inside the initramfs
-  forks a grandchild + exits; assert argonaut's
-  `proc_table_reap_orphans` collects the grandchild via the
-  supervisor-loop tick. Lifts the `audit-m3-reaper-orphans`
-  unit shape into real-PID-1 territory.
-- [ ] **L3 end-to-end** — invoke `fork_exec_service` against a
-  test service that writes `getsid(0)` to a tmpfs marker;
-  assert the marker reads the child's own PID
-  (controlling-TTY decoupled). Lifts the
-  `audit-l3-fork-setsid` unit shape into real-PID-1.
-- [ ] **Signal-handled clean shutdown** — install SIGTERM /
-  SIGINT handlers in the PID-1 supervisor loop; route through
-  `init_plan_shutdown` → `sys_reboot(RB_POWER_OFF)`. Closes
-  the "qemu timeout is the only exit path" wart from 1.6.0.
+- [ ] **Static test helper in initramfs** — cleanest path: a
+  small statically-linked C/cyrius helper bundled into the
+  initramfs that argonaut spawns via `fork_exec_service` and
+  that writes `sid pid` to `/l3.marker` directly via syscalls
+  (no shell, no dyn-loader, no busybox path). Helper sources
+  in `qemu/helpers/` next to `build-initramfs.sh`.
+- [ ] **OR — root-cause the parent-side waitpid hang** — the
+  1.6.2 prototype with bundled ld-linux had execve succeeding
+  but the parent's `sys_waitpid(spid, ...)` not returning.
+  Diagnose with strace under qemu (kernel logs to serial)
+  or with a custom signal handler that prints SIGCHLD.
 
-### 1.6.x arc closeout
+### 1.6.x arc closeout (v1.6.3)
 
 - [ ] **P(-1) full pass** — mirrors the 1.5.5 closeout shape.
   Roadmap review → cleanliness gate → bench baseline → internal
@@ -72,40 +65,8 @@ aarch64; audit_log_new rename; anchor + key rotation).
   Linux), Graviton / Ampere cloud aarch64. Once a runner exists
   the matrix is just `boot + audit_findings + audit_extended`.
 
-### Carry-forwards from 1.5.x
+### Gated on external work
 
-- [ ] **P1 — Migrate `check_command` to `exec_vec_str`**
-  (cyrius v5.10.44 unblock; filed by argonaut, shipped
-  upstream 2026-05-11). The `exec_*` family added typed
-  Str-shape siblings — `exec_vec_str` /
-  `exec_capture_str` / `exec_env_str` — that extract
-  `str_data` on the way into execve's argv. Argonaut's
-  `src/health.cyr:144` calls `exec_vec(argv)` where
-  `argv` was built from `str_split(cmd_str, str_from(" "))`
-  parts (Str elements) — the silently-broken case the
-  v5.10.44 fix was filed against. Migration is one line:
-  `exec_vec(argv)` → `exec_vec_str(argv)`. Then:
-  - **tests/tcyr/health_exec.tcyr:17-22, 39-43** — flip
-    the determinism-only assertions
-    (`assert(cmd_ok == 0 || cmd_ok == 1)`) back to strict
-    (`assert_eq(check_command(str_from("/bin/true"), 5000), 1)`
-    + `assert_eq(check_command(str_from("/bin/false"), 5000), 0)`).
-  - **tests/tcyr/audit_findings.tcyr:262** — remove the
-    "the existing exec_env Str/cstr quirk … blocks unit-level
-    shell exec testing" comment. End-to-end
-    fork_exec_service verification stays gated on the
-    QEMU PID-1 harness (that's a separate gate — different
-    blocker, not this one).
-  - **cyrius.cyml** — bump `cyrius = "5.10.34"` →
-    `cyrius = "5.10.44"` (current local build).
-  Lands as a 1.6.x slot when the cyrius pin bumps; one
-  atomic change (the new API is byte-identical for cstr
-  consumers, so the migration doesn't cascade).
-- [ ] **Rename `audit_log_new` wrapper** — sigil 3.0.1's dist
-  defines `audit_log_new()`; argonaut's `src/audit.cyr:91`
-  shadows it (last-wins, benign but noisy at compile time).
-  Rename to `argonaut_audit_log_new` once kybernet (the
-  consumer) is ready to follow.
 - [ ] **WitnessAnchor publishing** — libro's anchor primitive
   for cross-snapshot trust pins. Gated on consumer demand +
   AGNOS federation protocol (libro's own roadmap calls this

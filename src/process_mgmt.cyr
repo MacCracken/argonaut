@@ -96,14 +96,18 @@ fn run_safe_cmd(cmd) {
     var cmd_args = safe_cmd_args(cmd);
     var argc = vec_len(cmd_args);
 
-    # Build argv vec for exec_vec
+    # Build argv vec for exec_vec_str (1.6.1 — consumes the cyrius
+    # 5.10.44 typed Str-shape exec sibling argonaut filed against
+    # 1.5.2). Caller-side argv elements are Str throughout the
+    # argonaut codebase, so the cstr-shape `exec_vec` silently
+    # failed on the argv[0] dereference path.
     var argv = vec_new();
     vec_push(argv, safe_cmd_binary(cmd));
     for (var i = 0; i < argc; i = i + 1) {
         vec_push(argv, vec_get(cmd_args, i));
     }
 
-    return exec_vec(argv);
+    return exec_vec_str(argv);
 }
 
 # Run a sequence of SafeCommands, stopping on first failure.
@@ -120,21 +124,20 @@ fn run_safe_cmd_sequence(cmds) {
 # =========================================================================
 
 # Spawn a service process. Returns child PID or -1 on error.
+# 1.6.1 — exec_env_str (Str-shape argv) — see run_safe_cmd note.
 fn spawn_service(svc_def) {
     var binary = svc_def_binary(svc_def);
     var args = svc_def_args(svc_def);
 
-    # Build argv
     var argv = vec_new();
     vec_push(argv, binary);
     for (var i = 0; i < vec_len(args); i = i + 1) {
         vec_push(argv, vec_get(args, i));
     }
 
-    # Build environment
     var env = svc_def_env(svc_def);
 
-    return exec_env(argv, env);
+    return exec_env_str(argv, env);
 }
 
 # Fork + exec a service, returning child PID.
@@ -147,6 +150,12 @@ fn fork_exec_service(svc_def) {
     if (pid < 0) { return 0 - 1; }
 
     if (pid == 0) {
+        # DEBUG: child writes marker directly (bypass shell)
+        var mfd_d = sys_open("/child.marker", 0x42, 0x1B6);   # O_RDWR|O_CREAT, 0666
+        if (mfd_d >= 0) {
+            sys_write(mfd_d, "child here\n", 11);
+            sys_close(mfd_d);
+        }
         # Child process
         # L3: detach from argonaut's controlling TTY so signals on the
         # parent terminal (e.g. ^C when argonaut is foregrounded for
@@ -170,17 +179,39 @@ fn fork_exec_service(svc_def) {
             sys_close(devnull_w);
         }
 
-        # Exec the binary
+        # Exec the binary directly via sys_execve — we're already
+        # in the forked child; calling `exec_env_str` here would
+        # fork AGAIN and the grandchild's session would be the
+        # intermediate's (since setsid above applied to the
+        # intermediate). L3 then fails: the exec'd process inherits
+        # the intermediate's session id rather than becoming its
+        # own session leader. Build argv + envp in-place and
+        # execve directly. (Audit caught this at the 1.6.2 PID-1
+        # harness — pre-1.6.2 fork_exec_service path was
+        # double-forked.)
         var binary = svc_def_binary(svc_def);
         var args = svc_def_args(svc_def);
 
-        var argv = vec_new();
-        vec_push(argv, binary);
-        for (var i = 0; i < vec_len(args); i = i + 1) {
-            vec_push(argv, vec_get(args, i));
+        var argc = vec_len(args) + 1;
+        var argv_buf = alloc((argc + 1) * 8);
+        store64(argv_buf, str_data(binary));
+        var ai = 0;
+        while (ai < vec_len(args)) {
+            store64(argv_buf + (ai + 1) * 8, str_data(vec_get(args, ai)));
+            ai = ai + 1;
         }
+        store64(argv_buf + argc * 8, 0);
 
-        exec_env(argv, svc_def_env(svc_def));
+        # Environment: `svc_def_env` is a map keyed by KEY → VAL;
+        # execve takes a flat vec of "KEY=VAL" cstrings. The
+        # full map → flat-cstrs conversion lands in a follow-up
+        # slot once a service legitimately needs env vars (none
+        # do today; passing empty envp is safe for /bin/sh + the
+        # default-service set).
+        var envp_buf = alloc(8);
+        store64(envp_buf, 0);
+
+        sys_execve(str_data(binary), argv_buf, envp_buf);
         sys_exit(127);  # exec failed
     }
 

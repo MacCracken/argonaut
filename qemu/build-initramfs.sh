@@ -47,10 +47,31 @@ done
 if [ -n "$BUSYBOX" ]; then
     cp "$BUSYBOX" "${INITRAMFS_DIR}/bin/busybox"
     chmod +x "${INITRAMFS_DIR}/bin/busybox"
-    for cmd in sh ls cat mount ps kill sleep echo dmesg true false; do
+    for cmd in sh ls cat mount ps kill sleep echo dmesg true false awk cut grep printf; do
         ln -sf busybox "${INITRAMFS_DIR}/bin/${cmd}"
     done
     echo "  bundled busybox from $BUSYBOX"
+
+    # Modern distros ship busybox dynamically linked (Arch's
+    # /usr/lib/initcpio/busybox needs /lib64/ld-linux-x86-64.so.2 +
+    # libc.so.6). The 1.6.2 L3 harness needs an actual execve to
+    # validate the setsid → exec chain, so bundle the dynamic
+    # loader + libc when the binary requires them. If we detect a
+    # static binary (no INTERP segment), skip this step.
+    if file "$BUSYBOX" 2>/dev/null | grep -q "dynamically linked"; then
+        mkdir -p "${INITRAMFS_DIR}/lib64" "${INITRAMFS_DIR}/usr/lib"
+        # Resolve each NEEDED library + the interpreter through
+        # the host's ldd output; copy them into the initramfs at
+        # the same path so the dynamic loader finds them.
+        for lib in $(ldd "$BUSYBOX" 2>/dev/null | awk '/=>/ {print $3} /^\s*\//{print $1}'); do
+            [ -n "$lib" ] || continue
+            [ -f "$lib" ] || continue
+            tgt_dir="${INITRAMFS_DIR}$(dirname "$lib")"
+            mkdir -p "$tgt_dir"
+            cp "$lib" "$tgt_dir/"
+        done
+        echo "  bundled dynamic-loader + libc (busybox is dynamically linked)"
+    fi
 else
     echo "  WARNING: busybox not found — M3/L3 end-to-end harness variants will be unavailable"
 fi

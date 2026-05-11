@@ -46,7 +46,7 @@ fn main() {
     alloc_init();
     test_group("audit-extras");
 
-    var log6 = audit_log_new();
+    var log6 = argonaut_audit_log_new();
     for (var i = 0; i < 10; i = i + 1) {
         var sb = str_builder_new();
         str_builder_add_cstr(sb, "svc-");
@@ -86,7 +86,7 @@ fn main() {
     assert(SEV_CRITICAL < SEV_SECURITY, "o c<s");
 
     # Min severity filter
-    var log7 = audit_log_new();
+    var log7 = argonaut_audit_log_new();
     audit_log_record(log7, "a", EVT_STARTING);
     audit_log_record(log7, "b", EVT_STOPPING);
     audit_log_record(log7, "c", EVT_TIMEOUT_KILLED);

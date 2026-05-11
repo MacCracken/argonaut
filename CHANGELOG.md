@@ -7,6 +7,166 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.2] — 2026-05-10
+
+PID-1 harness extensions, partial. Lands signal-handled clean
+shutdown + M3 (orphan-reap under real-PID-1 reparenting) end-to-end
+inside qemu; L3 (fork_exec_service controlling-TTY decoupling)
+end-to-end is deferred to 1.6.3 after the harness path hit two
+compounded blockers documented in the source. Also fixes the
+1.6.0-discovered double-fork bug in `fork_exec_service`.
+
+### Added
+
+- **`src/pid1_harness.cyr`** — opt-in self-test mode activated
+  by `/proc/cmdline argonaut.harness=1`. `pid1_harness_requested`
+  reads `/proc/cmdline` and substring-matches the flag.
+  `pid1_harness_m3` forks a child that forks a grandchild and
+  exits, leaving the grandchild reparented to argonaut (PID 1);
+  asserts `proc_table_reap_orphans` collects it via the
+  supervisor-loop tick. Production boots never carry the flag.
+- **`src/main.cyr` signal-handled supervisor loop** — blocks
+  SIGTERM / SIGINT / SIGCHLD via `sys_sigprocmask(SIG_BLOCK)`
+  and reads them through a non-blocking signalfd. SIGTERM or
+  SIGINT breaks the loop and calls `sys_reboot(RB_POWER_OFF)`
+  for a clean shutdown; SIGCHLD wakes the reap path on the
+  next tick. Replaces the 1.6.0 "qemu-timeout is the only
+  exit path" wart.
+- **`src/main.cyr` early-mount block** — mounts `/proc`,
+  `/sys`, `/dev` (devtmpfs) when running as PID 1 so
+  subsequent code sees them. Equivalent to the early sysroot
+  setup every real PID-1 does; kernel hands argonaut the
+  initramfs cpio with nothing auto-mounted.
+- **`qemu/pid1-harness-test.sh`** — wrapper that boots with
+  `argonaut.harness=1` on the kernel cmdline and asserts the
+  M3 + harness-done markers via the qemu serial output.
+  Falls back to TCG + warning when `/dev/kvm` isn't readable;
+  surfaces the `l3 deferred-to-1.6.3` marker so the wrapper's
+  exit status confirms the gated path reached.
+- **`qemu/build-initramfs.sh` dynamic-loader bundling** —
+  detects when the staged busybox is dynamically linked
+  (`file ... | grep dynamically linked`) and copies
+  `/lib64/ld-linux-x86-64.so.2` + each NEEDED library (per
+  `ldd`) into the initramfs at the same path. The 1.6.2 L3
+  prototype path was blocked by execve returning ENOENT until
+  this landed; the loader is now bundled regardless of which
+  harness variant runs.
+- **`docs/architecture/002-qemu-pid1-harness.md`** updated
+  with the harness-mode contract (cmdline flag, M3 path,
+  marker list, L3 deferral note).
+
+### Fixed
+
+- **`src/process_mgmt.cyr` `fork_exec_service`** — pre-1.6.2
+  the child's `exec_env_str(argv, env)` call **forked again**
+  internally (since exec_*_str is fork+exec, not just exec).
+  The intermediate's `setsid` then applied to the wrong
+  process; the grandchild that actually exec'd the service
+  binary inherited the intermediate's session id rather than
+  becoming its own session leader. Replaced with a direct
+  `sys_execve(str_data(binary), argv_buf, envp_buf)` after
+  building argv/envp in-place — the child is already in the
+  forked context, no nested fork needed. Env-vec handling
+  also corrected: `svc_def_env` returns a map, not a vec, so
+  the pre-1.6.2 `exec_env_str(argv, env)` was reading garbage
+  for envp; an empty envp is now passed (no consumer
+  currently needs envp; full map → flat-cstrs lands when one
+  does).
+
+### Deferred to 1.6.3
+
+- **L3 end-to-end harness path.** Prototyped at 1.6.2 with the
+  fork_exec_service + busybox-shell shape but hit a
+  parent-side waitpid hang after the dyn-loader fix landed.
+  The fork_exec_service double-fork bug was discovered + fixed
+  in this slot, but the harness shape needs more work — likely
+  a statically-linked test helper bundled into the initramfs
+  rather than going through busybox. Tracked in the file
+  comment in `src/pid1_harness.cyr:pid1_harness_l3`.
+
+### Stats
+
+- **28 .tcyr suites / 735 assertions** unchanged from 1.6.1.
+  Per-suite asserts unaffected by the PID-1 harness work (it's
+  gated on `getpid() == 1` and inert under `cyrius test`).
+- **Binary x86_64 ~1.00 MB** (1034568 bytes, `CYRIUS_DCE=1`).
+  +6 KB vs. 1.6.1 for `src/pid1_harness.cyr` + the signalfd
+  supervisor loop + the early-mount block.
+- **qemu/boot-test.sh** + **qemu/pid1-harness-test.sh** both
+  green under KVM + `-cpu host,+invtsc` locally. Boot wall
+  time ~0.3 s; harness wall time ~0.5 s (M3 + 200 ms grandchild
+  reap window).
+
+## [1.6.1] — 2026-05-10
+
+Toolchain + cleanup combined slot. Consumes the upstream cyrius
+fix argonaut filed at 1.5.2 (`exec_vec_str` / `exec_env_str` /
+`exec_capture_str` — typed Str-shape siblings of the cstr-shape
+`exec_*` family), migrates every argonaut call site, drops the
+`audit_log_new` shadow warning by renaming the wrapper, and
+flips the determinism-only `health_exec.tcyr` assertions back
+to strict expected-result form now that the silent-failure path
+is closed.
+
+### Changed
+
+- **`cyrius.cyml`** — `[package].cyrius` pinned `5.10.34` →
+  `5.10.44`. Ten upstream slots picked up (5.10.35–.44 mix of
+  codegen polish + the `exec_*_str` typed-shape fix).
+- **`src/process_mgmt.cyr`** — `run_safe_cmd` →
+  `exec_vec_str(argv)`; `spawn_service` → `exec_env_str(argv,
+  env)`; `fork_exec_service` child body → `exec_env_str(argv,
+  svc_def_env(svc_def))`. The pre-1.6.1 `exec_vec` / `exec_env`
+  calls silently mis-execed when argv elements were Str (which
+  is every argonaut call site — `svc_def_binary`, `svc_def_args`,
+  `safe_cmd_args` all return Str). The new typed-shape variants
+  `str_data` each element on the way into `execve`.
+- **`src/health.cyr`** — `check_command` →
+  `exec_vec_str(argv)`. Same fix shape.
+- **`src/audit.cyr`** — `audit_log_new` →
+  `argonaut_audit_log_new` (the libro chain-wrapper). Drops the
+  `duplicate fn 'audit_log_new' (last definition wins)`
+  warning that fired on every build since sigil 3.0.1 added
+  its own `audit_log_new`. The two functions are unrelated;
+  the shadow was benign last-wins behaviour but the
+  build-time noise was a constant smell. All 16 argonaut /
+  test call sites migrated atomically.
+- **`tests/tcyr/health_exec.tcyr`** — assertions flipped from
+  `assert(cmd_ok == 0 || cmd_ok == 1, "cmd det")` to
+  `assert_eq(check_command(str_from("/bin/true"), 5000), 1, ...)`
+  + `assert_eq(check_command(str_from("/bin/false"), 5000), 0, ...)`.
+  +1 strict assert on `execute_health_check`'s HC_COMMAND
+  branch as well. Closes the "exec_vec may not find binaries
+  via Str path" caveat noted in the pre-1.6.1 comment.
+
+### Stats
+
+- **28 .tcyr suites / 735 assertions** pass under cyrius
+  5.10.44 (was 28 / 734 at 1.6.0; +1 for the strict
+  `execute_health_check` HC_COMMAND assertion the determinism
+  caveat blocked).
+- **Binary ~1.00 MB** (1028760 bytes) — effectively unchanged
+  from 1.6.0 (the `_str` variants are byte-identical to the
+  cstr variants on the hot path; the `str_data` call is
+  inlined under DCE).
+- 1 audit-noted warning class CLOSED:
+  `duplicate fn 'audit_log_new'` no longer fires.
+
+### 1.6.1 → 1.6.x carry-forwards
+
+Still open for 1.6.2+:
+- **1.6.2** — PID-1 harness extensions (signal-handled clean
+  shutdown via signalfd-blocked SIGTERM/SIGINT; M3 + L3
+  end-to-end coverage gated on `/proc/cmdline argonaut.harness=1`).
+  Unblocked by the 1.6.1 `exec_vec_str` migration (L3
+  end-to-end needs `fork_exec_service` actually working).
+- **1.6.3** — 1.6.x arc closeout P(-1) audit.
+- Native aarch64 CI runner — still gated on runner
+  allocation.
+- WitnessAnchor publishing / durable signing-key rotation —
+  still gated on external work (AGNOS federation protocol,
+  kybernet key-management surface).
+
 ## [1.6.0] — 2026-05-10
 
 **PID-1 graduation.** Argonaut now runs as `/sbin/init` under

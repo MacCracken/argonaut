@@ -14,16 +14,19 @@ fn main() {
     assert_eq(check_process_alive(0 - 1), 0, "pid-1 dead");
 
     # --- check_command: true (full path needed for exec) ---
-    # check_command uses exec_vec which needs full binary path
-    # Str split on space separates binary from args
+    # 1.6.1 — assertions flipped back to strict expected-result
+    # form after the cyrius 5.10.44 / exec_vec_str migration
+    # closed the Str/cstr silent-failure path. `/bin/true` exits
+    # 0 → check_command returns 1; `/bin/false` exits 1 →
+    # check_command returns 0. (Pre-1.6.1: exec_vec silently
+    # mis-execed on Str-shape argv, so we could only assert
+    # determinism, not the actual result.)
     var cmd_ok = check_command(str_from("/bin/true"), 5000);
-    # exec_vec may return non-zero if it doesn't find the binary via Str
-    # Test that we get a deterministic result
-    assert(cmd_ok == 0 || cmd_ok == 1, "cmd det");
+    assert_eq(cmd_ok, 1, "cmd /bin/true returns 1");
 
     # --- check_command: false ---
     var cmd_fail = check_command(str_from("/bin/false"), 5000);
-    assert(cmd_fail == 0 || cmd_fail == 1, "cmd det2");
+    assert_eq(cmd_fail, 0, "cmd /bin/false returns 0");
 
     # --- execute_health_check: process alive ---
     var hc_pa = health_check_new(HC_PROCESS_ALIVE, 0, 0, 5000, 2000, 3);
@@ -36,10 +39,10 @@ fn main() {
     assert_eq(load64(r2 + 16), 0, "ehc pa fail");
 
     # --- execute_health_check: command ---
-    # Note: check_command uses exec_vec which may not find binaries via Str path
-    # The result depends on exec_vec implementation — test determinism only
+    # 1.6.1 — strict expected-result after exec_vec_str migration.
     var hc_cmd = health_check_new(HC_COMMAND, str_from("/bin/true"), 0, 5000, 2000, 3);
     var r3 = execute_health_check(str_from("cmd"), hc_cmd, 0);
+    assert_eq(load64(r3 + 16), 1, "ehc cmd /bin/true passed");
     assert(load64(r3 + 24) >= 0, "ehc cmd lat");
 
     # --- execute_health_check: command structure ---

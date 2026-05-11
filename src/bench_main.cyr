@@ -504,7 +504,7 @@ fn main() {
     # --- Audit logging ---
 
     println("\nAudit logging:");
-    var alog = audit_log_new();
+    var alog = argonaut_audit_log_new();
     var b29 = bench_new("audit_log_record");
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b29);

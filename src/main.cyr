@@ -24,6 +24,7 @@ include "src/tmpfiles.cyr"
 include "src/audit.cyr"
 include "src/audit_ext.cyr"
 include "src/init.cyr"
+include "src/pid1_harness.cyr"
 
 # =========================================================================
 # Entry point — verify the port compiles and runs
@@ -111,27 +112,77 @@ fn main() {
 
     # PID-1 graduation (1.6.0). When kernel hands off to /sbin/init,
     # argonaut sees pid==1; returning at that point panics the
-    # kernel ("Attempted to kill init"). Enter a minimal supervisor
-    # loop that:
-    #   - drains zombies via init_reap_services every 100ms (M3
-    #     end-to-end coverage: real-PID-1 reparenting now wires
-    #     through proc_table_reap_orphans for the first time)
-    #   - prints `argonaut: pid1 loop ready` as the boot-complete
-    #     marker the qemu/boot-test.sh harness greps on
-    # Signal handling (clean SIGTERM/SIGINT shutdown via
-    # init_plan_shutdown + sys_reboot) lands in the 1.6.1+ slot;
-    # the loop currently sleeps until the qemu harness times out
-    # the run or sends sys_reboot from outside.
+    # kernel ("Attempted to kill init"). 1.6.2 adds signal-handled
+    # clean shutdown (signalfd-blocked SIGTERM / SIGINT / SIGCHLD)
+    # and an opt-in harness mode (`/proc/cmdline argonaut.harness=1`)
+    # that runs M3 + L3 end-to-end before poweroff.
     if (sys_getpid() == 1) {
+        # Mount /proc, /sys, and /dev so subsequent code sees them
+        # (most relevantly: harness mode reads /proc/cmdline, and
+        # fork_exec_service redirects child stdio to /dev/null).
+        # Kernel hands us `/` from the initramfs cpio with nothing
+        # auto-mounted. Non-fatal — already-mounted paths return
+        # EBUSY which we treat as success. Equivalent to the early
+        # sysroot setup every real PID-1 does.
+        sys_mount("proc",     "/proc", "proc",     0, 0);
+        sys_mount("sysfs",    "/sys",  "sysfs",    0, 0);
+        sys_mount("devtmpfs", "/dev",  "devtmpfs", 0, 0);
+
+        # Harness mode short-circuit — runs the self-tests inline
+        # and powers off so the qemu wrapper picks up exit status.
+        # Production boots never carry the flag (checked via
+        # /proc/cmdline; missing the marker → fall through to the
+        # supervisor loop).
+        if (pid1_harness_requested() == 1) {
+            pid1_run_harness(init);
+            sys_reboot(RB_POWER_OFF);
+            return 0;
+        }
+
+        # Block SIGTERM + SIGINT + SIGCHLD so they're delivered via
+        # signalfd rather than as async handlers (which are tricky
+        # to write portably from cyrius). SIGCHLD wakes the reap
+        # path immediately; SIGTERM / SIGINT break the loop and
+        # power off cleanly.
+        var sigset = sigset_new();
+        sigset_add(sigset, SIGTERM);
+        sigset_add(sigset, SIGINT);
+        sigset_add(sigset, SIGCHLD);
+        sys_sigprocmask(SIG_BLOCK, sigset, 0);
+        var sfd = sys_signalfd(0 - 1, sigset, SFD_NONBLOCK);
+
         println("argonaut: pid1 loop ready");
+
         var tick = alloc(16);
         store64(tick, 0);                # tv_sec
         store64(tick + 8, 100000000);    # tv_nsec — 100ms
+        var siginfo = alloc(128);         # struct signalfd_siginfo
         var loop = 1;
         while (loop == 1) {
             init_reap_services(init);
-            syscall(35, tick, 0);        # nanosleep
+            # Drain any pending signals from the signalfd
+            # (non-blocking; -1 / EAGAIN on empty is fine).
+            var draining = 1;
+            while (draining == 1) {
+                var n = syscall(0, sfd, siginfo, 128);
+                if (n != 128) {
+                    draining = 0;
+                } else {
+                    var sig = load32(siginfo);
+                    if (sig == SIGTERM) { loop = 0; }
+                    if (sig == SIGINT)  { loop = 0; }
+                    # SIGCHLD: nothing extra — next loop iter
+                    # already calls init_reap_services.
+                }
+            }
+            if (loop == 1) {
+                syscall(35, tick, 0);
+            }
         }
+
+        println("argonaut: pid1 shutdown clean");
+        sys_reboot(RB_POWER_OFF);
+        return 0;
     }
 
     return 0;

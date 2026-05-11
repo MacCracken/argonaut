@@ -88,7 +88,14 @@ fn audit_event_severity(event_type) {
 # The AuditLog is just a libro AuditChain pointer. All audit_log_*()
 # functions delegate directly to chain_*() functions.
 
-fn audit_log_new() {
+# 1.6.1 — renamed from `audit_log_new` to drop the shadow warning
+# against sigil 3.0.1's `audit_log_new` (`audit_log_new` in sigil
+# is for sigil's internal audit log; argonaut's wrapper around
+# libro's `chain_new` is unrelated). The shadow was benign
+# last-wins behaviour throughout 1.5.x but the warning at every
+# build was a constant smell. All call sites in argonaut migrated
+# to the new name in the same commit.
+fn argonaut_audit_log_new() {
     return chain_new();
 }
 

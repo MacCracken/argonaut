@@ -60,14 +60,14 @@ fn argonaut_init_new(config) {
             # Persistence requested but failed (read-only fs, bad path);
             # fall back to in-memory so init still completes. Caller
             # checks `init_audit_log_persistent(init) == 0` to detect.
-            store64(init + 40, audit_log_new());
+            store64(init + 40, argonaut_audit_log_new());
             store64(init + 56, 0);
         } else {
             store64(init + 40, pal_chain(pal));
             store64(init + 56, pal);
         }
     } else {
-        store64(init + 40, audit_log_new());
+        store64(init + 40, argonaut_audit_log_new());
         store64(init + 56, 0);
     }
     store64(init + 48, 0 - 1);            # notify_fd (M1) — opt-in via init_notify_bind

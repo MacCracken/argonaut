@@ -46,12 +46,12 @@ fn main() {
     alloc_init();
     test_group("audit-core");
 
-    var log = audit_log_new();
+    var log = argonaut_audit_log_new();
     audit_log_record(log, "daimon", EVT_STARTING);
     assert_eq(audit_log_len(log), 1, "rec 1");
     assert_eq(audit_log_is_empty(log) == 0, 1, "!mt");
 
-    var log2 = audit_log_new();
+    var log2 = argonaut_audit_log_new();
     audit_log_record(log2, "daimon", EVT_STARTING);
     audit_log_record(log2, "daimon", EVT_STARTED);
     audit_log_record(log2, "daimon", EVT_HEALTH_PASSED);
@@ -77,24 +77,24 @@ fn main() {
     assert_eq(audit_event_severity(EVT_CRASH_DETECTED), SEV_ERROR, "s:cr");
     assert_eq(audit_event_severity(EVT_STOPPED_FAIL), SEV_ERROR, "s:sf");
 
-    var log3 = audit_log_new();
+    var log3 = argonaut_audit_log_new();
     audit_log_record(log3, "daimon", EVT_STARTING);
     audit_log_record(log3, "redis", EVT_STARTING);
     var by_src = audit_log_by_source(log3, "argonaut");
     assert_eq(vec_len(by_src), 2, "src 2");
 
-    var log4 = audit_log_new();
+    var log4 = argonaut_audit_log_new();
     audit_log_record(log4, "daimon", EVT_STARTING);
     audit_log_record(log4, "daimon", EVT_TIMEOUT_KILLED);
     assert_eq(vec_len(audit_log_by_severity(log4, SEV_ERROR)), 1, "sev 1e");
     assert_eq(vec_len(audit_log_by_severity(log4, SEV_INFO)), 1, "sev 1i");
 
-    var log5 = audit_log_new();
+    var log5 = argonaut_audit_log_new();
     audit_log_record(log5, "daimon", EVT_STARTING);
     audit_log_record(log5, "daimon", EVT_TIMEOUT_KILLED);
     assert_eq(vec_len(audit_log_query(log5, "argonaut", SEV_ERROR)), 1, "q 1e");
 
-    var log6 = audit_log_new();
+    var log6 = argonaut_audit_log_new();
     for (var i = 0; i < 10; i = i + 1) {
         var sb = str_builder_new();
         str_builder_add_cstr(sb, "svc-");

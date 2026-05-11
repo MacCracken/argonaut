@@ -185,7 +185,7 @@ fn main() {
     assert_eq(load64(ec + 24), 3000, "ec boot");
 
     # --- audit: record + verify chain ---
-    var alog = audit_log_new();
+    var alog = argonaut_audit_log_new();
     audit_log_record(alog, "svc-a", EVT_STARTING);
     audit_log_record(alog, "svc-a", EVT_STARTED);
     audit_log_record(alog, "svc-b", EVT_STOPPING);

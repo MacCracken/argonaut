@@ -141,7 +141,11 @@ fn check_command(cmd_str, timeout_ms) {
         vec_push(argv, vec_get(parts, i));
     }
 
-    var code = exec_vec(argv);
+    # 1.6.1 — exec_vec_str (Str-shape argv). The 1.5.2 upstream
+    # issue argonaut filed against cyrius landed in 5.10.44 as a
+    # parallel typed-shape family; this call site was one of the
+    # ones the issue named as broken.
+    var code = exec_vec_str(argv);
     return code == 0;
 }
 
