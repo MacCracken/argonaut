@@ -7,6 +7,9 @@
 # Stdlib + deps auto-included via cyrius.toml
 
 # Argonaut modules
+# (src/compat.cyr is auto-included via [deps.argonaut_compat] in
+# cyrius.cyml — picks up the libro 2.6.2 `ct_eq` shim ahead of every
+# compilation unit, including standalone .tcyr tests.)
 include "src/types.cyr"
 include "src/boot.cyr"
 include "src/services.cyr"

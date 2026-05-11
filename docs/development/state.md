@@ -6,6 +6,16 @@
 
 ## Version
 
+**1.5.1** (shipped 2026-05-10 — toolchain + dep refresh patch. Cyrius
+pin 5.7.5 → 5.10.34 (70+ upstream slots; sakshi/sigil promoted from
+stdlib to external git pins; new `thread`/`random` stdlib modules);
+libro 2.0.5 → 2.6.2; patra 1.1.1 → 1.9.3. `/lib/` moved out of the
+tree (gitignored, repopulated by `cyrius deps`). CI / release
+workflows aligned with agnosys / agnostik 5.10 pattern (versioned
+toolchain layout, lockfile-gated hash verify, fmt-via-diff). New
+`src/compat.cyr` shims `ct_eq` for libro 2.6.2's stale call site,
+wired via `[deps.argonaut_compat]` self-reference.)
+
 **1.5.0** (shipped 2026-04-27 — PID-1 readiness minor: closes the
 three 1.4.0 audit deferrals (M1 sd_notify SO_PEERCRED wiring, M3
 generic-waitpid reaper + PR_SET_CHILD_SUBREAPER enrol, L3 setsid +
@@ -27,27 +37,29 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Toolchain
 
-- `cyrius = "5.7.5"` pinned in `cyrius.cyml [package]`
-- Local toolchain `cc5` 5.7.6 (newer than pin — CI installs the pin)
+- `cyrius = "5.10.34"` pinned in `cyrius.cyml [package]`
+- Local toolchain `cc5` 5.10.39+ (newer than pin — CI installs the pin)
 - No `.cyrius-toolchain` file; the manifest is the only pin source
+- Versioned install layout: `~/.cyrius/versions/<V>/{bin,lib}` with
+  `~/.cyrius/{bin,lib}` symlinking to the current one (required by
+  cc5 5.10.9+'s arch-peer include resolution)
 
 ## Binary
 
-- **652 KB** statically linked ELF x86_64 (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`)
-- Was 378 KB at 1.2.0, 641 KB at 1.3.0, 650 KB at 1.4.0; +2 KB at
-  1.5.0 for `notify_try_recv_authenticated` (recvmsg + SCM_CREDENTIALS),
-  `proc_table_reap_orphans`, `prctl(PR_SET_CHILD_SUBREAPER)` enrol,
-  `setsid` + stdout/stderr `dup2` in `fork_exec_service`, and the
-  `init_notify_bind` / `init_notify_fd` opt-in surface
-- Dead-code floor: ~1430 unreachable functions NOPed under DCE
+- **~990 KB** statically linked ELF x86_64 (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1014488 bytes)
+- Was 378 KB at 1.2.0, 641 KB at 1.3.0, 650 KB at 1.4.0, 652 KB at
+  1.5.0; +338 KB at 1.5.1 for libro 2.6.2 bringing its full
+  transitive surface (agnosys 1.0.4, sigil 3.0.1, sakshi 2.2.3)
+  inline. Under libro 2.0.5 these were stub-shimmed in test_header.
+- Dead-code floor: ~2,262 unreachable functions NOPed under DCE
+  (was ~1,430 at 1.5.0)
 
 ## Suites
 
-- **27 .tcyr suites / 649 assertions** (0 failures on cyrius 5.7.6).
-  +12 assertions over 1.4.0 for the M1 / M3 / L3 audit-deferral
-  regressions in `tests/tcyr/audit_findings.tcyr` (groups
-  `audit-m1-notify-cred`, `audit-m3-reaper-orphans`,
-  `audit-l3-fork-setsid`)
+- **27 .tcyr suites / 649 assertions** (0 failures on cyrius 5.10.34).
+  Same coverage as 1.5.0; `tests/tcyr/serde.tcyr` regenerated for
+  the new `#derive(Serialize)` 2-arg `_to_json(ptr, sb)` form
+  (pre-5.8 was 1-arg returning Str).
 - **2 .bcyr binaries** (`tests/bcyr/argonaut.bcyr`, `tests/bcyr/api.bcyr`)
 - **37 benchmarks** wired into `src/bench_main.cyr`; history in `bench-history.csv`
 
@@ -69,9 +81,11 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Dependencies
 
-- **stdlib (23 modules)**: `string fmt alloc vec str syscalls io fs process hashmap tagged args json fnptr sakshi freelist bigint chrono sigil ct keccak assert bench`
-- **libro 2.0.5** — single-module dist (`lib/libro.cyr`) via `[deps.libro] tag = "2.0.5" modules = ["dist/libro.cyr"]`. SHA pinned in `cyrius.lock`.
-- **patra 1.1.1** — transitive dep of libro 2.0 (PatraStore audit-entry persistence). SHA pinned in `cyrius.lock`.
+- **stdlib (23 modules)**: `string fmt alloc vec str syscalls io fs process hashmap tagged args json fnptr freelist bigint chrono ct keccak thread random assert bench` (sakshi + sigil dropped — promoted upstream from stdlib to external git pins; thread + random added — libro 2.6.2's dist depends on both)
+- **libro 2.6.2** — single-module dist (`lib/libro.cyr`) via `[deps.libro] tag = "2.6.2" modules = ["dist/libro.cyr"]`. SHA pinned in `cyrius.lock`.
+- **patra 1.9.3** — explicit dep, was transitive of libro 2.0. SHA pinned in `cyrius.lock`.
+- **sakshi 2.2.3 + sigil 3.0.1 + agnosys 1.0.4** — transitive via libro 2.6.2 (sakshi also via patra 1.9.3). All SHA-pinned in `cyrius.lock`; resolved into `lib/` by `cyrius deps`.
+- **`[deps.argonaut_compat]`** self-reference (`path = "."`, `modules = ["src/compat.cyr"]`) — auto-loads the `ct_eq` shim ahead of every compilation unit, including standalone `.tcyr` tests.
 
 ## In-flight
 
@@ -97,6 +111,7 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Recent shipped
 
+- **1.5.1** (2026-05-10) — toolchain + dep refresh patch: cyrius 5.7.5 → 5.10.34, libro 2.0.5 → 2.6.2, patra 1.1.1 → 1.9.3; `/lib/` gitignored; CI/release workflows aligned with 5.10 pattern; `src/compat.cyr` shims `ct_eq` for libro
 - **1.5.0** (2026-04-27) — PID-1 readiness minor; closes the three 1.4.0 audit deferrals (M1 sd_notify SO_PEERCRED wiring, M3 orphan reaper + subreaper enrol, L3 setsid + stdout/stderr dup2)
 - **1.4.0** (2026-04-26) — P(-1) hardening minor; eight audit findings landed (2 HIGH, 1 MEDIUM, 5 LOW), three deferred to 1.5.0; CLAUDE.md durable / state.md volatile split
 - **1.3.0** (2026-04-26) — toolchain + dep bump (cyrius 5.7.5, libro 2.0.5, cyrius.cyml manifest, lockfile)

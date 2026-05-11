@@ -752,18 +752,18 @@ fn init_list_services(init) {
 
         var sb = str_builder_new();
         str_builder_add_cstr(sb, "{\"name\":\"");
-            str_builder_add_cstr(sb, name);
-            str_builder_add_cstr(sb, "\",\"state\":\"");
-            str_builder_add_cstr(sb, service_state_str(managed_svc_state(ms)));
-            str_builder_add_cstr(sb, "\",\"pid\":");
-            str_builder_add_int(sb, managed_svc_pid(ms));
-            str_builder_add_cstr(sb, ",\"restarts\":");
-            str_builder_add_int(sb, managed_svc_restarts(ms));
-            str_builder_add_cstr(sb, ",\"enabled\":");
-            str_builder_add_int(sb, svc_def_enabled(sd));
-            str_builder_add_cstr(sb, ",\"type\":\"");
-            str_builder_add_cstr(sb, service_type_str(svc_def_service_type(sd)));
-            str_builder_add_cstr(sb, "\"}");
+        str_builder_add_cstr(sb, name);
+        str_builder_add_cstr(sb, "\",\"state\":\"");
+        str_builder_add_cstr(sb, service_state_str(managed_svc_state(ms)));
+        str_builder_add_cstr(sb, "\",\"pid\":");
+        str_builder_add_int(sb, managed_svc_pid(ms));
+        str_builder_add_cstr(sb, ",\"restarts\":");
+        str_builder_add_int(sb, managed_svc_restarts(ms));
+        str_builder_add_cstr(sb, ",\"enabled\":");
+        str_builder_add_int(sb, svc_def_enabled(sd));
+        str_builder_add_cstr(sb, ",\"type\":\"");
+        str_builder_add_cstr(sb, service_type_str(svc_def_service_type(sd)));
+        str_builder_add_cstr(sb, "\"}");
 
         vec_push(results, str_builder_build(sb));
     }
@@ -777,22 +777,22 @@ fn init_system_status(init) {
     var config = load64(init);
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"boot_mode\":\"");
-        str_builder_add_cstr(sb, boot_mode_str(load64(stats)));
-        str_builder_add_cstr(sb, "\",\"boot_duration_ms\":");
-        str_builder_add_int(sb, load64(stats + 8));
-        str_builder_add_cstr(sb, ",\"services_running\":");
-        str_builder_add_int(sb, load64(stats + 16));
-        str_builder_add_cstr(sb, ",\"services_failed\":");
-        str_builder_add_int(sb, load64(stats + 24));
-        str_builder_add_cstr(sb, ",\"total_restarts\":");
-        str_builder_add_int(sb, load64(stats + 32));
-        str_builder_add_cstr(sb, ",\"boot_complete\":");
-        if (load64(stats + 40)) {
-            str_builder_add_cstr(sb, "true");
-        } else {
-            str_builder_add_cstr(sb, "false");
-        }
-        str_builder_add_cstr(sb, "}");
+    str_builder_add_cstr(sb, boot_mode_str(load64(stats)));
+    str_builder_add_cstr(sb, "\",\"boot_duration_ms\":");
+    str_builder_add_int(sb, load64(stats + 8));
+    str_builder_add_cstr(sb, ",\"services_running\":");
+    str_builder_add_int(sb, load64(stats + 16));
+    str_builder_add_cstr(sb, ",\"services_failed\":");
+    str_builder_add_int(sb, load64(stats + 24));
+    str_builder_add_cstr(sb, ",\"total_restarts\":");
+    str_builder_add_int(sb, load64(stats + 32));
+    str_builder_add_cstr(sb, ",\"boot_complete\":");
+    if (load64(stats + 40)) {
+        str_builder_add_cstr(sb, "true");
+    } else {
+        str_builder_add_cstr(sb, "false");
+    }
+    str_builder_add_cstr(sb, "}");
     return str_builder_build(sb);
 }
 
@@ -814,26 +814,26 @@ fn init_system_metrics(init) {
 
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"services_total\":");
-        str_builder_add_int(sb, total);
-        str_builder_add_cstr(sb, ",\"services_running\":");
-        str_builder_add_int(sb, load64(stats + 16));
-        str_builder_add_cstr(sb, ",\"services_failed\":");
-        str_builder_add_int(sb, load64(stats + 24));
-        str_builder_add_cstr(sb, ",\"services_stopped\":");
-        str_builder_add_int(sb, stopped);
-        str_builder_add_cstr(sb, ",\"services_starting\":");
-        str_builder_add_int(sb, starting);
-        str_builder_add_cstr(sb, ",\"total_restarts\":");
-        str_builder_add_int(sb, load64(stats + 32));
-        str_builder_add_cstr(sb, ",\"boot_duration_ms\":");
-        str_builder_add_int(sb, load64(stats + 8));
-        str_builder_add_cstr(sb, ",\"boot_complete\":");
-        if (load64(stats + 40)) {
-            str_builder_add_cstr(sb, "true");
-        } else {
-            str_builder_add_cstr(sb, "false");
-        }
-        str_builder_add_cstr(sb, "}");
+    str_builder_add_int(sb, total);
+    str_builder_add_cstr(sb, ",\"services_running\":");
+    str_builder_add_int(sb, load64(stats + 16));
+    str_builder_add_cstr(sb, ",\"services_failed\":");
+    str_builder_add_int(sb, load64(stats + 24));
+    str_builder_add_cstr(sb, ",\"services_stopped\":");
+    str_builder_add_int(sb, stopped);
+    str_builder_add_cstr(sb, ",\"services_starting\":");
+    str_builder_add_int(sb, starting);
+    str_builder_add_cstr(sb, ",\"total_restarts\":");
+    str_builder_add_int(sb, load64(stats + 32));
+    str_builder_add_cstr(sb, ",\"boot_duration_ms\":");
+    str_builder_add_int(sb, load64(stats + 8));
+    str_builder_add_cstr(sb, ",\"boot_complete\":");
+    if (load64(stats + 40)) {
+        str_builder_add_cstr(sb, "true");
+    } else {
+        str_builder_add_cstr(sb, "false");
+    }
+    str_builder_add_cstr(sb, "}");
     return str_builder_build(sb);
 }
 
@@ -847,26 +847,26 @@ fn init_boot_log(init) {
         var step = vec_get(steps, i);
         if (i > 0) { str_builder_add_cstr(sb, ","); }
         str_builder_add_cstr(sb, "{\"stage\":\"");
-            str_builder_add_cstr(sb, boot_stage_str(load64(step)));
-            str_builder_add_cstr(sb, "\",\"status\":\"");
-            str_builder_add_cstr(sb, step_status_str(load64(step + 32)));
-            str_builder_add_cstr(sb, "\",\"required\":");
-            if (load64(step + 16)) {
-                str_builder_add_cstr(sb, "true");
-            } else {
-                str_builder_add_cstr(sb, "false");
-            }
-            str_builder_add_cstr(sb, ",\"started_at\":");
-            str_builder_add_int(sb, load64(step + 40));
-            str_builder_add_cstr(sb, ",\"completed_at\":");
-            str_builder_add_int(sb, load64(step + 48));
-            var err = load64(step + 56);
-            if (err != 0) {
-                str_builder_add_cstr(sb, ",\"error\":\"");
-                str_builder_add(sb, err);
-                str_builder_add_cstr(sb, "\"");
-            }
-            str_builder_add_cstr(sb, "}");
+        str_builder_add_cstr(sb, boot_stage_str(load64(step)));
+        str_builder_add_cstr(sb, "\",\"status\":\"");
+        str_builder_add_cstr(sb, step_status_str(load64(step + 32)));
+        str_builder_add_cstr(sb, "\",\"required\":");
+        if (load64(step + 16)) {
+            str_builder_add_cstr(sb, "true");
+        } else {
+            str_builder_add_cstr(sb, "false");
+        }
+        str_builder_add_cstr(sb, ",\"started_at\":");
+        str_builder_add_int(sb, load64(step + 40));
+        str_builder_add_cstr(sb, ",\"completed_at\":");
+        str_builder_add_int(sb, load64(step + 48));
+        var err = load64(step + 56);
+        if (err != 0) {
+            str_builder_add_cstr(sb, ",\"error\":\"");
+            str_builder_add(sb, err);
+            str_builder_add_cstr(sb, "\"");
+        }
+        str_builder_add_cstr(sb, "}");
     }
 
     str_builder_add_cstr(sb, "]");

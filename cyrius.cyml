@@ -5,12 +5,17 @@ description = "Init system and service manager for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/argonaut"
 language = "cyrius"
-cyrius = "5.7.5"
+cyrius = "5.10.34"
 
 [build]
 entry = "src/main.cyr"
 output = "build/argonaut"
 
+# `sakshi` and `sigil` are NOT listed here — libro 2.5+ promoted
+# both to external git-pinned deps and patra 1.9+ pulls sakshi as
+# its own dep. They land in lib/ via `cyrius deps` (the transitive
+# resolve) and would otherwise duplicate-define against the
+# version-pinned stdlib copy.
 [deps]
 stdlib = [
     "string",
@@ -27,23 +32,31 @@ stdlib = [
     "args",
     "json",
     "fnptr",
-    "sakshi",
     "freelist",
     "bigint",
     "chrono",
-    "sigil",
     "ct",
     "keccak",
+    "thread",
+    "random",
     "assert",
     "bench",
 ]
 
+# Self-referenced compatibility shim — picks up `ct_eq` (used by
+# libro 2.6.2's `constant_time_eq_str` but retired from sigil
+# 3.0.2's surface). Listed here so the alias loads ahead of every
+# `cyrius build` / `cyrius test` compilation unit, not just main.
+[deps.argonaut_compat]
+path = "."
+modules = ["src/compat.cyr"]
+
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.1.1"
+tag = "1.9.3"
 modules = ["dist/patra.cyr"]
 
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
-tag = "2.0.5"
+tag = "2.6.2"
 modules = ["dist/libro.cyr"]

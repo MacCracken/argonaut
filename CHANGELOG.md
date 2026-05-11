@@ -7,6 +7,85 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.1] — 2026-05-10
+
+Toolchain + dep refresh. Cyrius pin 5.7.5 → 5.10.34 (70+ upstream
+slots picked up: parser/codegen polish, stdlib additions
+[`thread`, `random`, `result`], sakshi/sigil promoted from stdlib
+to external git pins). Libro 2.0.5 → 2.6.2; patra 1.1.1 → 1.9.3.
+CI / release workflows aligned with the agnosys / agnostik 5.10
+pattern (versioned toolchain layout, lockfile-gated hash verify,
+fmt-via-diff for the 5.9 `--check` no-op).
+
+### Changed
+
+- **`cyrius.cyml`** — `[package].cyrius` pinned `5.7.5` → `5.10.34`.
+- **`cyrius.cyml`** — `[deps.libro]` pinned `2.0.5` → `2.6.2`,
+  `[deps.patra]` pinned `1.1.1` → `1.9.3`. New `[deps.argonaut_compat]`
+  self-reference auto-loads `src/compat.cyr` ahead of every
+  compilation unit (build + every standalone `.tcyr` test).
+- **`cyrius.cyml`** — `[deps].stdlib` trimmed: `sakshi` and `sigil`
+  removed (libro 2.5+ promoted both to external git pins and patra
+  1.9+ pulls sakshi as its own dep; they now land in `lib/` via
+  `cyrius deps` transitive resolve and would duplicate-define
+  against the version-pinned stdlib copy). `thread` and `random`
+  added — libro 2.6.2's dist depends on both.
+- **`/lib/`** — removed from the tree; gitignored. Now repopulated
+  by `cyrius deps` from the version-pinned stdlib + git-pinned dep
+  snapshots. Matches yukti / patra / agnosys / agnostik convention.
+- **`.gitignore`** — adds `/lib/`, `cyrius-*.tar.gz`, `SHA256SUMS`.
+- **`tests/tcyr/serde.tcyr`** — rewritten for the 5.10 `#derive(Serialize)`
+  2-arg `_to_json(ptr, sb)` form (pre-5.8 was 1-arg returning Str).
+  All 39 assertions pass under the new derive codegen.
+- **`src/init.cyr`** — fmt pass under cyrius 5.10.34 (re-indent of
+  two `str_builder` blocks; no behavioural change).
+
+### Added
+
+- **`src/compat.cyr`** — thin `ct_eq(a, alen, b, blen) → ct_eq_bytes_lens`
+  alias. Libro 2.6.2's dist still calls bare `ct_eq` from
+  `constant_time_eq_str` (5 call sites: chain verify, integrity
+  walk, merkle root, anchor roots), but sigil 3.0.2 retired the
+  name in favour of `ct_eq_bytes_lens`. Same signature, same
+  constant-time semantics — just renamed. Wired into every
+  compilation unit via `[deps.argonaut_compat]` in `cyrius.cyml`.
+
+### Toolchain / CI
+
+- **`.github/workflows/ci.yml`** — versioned toolchain layout
+  (`~/.cyrius/versions/<V>/{bin,lib}` + symlinks) so cc5 5.10.9+
+  resolves arch-peer includes (`syscalls_x86_64_linux.cyr` etc.);
+  fmt check switched from `cyrius fmt --check` (no-op in 5.9.x —
+  silent pass on drift) to `diff <(cyrius fmt $f) $f`; dep-hash
+  verify is now lockfile-gated (skip with warning when
+  `cyrius.lock` doesn't exist yet, enforce once committed).
+- **`.github/workflows/release.yml`** — same toolchain + lockfile-
+  gate updates as CI. Tag-style + version-verify gates unchanged.
+
+### Stats
+
+- **27 .tcyr suites / 649 assertions** pass under cyrius 5.10.34
+  (was 27 / 649 under 5.7.5 — same coverage, regenerated against
+  the new derive(Serialize) codegen).
+- **Binary `652 KB` → `~990 KB`** (`CYRIUS_DCE=1`). The +338 KB
+  jump tracks libro 2.6.2 bringing its full transitive surface
+  (agnosys 1.0.4, sigil 3.0.1, sakshi 2.2.3) — under 2.0.5 these
+  were stub-shimmed; the dist bundle now self-contains. ~2,262
+  unreachable fns NOPed under DCE (was ~1,430).
+
+### Deferred
+
+- **Libro `ct_eq` shim** — drop `src/compat.cyr` once libro
+  releases a version that calls `ct_eq_bytes_lens` directly.
+  Track upstream; remove the `[deps.argonaut_compat]` self-dep at
+  that time.
+- **`audit_log_new` name collision** — sigil 3.0.1's dist defines
+  `audit_log_new()`; argonaut's `src/audit.cyr:91` shadows it
+  (last definition wins, argonaut's wrapper around `chain_new()`
+  is what callers get). Benign but noisy at compile time —
+  rename argonaut's wrapper (e.g. `argonaut_audit_log_new`) in a
+  later minor once kybernet (the consumer) is ready to follow.
+
 ## [1.5.0] — 2026-04-27
 
 PID-1 readiness minor — closes the three audit deferrals from

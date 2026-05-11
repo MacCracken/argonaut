@@ -1,6 +1,18 @@
 # Cyrius build artifacts
 /build/
 
+# Vendored stdlib + dep snapshots — repopulated by `cyrius deps`
+# from the version-pinned snapshot in cyrius.cyml [deps] stdlib +
+# [deps.<name>]. Keeping this out of the repo prevents stale
+# stubs from a prior cyrius version sitting in tree (matches
+# yukti / patra / agnosys / agnostik convention).
+/lib/
+
+# Release / toolchain tarballs
+cyrius-*.tar.gz
+*.tar.gz
+SHA256SUMS
+
 # IDE / editor
 .idea/
 .vscode/

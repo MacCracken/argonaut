@@ -1,0 +1,15 @@
+# compat.cyr — toolchain / dep compatibility shims
+#
+# Libro 2.6.2's dist still calls bare `ct_eq(a, alen, b, blen)` from
+# `constant_time_eq_str` (5 call sites: verify, chain integrity,
+# merkle proof root, anchor roots). Sigil 3.0.2 retired the bare
+# `ct_eq` in favour of `ct_eq_bytes_lens` (same signature, same
+# constant-time semantics — just renamed). Libro's transitive sigil
+# pin is 3.0.1 but the upstream dist file ships under the 3.1.0
+# banner with `ct_eq` already removed, so libro links against a
+# missing symbol. Provide a thin alias here until libro releases a
+# version that calls `ct_eq_bytes_lens` directly.
+
+fn ct_eq(a, a_len, b, b_len): i64 {
+    return ct_eq_bytes_lens(a, a_len, b, b_len);
+}
