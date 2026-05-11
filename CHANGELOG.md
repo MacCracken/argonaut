@@ -7,6 +7,121 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.2] — 2026-05-10
+
+Audit follow-up patch. Closes the 1.4.0 HIGH-1 deferral (the
+reject-non-loopback gate that preserved the safety property at
+the cost of feature surface) with a real IPv4 resolver. Filed the
+1.6.x-deferred `lib/process.cyr` `exec_env` Str/cstr quirk
+upstream against `cyrius` per their `docs/development/issues/`
+convention. Side benefit: sigil 3.0.1's dist was re-published
+upstream with `ct_eq` restored, so the 1.5.1 `src/compat.cyr`
+shim + `[deps.argonaut_compat]` self-dep retire one minor early.
+
+### Security
+
+- **[HIGH-1, closed]** — `check_tcp_connect` and the HTTP_GET
+  path in `execute_health_check` now route via
+  `resolve_host_ipv4` rather than hardcoding `127.0.0.1`. The
+  pre-1.4.0 silent-localhost-fallback class is gone (kept gone
+  since 1.4.0's reject-non-loopback gate), and the
+  configured-host-actually-probed feature surface is back.
+  Unresolvable inputs short-circuit with a clear
+  `"host did not resolve"` message; resolvable-but-unconnectable
+  targets surface a distinct `"connect failed"` message. HTTP
+  `Host:` header now echoes the configured host instead of
+  hardcoded `127.0.0.1`, so virtual-host servers route the
+  request correctly.
+
+### Added
+
+- **`src/resolver.cyr`** — IPv4 host resolution for health
+  checks. `parse_ipv4(host)` is a strict dotted-quad parser
+  (4 octets, each 0–255, no leading zeros — rejects
+  CVE-2021-29923-style decimal/octal ambiguity). Returns the
+  packed BE 32-bit IP on success, `-1` on any parse failure.
+  `lookup_etc_hosts(host)` scans `/etc/hosts` line-by-line
+  (handles leading whitespace, comments, inline comments,
+  aliases, IPv6-line skip). `resolve_host_ipv4(host)` is the
+  single public entry point — tries the parser, then the file
+  scan. Full DNS via `gethostbyname` / `getaddrinfo` deferred
+  (libc linkage; no consumer yet justifies the dep weight).
+- **`write_ipv4_octets(dst, ip)`** in `src/resolver.cyr` —
+  pairs with `sockaddr_in.sin_addr`; writes the 4 BE octets of
+  `ip` into `dst[0..3]`. Replaces the per-octet `store8`
+  blocks at the two health-check call sites.
+
+### Changed
+
+- **`src/health.cyr`** — `check_tcp_connect(host, port, timeout)`
+  resolves `host` first, returns `0` on resolver miss without
+  opening a socket. Dispatcher in `execute_health_check`
+  pre-resolves so the resulting `HealthCheckResult.message`
+  names the actual failure mode (resolver miss vs. connect
+  failure). HTTP_GET path uses the same resolver + emits the
+  configured host in its `Host:` header.
+- **`src/main.cyr` + `tests/test_header.cyr`** — `src/resolver.cyr`
+  added to the include chain ahead of `src/health.cyr`
+  (health consumes the resolver).
+- **`is_localhost_target`** in `src/security.cyr` retained as a
+  public predicate for callers that need it; no longer the only
+  path through the health-check dispatcher.
+- **`tests/tcyr/audit_findings.tcyr`** — `audit-high1-resolver`
+  group replaces the prior `audit-high1-localhost_target`
+  group. +24 assertions: `parse_ipv4` accept / reject cases
+  (well-formed quads, leading-zero CVE class, malformed shapes,
+  hostnames, IPv6), `resolve_host_ipv4` round-trip,
+  `/etc/hosts` resolution for `localhost`, end-to-end TCP /
+  HTTP failure-mode discrimination (resolver miss vs. connect
+  failure vs. unreachable).
+
+### Removed
+
+- **`src/compat.cyr`** + **`[deps.argonaut_compat]`** in
+  `cyrius.cyml` — the 1.5.1 `ct_eq` shim is no longer needed.
+  Sigil 3.0.1's dist was re-published upstream between 1.5.1 ship
+  and 1.5.2 work-start with `ct_eq` restored as a public surface
+  (alongside `ct_eq_bytes_lens`), so libro 2.6.2's
+  `constant_time_eq_str` call site links cleanly without
+  argonaut-side glue. `cyrius.lock` drops from 6 → 5 deps.
+
+### Toolchain / docs
+
+- **`docs/development/issues/2026-05-10-process-exec-str-cstr-ambiguity.md`**
+  in the **cyrius** repo (not argonaut) — upstream issue report
+  for the `exec_vec` / `exec_env` / `exec_capture` Str-vs-cstr
+  silent-failure class. Documents the repro, root cause, two
+  proposed fix shapes, and the argonaut-side workaround. Once
+  the cyrius fix lands, argonaut consumes via toolchain bump
+  and re-enables the gated `audit-l3-fork-setsid` /
+  `health_exec.tcyr` strict-result assertions.
+
+### Stats
+
+- **27 .tcyr suites / 673 assertions** pass under cyrius 5.10.34
+  (was 27 / 649 at 1.5.1; +24 for the HIGH-1 resolver coverage).
+- **Binary ~990 KB → ~995 KB** (`CYRIUS_DCE=1`). +4 KB for
+  the resolver module (`parse_ipv4` + `/etc/hosts` scan +
+  `write_ipv4_octets`); some offset from removing the compat
+  shim.
+
+### Deferred
+
+- **DNS resolution via `gethostbyname` / `getaddrinfo`** — out
+  of scope for 1.5.2 (libc linkage; no consumer currently
+  configured against a name argonaut can't resolve via
+  `/etc/hosts`). Lands when a real consumer justifies the dep
+  weight; the resolver module is the obvious extension point.
+- **IPv6 transport (`::1`, `[fe80::]`, etc.)** — `resolve_host_ipv4`
+  returns `-1` for v6 inputs; full AF_INET6 path is a separate
+  initiative tied to the IPv6 socket-family work in the broader
+  AGNOS network stack.
+- **`audit_log_new` name collision** (carry from 1.5.1) — sigil
+  3.0.1 still defines its own `audit_log_new`; argonaut's
+  wrapper at `src/audit.cyr:91` shadows it (last-wins, benign
+  but noisy). Rename to `argonaut_audit_log_new` deferred to
+  the 1.6.x arc once kybernet is ready to follow.
+
 ## [1.5.1] — 2026-05-10
 
 Toolchain + dep refresh. Cyrius pin 5.7.5 → 5.10.34 (70+ upstream

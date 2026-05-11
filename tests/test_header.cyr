@@ -44,11 +44,13 @@ include "lib/retention.cyr"
 include "lib/chain.cyr"
 include "lib/export.cyr"
 
-# Argonaut modules (audit before init — init depends on audit)
+# Argonaut modules (audit before init — init depends on audit;
+# resolver before health — health.cyr consumes resolve_host_ipv4)
 include "src/types.cyr"
 include "src/boot.cyr"
 include "src/services.cyr"
 include "src/process_mgmt.cyr"
+include "src/resolver.cyr"
 include "src/health.cyr"
 include "src/edge_boot.cyr"
 include "src/notify.cyr"

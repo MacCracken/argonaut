@@ -1,0 +1,193 @@
+# resolver.cyr — IPv4 host resolution for health checks (HIGH-1, 1.5.2)
+#
+# Closes the 1.4.0 / 1.5.0 deferral: the reject-non-loopback gate in
+# `check_tcp_connect` / HTTP_GET was a temporary safety property
+# preserving "the supervisor never sees a misleading green badge".
+# This module replaces it with actual host resolution so external
+# health checks against real services work as configured.
+#
+# Resolution order:
+#   1. IPv4 dotted-quad parse (no allocation, no syscalls)
+#   2. /etc/hosts scan (one read, line-based; IPv6 lines skipped)
+#
+# Full DNS via `gethostbyname` / `getaddrinfo` is deliberately out
+# of scope for 1.5.2 — it requires libc linkage, and no consumer is
+# currently configured against a name argonaut can't resolve via
+# the static file. Future work; pin lands when a real consumer
+# justifies the libc dep weight.
+
+# =========================================================================
+# Packed IPv4 representation
+# =========================================================================
+# Internal representation: 32-bit integer with octets stored
+# big-endian (b0 << 24 | b1 << 16 | b2 << 8 | b3). Returned values
+# are >= 0 on success; -1 sentinel signals "unresolvable" (-1 as
+# i64 doesn't collide with any valid 32-bit IP under this packing).
+
+# parse_ipv4(host) — strict dotted-quad parser.
+#
+# Accepts exactly four decimal octets in [0, 255] separated by '.'.
+# Rejects leading zeros on multi-digit octets (e.g. "127.0.0.01") to
+# avoid the inet_aton-style decimal/octal ambiguity that CVE-2021-29923
+# documented across multiple language stdlibs. Returns the packed
+# big-endian IP on success, -1 on any parse failure.
+fn parse_ipv4(host) {
+    var len = str_len(host);
+    # "0.0.0.0" = 7 chars min; "255.255.255.255" = 15 chars max.
+    if (len < 7) { return 0 - 1; }
+    if (len > 15) { return 0 - 1; }
+    var data = str_data(host);
+
+    var ip = 0;
+    var octet = 0;
+    var digits = 0;
+    var dots = 0;
+    var leading_zero = 0;
+
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(data + i);
+        if (c == 46) {                          # '.'
+            if (digits == 0) { return 0 - 1; }
+            if (dots >= 3)   { return 0 - 1; }
+            ip = (ip << 8) | octet;
+            octet = 0;
+            digits = 0;
+            dots = dots + 1;
+            leading_zero = 0;
+        } elif (c >= 48) {
+            if (c > 57) { return 0 - 1; }       # not a digit
+            # Leading-zero check: first digit '0' with more digits to
+            # follow inside this octet → ambiguous (CVE-2021-29923).
+            if (digits == 1) {
+                if (leading_zero == 1) { return 0 - 1; }
+            }
+            if (digits == 0 && c == 48) { leading_zero = 1; }
+            octet = octet * 10 + (c - 48);
+            digits = digits + 1;
+            if (digits > 3) { return 0 - 1; }
+            if (octet > 255) { return 0 - 1; }
+        } else {
+            return 0 - 1;
+        }
+    }
+
+    if (dots != 3) { return 0 - 1; }
+    if (digits == 0) { return 0 - 1; }
+    ip = (ip << 8) | octet;
+    return ip;
+}
+
+# write_ipv4_octets(dst, ip) — write the 4 octets of `ip` to dst[0..3].
+# Pairs with `sockaddr_in.sin_addr` (4-byte big-endian field at offset 4
+# of the 16-byte AF_INET sockaddr).
+fn write_ipv4_octets(dst, ip) {
+    store8(dst,     (ip >> 24) & 255);
+    store8(dst + 1, (ip >> 16) & 255);
+    store8(dst + 2, (ip >> 8)  & 255);
+    store8(dst + 3,  ip        & 255);
+    return 0;
+}
+
+# =========================================================================
+# /etc/hosts lookup
+# =========================================================================
+
+# lookup_etc_hosts(host) — scan /etc/hosts for a name match, return the
+# packed IPv4 address or -1 if not present / file unreadable.
+#
+# Line format (RFC 952 / hosts(5)): `IP HOSTNAME [ALIAS...]`. Leading
+# whitespace, blank lines, comments (`#`), and inline comments
+# (trailing `#`) are all stripped. IPv6 lines (whose first token
+# isn't a v4 dotted quad) get skipped — IPv6 transport is a separate
+# initiative; the resolver returns -1 for v6-only names today.
+#
+# 8 KB cap on the file. /etc/hosts is conventionally small (<1 KB
+# on stock distros, <2 KB on machines with explicit fleet pinning);
+# 8 KB is comfortable headroom without putting an arbitrary heap
+# buffer into the health-check hot path.
+fn lookup_etc_hosts(host) {
+    var buf = alloc(8192);
+    var n = file_read_all("/etc/hosts", buf, 8192);
+    if (n <= 0) { return 0 - 1; }
+
+    var i = 0;
+    while (i < n) {
+        # Skip leading whitespace on the line.
+        while (i < n) {
+            var sc = load8(buf + i);
+            if (sc != 32 && sc != 9) { break; }   # ' ' or tab
+            i = i + 1;
+        }
+        if (i >= n) { return 0 - 1; }
+
+        var first = load8(buf + i);
+        if (first == 35 || first == 10) {        # '#' or empty line
+            # Skip to EOL.
+            while (i < n && load8(buf + i) != 10) { i = i + 1; }
+            if (i < n) { i = i + 1; }
+            continue;
+        }
+
+        # Token 1: IP literal.
+        var ip_start = i;
+        while (i < n) {
+            var tc = load8(buf + i);
+            if (tc == 32 || tc == 9 || tc == 10) { break; }
+            i = i + 1;
+        }
+        var ip_str = str_new(buf + ip_start, i - ip_start);
+        var ip = parse_ipv4(ip_str);
+        if (ip < 0) {
+            # Likely IPv6 or malformed; skip to EOL.
+            while (i < n && load8(buf + i) != 10) { i = i + 1; }
+            if (i < n) { i = i + 1; }
+            continue;
+        }
+
+        # Remaining tokens: hostname + aliases. Match `host` against any.
+        var line_done = 0;
+        while (i < n && line_done == 0) {
+            # Skip inter-token whitespace.
+            while (i < n) {
+                var wc = load8(buf + i);
+                if (wc != 32 && wc != 9) { break; }
+                i = i + 1;
+            }
+            if (i >= n) { break; }
+            var lc = load8(buf + i);
+            if (lc == 10) { i = i + 1; break; }       # EOL
+            if (lc == 35) {                           # inline comment
+                while (i < n && load8(buf + i) != 10) { i = i + 1; }
+                if (i < n) { i = i + 1; }
+                line_done = 1;
+            } else {
+                var name_start = i;
+                while (i < n) {
+                    var nc = load8(buf + i);
+                    if (nc == 32 || nc == 9 || nc == 10 || nc == 35) { break; }
+                    i = i + 1;
+                }
+                if (i > name_start) {
+                    var name = str_new(buf + name_start, i - name_start);
+                    if (str_eq(name, host)) {
+                        return ip;
+                    }
+                }
+            }
+        }
+    }
+    return 0 - 1;
+}
+
+# =========================================================================
+# Public resolver
+# =========================================================================
+
+# resolve_host_ipv4(host) — single entry point used by health checks.
+# Returns a packed BE IPv4 address (>= 0) on success, -1 otherwise.
+fn resolve_host_ipv4(host) {
+    if (str_len(host) == 0) { return 0 - 1; }
+    var ip = parse_ipv4(host);
+    if (ip >= 0) { return ip; }
+    return lookup_etc_hosts(host);
+}

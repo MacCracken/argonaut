@@ -7,39 +7,102 @@ work only.
 
 ---
 
-## Current — v1.5.0 (shipped 2026-04-27)
+## Current — v1.5.2 (shipped 2026-05-10)
 
-PID-1 readiness minor. Closes the three audit deferrals from
-1.4.0 (MEDIUM-1, MEDIUM-3, LOW-3) with regression coverage.
-QEMU PID-1 boot harness (gating end-to-end M3 / L3 validation
-per the audit) and the HIGH-1 host resolver slip to 1.6.0. See
-[CHANGELOG 1.5.0](../../CHANGELOG.md#150--2026-04-27) for the
+HIGH-1 host-resolver follow-up patch. `src/resolver.cyr` adds a
+strict IPv4 dotted-quad parser (rejects CVE-2021-29923-style
+leading-zero ambiguity) + `/etc/hosts` scan;
+`check_tcp_connect` and HTTP_GET route via `resolve_host_ipv4`
+rather than hardcoding 127.0.0.1, with distinct messages for
+resolver miss vs. connect failure vs. unreachable. HTTP `Host:`
+header echoes the configured host. `exec_env` Str/cstr quirk
+filed upstream as a cyrius issue. Side benefit: sigil 3.0.1's
+dist was re-published upstream between 1.5.1 ship and 1.5.2
+work-start with `ct_eq` restored, so the 1.5.1 `src/compat.cyr`
+shim + `[deps.argonaut_compat]` self-dep retire one minor early.
+See [CHANGELOG 1.5.2](../../CHANGELOG.md#152--2026-05-10) for
 full disposition.
 
-### Audit deferrals — closed in 1.5.0
-
-- [x] **MEDIUM-1** — `notify_try_recv_authenticated` (recvmsg +
-  SCM_CREDENTIALS) added to `src/notify.cyr`; `notify_bind`
-  enables `SO_PASSCRED`; `init_notify_bind` opt-in + `notify_fd`
-  field on `ArgonautInit`; `init_poll_health` drains
-  authenticated messages when the fd is registered.
-- [x] **MEDIUM-3** — `proc_table_reap_orphans` (bounded
-  `waitpid(-1, ..., WNOHANG)` loop) added; `argonaut_init_new`
-  calls `prctl(PR_SET_CHILD_SUBREAPER, 1)`; `init_reap_services`
-  drains orphans after tracked-PID reaping.
-- [x] **LOW-3** — `fork_exec_service` child now `setsid`s and
-  `dup2`s stdout / stderr to `/dev/null` after the existing stdin
-  redirect.
+The 1.5.x arc continues: libro extended surface (1.5.3) →
+cross-arch (1.5.4) → closeout audit (1.5.5). 1.6.x picks up the
+QEMU harness and the carry-forward cleanups.
 
 ---
 
-## Next — v1.6.0 — QEMU harness + health-check resolver
+## Next — v1.5.3 — Libro extended surface
 
-Theme: end-to-end validate the PID-1 surface, restore the
-non-loopback health-check feature, and clean up the stdlib
-quirk that blocks shell-exec testing.
+Theme: pull forward the libro 2.x audit-chain features argonaut
+hasn't adopted yet. Libro 2.6.2 ships the signing / anchoring /
+merkle / streaming surface; argonaut's `audit_log_*` wrappers in
+`src/audit.cyr` currently consume only the in-memory chain APIs.
 
-### Infrastructure
+- [ ] **AuditChain on-disk persistence** — wire libro's PatraStore
+  audit-entry persistence so the chain survives across argonaut
+  restarts. Default to off; opt-in via `argonaut_config` flag.
+- [ ] **Signed audit entries** — adopt libro's signing module
+  (Ed25519 entry signatures) for tamper-evident shutdown /
+  runlevel records. Key management via sigil.
+- [ ] **Merkle batching** — libro's merkle module for chain
+  batches; cuts verify cost on long-running argonaut sessions
+  (relevant once persistence lands and chains span boots).
+- [ ] Regression coverage in `tests/tcyr/audit_*.tcyr` for each
+  feature; bench impact tracked in `bench-history.csv`.
+
+---
+
+## v1.5.4 — Cross-arch
+
+Theme: restore aarch64 builds. `cc5_aarch64` has shipped in the
+toolchain since 5.5.x; argonaut hasn't been cross-built since
+the cc3 era.
+
+- [ ] **aarch64 cross-build** — `CYRIUS_DCE=1 cyrius build --aarch64
+  src/main.cyr build/argonaut-aarch64`. Mirror the pattern
+  agnosys / agnostik use in their CI (best-effort if
+  `cc5_aarch64` isn't in the toolchain bin dir, hard requirement
+  once it is).
+- [ ] **CI cross-build step** — add to `.github/workflows/ci.yml`
+  after the x86_64 build; verify ELF magic + `file` reports
+  aarch64. Release workflow publishes `argonaut-<V>-aarch64-linux`
+  alongside x86_64.
+- [ ] **aarch64 smoke / test sweep** — gated on a CI runner with
+  aarch64 capacity (qemu-user emulation acceptable for the
+  smoke; native required for the full `.tcyr` sweep).
+- [ ] **Real-hardware validation** — RPi4 + Apple Silicon boot
+  smoke once binaries publish.
+
+---
+
+## v1.5.5 — 1.5.x closeout P(-1) audit
+
+Theme: arc-closing security re-pass before 1.6.0 tagging. One of
+the 2026-04-26 audit's four re-audit triggers is argonaut
+graduating to true PID 1; while that lands in 1.6.x, the 1.5.x
+arc still earns its own closeout audit covering the libro
+extended surface (persistence, signing, merkle) + cross-arch
+syscall surface added in 1.5.4.
+
+- [ ] **P(-1) full pass** — per CLAUDE.md's procedure: roadmap
+  review → cleanliness gate → bench baseline → internal deep
+  review → external research (CVEs, init/service-manager
+  0-days) → security audit → regression tests for findings →
+  post-audit benches → doc sweep.
+- [ ] **Audit report** — `docs/audit/YYYY-MM-DD-audit.md` with
+  severity tags. Every MEDIUM+ earns a failing regression test
+  before the fix.
+- [ ] **Closeout pass** — full test suite, bench snapshot vs
+  prior closeout label, dead-code floor, refactor + cleanup
+  sweep, downstream consumer check (kybernet builds clean
+  against tagged 1.5.5).
+
+---
+
+## v1.6.x arc — PID-1 graduation + carry-forwards
+
+Theme: end-to-end validate argonaut as true PID 1, and clear the
+carry-forward items from the 1.5.x arc.
+
+### PID-1 harness
 
 - [ ] **QEMU PID-1 boot harness** — minimal initramfs + kernel
   boot + assertion harness that runs argonaut as PID 1.
@@ -47,43 +110,21 @@ quirk that blocks shell-exec testing.
   L3 (controlling-TTY decoupling) end-to-end. Sibling repo
   [kybernet](https://github.com/MacCracken/kybernet) has the
   shape under `qemu/` — pull pattern, not code.
-- [ ] **`lib/process.cyr` `exec_env` Str/cstr fix** — upstream
-  stdlib issue. Blocks unit-level shell-exec testing across
-  `health_exec.tcyr` and `audit-l3-fork-setsid`. File against
-  the cyrius stdlib; consume via toolchain bump.
+- [ ] **Re-audit on PID-1 graduation** — trigger from the
+  2026-04-26 audit; runs after the harness lands as the gating
+  re-audit for 1.6.x.
 
-### Audit follow-ups
+### Carry-forwards from 1.5.x
 
-- [ ] **HIGH-1 follow-up** — replace the 1.4.0
-  reject-non-loopback gate in health checks with a real host
-  resolver (dotted-quad parser + `gethostbyname` or
-  `getaddrinfo`). Restores the feature surface the 1.4.0 fix
-  had to drop.
-
-### Re-audit
-
-- [ ] One of the 2026-04-26 audit's four re-audit triggers is
-  argonaut graduating to true PID 1. The QEMU harness lands
-  that ground; schedule a fresh P(-1) pass before tagging
-  1.6.0.
-
----
-
-## Libro extended features (Post-1.0, pulled forward as needed)
-
-Libro 2.0.5 ships the signing / anchoring / merkle / streaming
-surface; argonaut consumes the audit-chain APIs only. These items
-extend that surface:
-
-- [ ] **AuditChain on-disk persistence** — wire libro's PatraStore
-  audit-entry persistence (libro 2.0 ships it; argonaut's
-  `audit_log_*` wrappers in `src/audit.cyr` currently only persist
-  the in-memory chain).
-- [ ] **Signed audit entries** — adopt libro's signing module
-  (Ed25519 entry signatures) for tamper-evident shutdown / runlevel
-  records.
-- [ ] **Merkle batching** — libro's merkle module for chain batches;
-  cuts verify cost on long-running argonaut sessions.
+- [ ] **Drop `src/compat.cyr` shim** — remove the `ct_eq` alias
+  once libro releases a version that calls `ct_eq_bytes_lens`
+  directly. Remove the `[deps.argonaut_compat]` self-dep at the
+  same time. Track upstream libro releases.
+- [ ] **Rename `audit_log_new` wrapper** — sigil 3.0.1's dist
+  defines `audit_log_new()`; argonaut's `src/audit.cyr:91`
+  shadows it (last-wins, benign but noisy at compile time).
+  Rename to `argonaut_audit_log_new` once kybernet (the
+  consumer) is ready to follow.
 
 ---
 
@@ -100,15 +141,6 @@ needs.
 - [ ] Seccomp/Landlock application in `pre_exec`
 - [ ] Control socket for agnoshi runtime commands
 - [ ] Real-hardware boot validation (RPi4, NUC)
-
----
-
-## Cross-arch
-
-- [ ] **aarch64 / Apple Silicon build** — `cc5_aarch64` ships in the
-  toolchain since 5.5.x; argonaut hasn't been cross-built since the
-  cc3 era. Lift planned for a future minor; gated on a CI runner with
-  aarch64 capacity.
 
 ---
 

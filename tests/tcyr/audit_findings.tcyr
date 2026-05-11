@@ -52,47 +52,108 @@ fn main() {
     assert_eq(validate_mapper_name(long_name), 0, "mapper: rejects > 32 chars");
 
     # =====================================================================
-    # is_localhost_target — health-check loopback gate (HIGH-1)
+    # HIGH-1 — host resolver replaces loopback-only gate (closed 1.5.2)
     # =====================================================================
-    test_group("audit-high1-localhost_target");
+    # The 1.4.0 fix (`is_localhost_target` gate) preserved the safety
+    # property at the cost of feature surface; 1.5.2 swaps in a real
+    # IPv4 dotted-quad parser + /etc/hosts scan
+    # (`src/resolver.cyr`), so external health checks work as
+    # configured while keeping the no-silent-localhost-fallback
+    # invariant. `is_localhost_target` is retained for callers that
+    # need the predicate; it's no longer the only path through.
+    test_group("audit-high1-resolver");
 
-    assert_eq(is_localhost_target(str_from("127.0.0.1")), 1, "localhost: 127.0.0.1");
-    assert_eq(is_localhost_target(str_from("localhost")), 1, "localhost: localhost");
-    assert_eq(is_localhost_target(str_from("::1")),       1, "localhost: ::1");
+    # --- parse_ipv4 — accepts well-formed dotted quads ---
+    assert(parse_ipv4(str_from("127.0.0.1"))         >= 0, "parse_ipv4: 127.0.0.1");
+    assert(parse_ipv4(str_from("0.0.0.0"))           >= 0, "parse_ipv4: 0.0.0.0");
+    assert(parse_ipv4(str_from("255.255.255.255"))   >= 0, "parse_ipv4: broadcast");
+    assert(parse_ipv4(str_from("10.0.0.1"))          >= 0, "parse_ipv4: 10/8");
+    assert(parse_ipv4(str_from("192.168.1.1"))       >= 0, "parse_ipv4: 192.168/16");
 
-    assert_eq(is_localhost_target(str_from("example.com")),    0, "localhost: rejects example.com");
-    assert_eq(is_localhost_target(str_from("10.0.0.1")),       0, "localhost: rejects RFC1918");
-    assert_eq(is_localhost_target(str_from("192.168.1.1")),    0, "localhost: rejects RFC1918 #2");
-    assert_eq(is_localhost_target(str_from("localhost.attacker.com")), 0, "localhost: rejects subdomain trick");
-    assert_eq(is_localhost_target(str_from("")),               0, "localhost: rejects empty");
+    # Packing is BE: 127.0.0.1 → (127<<24)|0|0|1 = 0x7f000001.
+    assert_eq(parse_ipv4(str_from("127.0.0.1")),         2130706433, "parse_ipv4: 127.0.0.1 packs to 0x7f000001");
+    assert_eq(parse_ipv4(str_from("0.0.0.0")),                    0, "parse_ipv4: 0.0.0.0 packs to 0");
+    assert_eq(parse_ipv4(str_from("10.0.0.1")),          167772161, "parse_ipv4: 10.0.0.1 packs to 0x0a000001");
 
-    # End-to-end: execute_health_check with HC_TCP_CONNECT against a
-    # non-loopback target must report passed == 0 with the rejection
-    # message — the HIGH-1 silent-localhost-fallback class is gone.
+    # --- parse_ipv4 — rejects malformed inputs ---
+    assert_eq(parse_ipv4(str_from("")),                  0 - 1, "parse_ipv4: rejects empty");
+    assert_eq(parse_ipv4(str_from("127")),               0 - 1, "parse_ipv4: rejects single octet");
+    assert_eq(parse_ipv4(str_from("127.0.0")),           0 - 1, "parse_ipv4: rejects 3 octets");
+    assert_eq(parse_ipv4(str_from("127.0.0.1.5")),       0 - 1, "parse_ipv4: rejects 5 octets");
+    assert_eq(parse_ipv4(str_from("256.0.0.1")),         0 - 1, "parse_ipv4: rejects octet > 255");
+    assert_eq(parse_ipv4(str_from("999.0.0.1")),         0 - 1, "parse_ipv4: rejects 3-digit overflow");
+    assert_eq(parse_ipv4(str_from("127.0.0.")),          0 - 1, "parse_ipv4: rejects trailing dot");
+    assert_eq(parse_ipv4(str_from(".127.0.0.1")),        0 - 1, "parse_ipv4: rejects leading dot");
+    assert_eq(parse_ipv4(str_from("127..0.1")),          0 - 1, "parse_ipv4: rejects empty octet");
+    assert_eq(parse_ipv4(str_from("127.0.0.01")),        0 - 1, "parse_ipv4: rejects leading-zero (CVE-2021-29923)");
+    assert_eq(parse_ipv4(str_from("127.0.0.x")),         0 - 1, "parse_ipv4: rejects non-digit");
+    assert_eq(parse_ipv4(str_from("localhost")),         0 - 1, "parse_ipv4: rejects hostname");
+    assert_eq(parse_ipv4(str_from("::1")),               0 - 1, "parse_ipv4: rejects IPv6");
+
+    # --- resolve_host_ipv4 — full resolution flow ---
+    # Dotted quads round-trip through parse_ipv4.
+    assert_eq(resolve_host_ipv4(str_from("127.0.0.1")), 2130706433, "resolve: 127.0.0.1 from parser");
+    assert_eq(resolve_host_ipv4(str_from("8.8.8.8")),    134744072, "resolve: 8.8.8.8 from parser");
+
+    # /etc/hosts: "localhost" is on every Linux system; resolves
+    # to 127.0.0.1 (or whatever the local file pins it to). We
+    # don't assert the specific IP — just that resolution succeeds
+    # for a name that's always present.
+    var localhost_ip = resolve_host_ipv4(str_from("localhost"));
+    assert(localhost_ip >= 0, "resolve: localhost present in /etc/hosts");
+
+    # Unresolvable inputs return -1 (not silent-localhost).
+    assert_eq(resolve_host_ipv4(str_from("")),                          0 - 1, "resolve: empty");
+    assert_eq(resolve_host_ipv4(str_from("definitely.not.in.hosts.invalid")), 0 - 1, "resolve: unknown name");
+    assert_eq(resolve_host_ipv4(str_from("::1")),                       0 - 1, "resolve: IPv6 deferred");
+
+    # is_localhost_target retained for callers — still works.
+    assert_eq(is_localhost_target(str_from("127.0.0.1")), 1, "is_localhost_target: 127.0.0.1");
+    assert_eq(is_localhost_target(str_from("example.com")), 0, "is_localhost_target: rejects example.com");
+    assert_eq(is_localhost_target(str_from("localhost.attacker.com")), 0, "is_localhost_target: subdomain trick");
+
+    # End-to-end TCP: an unresolvable host yields a clear failure
+    # with the resolver message — not a silent connect to 127.0.0.1.
     var hc = alloc(sizeof(HealthCheck));
     store64(hc, HC_TCP_CONNECT);
-    store64(hc + 8, str_from("example.com"));
+    store64(hc + 8, str_from("definitely.not.in.hosts.invalid"));
     store64(hc + 16, 80);
     store64(hc + 24, 0);
     store64(hc + 32, 100);
     store64(hc + 40, 0);
     var r = execute_health_check(str_from("svc"), hc, 0);
-    assert_eq(load64(r + 16), 0, "high1: TCP non-localhost target = not passed");
+    assert_eq(load64(r + 16), 0, "high1: TCP unresolvable = not passed");
     var msg_a = load64(r + 32);
-    assert(str_contains(msg_a, str_from("non-loopback")), "high1: TCP message names finding");
+    assert(str_contains(msg_a, str_from("did not resolve")), "high1: TCP message names resolver miss");
 
-    # And HTTP_GET against a non-loopback URL.
+    # End-to-end HTTP: same shape against a host that doesn't resolve.
     var hc2 = alloc(sizeof(HealthCheck));
     store64(hc2,      HC_HTTP_GET);
-    store64(hc2 + 8,  str_from("http://example.com/healthz"));
+    store64(hc2 + 8,  str_from("http://definitely.not.in.hosts.invalid/healthz"));
     store64(hc2 + 16, 0);
     store64(hc2 + 24, 0);
     store64(hc2 + 32, 100);
     store64(hc2 + 40, 0);
     var r2 = execute_health_check(str_from("svc"), hc2, 0);
-    assert_eq(load64(r2 + 16), 0, "high1: HTTP non-localhost = not passed");
+    assert_eq(load64(r2 + 16), 0, "high1: HTTP unresolvable = not passed");
     var msg_b = load64(r2 + 32);
-    assert(str_contains(msg_b, str_from("non-loopback")), "high1: HTTP message names finding");
+    assert(str_contains(msg_b, str_from("did not resolve")), "high1: HTTP message names resolver miss");
+
+    # A resolvable-but-unconnectable target (RFC 5737 TEST-NET-1)
+    # gets past the resolver, hits the connect path, and the
+    # message reports a connect failure rather than a resolver
+    # miss — proves the wiring distinguishes the two failure modes.
+    var hc3 = alloc(sizeof(HealthCheck));
+    store64(hc3, HC_TCP_CONNECT);
+    store64(hc3 + 8, str_from("192.0.2.1"));
+    store64(hc3 + 16, 1);            # port 1, certainly closed
+    store64(hc3 + 24, 0);
+    store64(hc3 + 32, 50);            # short timeout
+    store64(hc3 + 40, 0);
+    var r3 = execute_health_check(str_from("svc"), hc3, 0);
+    assert_eq(load64(r3 + 16), 0, "high1: TCP unreachable = not passed");
+    var msg_c = load64(r3 + 32);
+    assert(str_contains(msg_c, str_from("connect")), "high1: TCP message distinguishes connect failure");
 
     # =====================================================================
     # M1 — sd_notify SO_PEERCRED check (notify_try_recv_authenticated)

@@ -6,6 +6,19 @@
 
 ## Version
 
+**1.5.2** (shipped 2026-05-10 — HIGH-1 host resolver follow-up
+patch. `src/resolver.cyr` adds a strict IPv4 dotted-quad parser
+(rejects CVE-2021-29923-style leading-zero ambiguity) +
+`/etc/hosts` scan; `check_tcp_connect` and HTTP_GET now route via
+`resolve_host_ipv4` rather than hardcoding 127.0.0.1, with
+distinct messages for resolver miss vs. connect failure vs.
+unreachable. HTTP `Host:` header echoes the configured host so
+virtual-host servers route correctly. `exec_env` Str/cstr quirk
+filed upstream as a cyrius issue. Side benefit: sigil 3.0.1's
+dist was re-published with `ct_eq` restored, retiring the 1.5.1
+`src/compat.cyr` shim + `[deps.argonaut_compat]` self-dep one
+minor early. DNS resolution + IPv6 transport explicitly deferred.)
+
 **1.5.1** (shipped 2026-05-10 — toolchain + dep refresh patch. Cyrius
 pin 5.7.5 → 5.10.34 (70+ upstream slots; sakshi/sigil promoted from
 stdlib to external git pins; new `thread`/`random` stdlib modules);
@@ -13,8 +26,9 @@ libro 2.0.5 → 2.6.2; patra 1.1.1 → 1.9.3. `/lib/` moved out of the
 tree (gitignored, repopulated by `cyrius deps`). CI / release
 workflows aligned with agnosys / agnostik 5.10 pattern (versioned
 toolchain layout, lockfile-gated hash verify, fmt-via-diff). New
-`src/compat.cyr` shims `ct_eq` for libro 2.6.2's stale call site,
-wired via `[deps.argonaut_compat]` self-reference.)
+`src/compat.cyr` shimmed `ct_eq` for libro 2.6.2's stale call
+site, wired via `[deps.argonaut_compat]` self-reference;
+both retired in 1.5.2 after sigil 3.0.1's upstream re-pub.)
 
 **1.5.0** (shipped 2026-04-27 — PID-1 readiness minor: closes the
 three 1.4.0 audit deferrals (M1 sd_notify SO_PEERCRED wiring, M3
@@ -46,20 +60,21 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **~990 KB** statically linked ELF x86_64 (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1014488 bytes)
+- **~995 KB** statically linked ELF x86_64 (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1018624 bytes)
 - Was 378 KB at 1.2.0, 641 KB at 1.3.0, 650 KB at 1.4.0, 652 KB at
-  1.5.0; +338 KB at 1.5.1 for libro 2.6.2 bringing its full
-  transitive surface (agnosys 1.0.4, sigil 3.0.1, sakshi 2.2.3)
-  inline. Under libro 2.0.5 these were stub-shimmed in test_header.
-- Dead-code floor: ~2,262 unreachable functions NOPed under DCE
-  (was ~1,430 at 1.5.0)
+  1.5.0, ~990 KB at 1.5.1; +4 KB at 1.5.2 for `src/resolver.cyr`
+  (`parse_ipv4`, `lookup_etc_hosts`, `resolve_host_ipv4`,
+  `write_ipv4_octets`) offset by removal of `src/compat.cyr`.
+- Dead-code floor: ~2,268 unreachable functions NOPed under DCE
+  (was ~2,262 at 1.5.1)
 
 ## Suites
 
-- **27 .tcyr suites / 649 assertions** (0 failures on cyrius 5.10.34).
-  Same coverage as 1.5.0; `tests/tcyr/serde.tcyr` regenerated for
-  the new `#derive(Serialize)` 2-arg `_to_json(ptr, sb)` form
-  (pre-5.8 was 1-arg returning Str).
+- **27 .tcyr suites / 673 assertions** (0 failures on cyrius 5.10.34).
+  +24 assertions over 1.5.1 for the new `audit-high1-resolver`
+  group in `tests/tcyr/audit_findings.tcyr` (parse_ipv4 accept /
+  reject cases, /etc/hosts resolution, end-to-end TCP / HTTP
+  failure-mode discrimination).
 - **2 .bcyr binaries** (`tests/bcyr/argonaut.bcyr`, `tests/bcyr/api.bcyr`)
 - **37 benchmarks** wired into `src/bench_main.cyr`; history in `bench-history.csv`
 
@@ -84,24 +99,31 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 - **stdlib (23 modules)**: `string fmt alloc vec str syscalls io fs process hashmap tagged args json fnptr freelist bigint chrono ct keccak thread random assert bench` (sakshi + sigil dropped — promoted upstream from stdlib to external git pins; thread + random added — libro 2.6.2's dist depends on both)
 - **libro 2.6.2** — single-module dist (`lib/libro.cyr`) via `[deps.libro] tag = "2.6.2" modules = ["dist/libro.cyr"]`. SHA pinned in `cyrius.lock`.
 - **patra 1.9.3** — explicit dep, was transitive of libro 2.0. SHA pinned in `cyrius.lock`.
-- **sakshi 2.2.3 + sigil 3.0.1 + agnosys 1.0.4** — transitive via libro 2.6.2 (sakshi also via patra 1.9.3). All SHA-pinned in `cyrius.lock`; resolved into `lib/` by `cyrius deps`.
-- **`[deps.argonaut_compat]`** self-reference (`path = "."`, `modules = ["src/compat.cyr"]`) — auto-loads the `ct_eq` shim ahead of every compilation unit, including standalone `.tcyr` tests.
+- **sakshi 2.2.3 + sigil 3.0.1 + agnosys 1.0.4** — transitive via libro 2.6.2 (sakshi also via patra 1.9.3). All SHA-pinned in `cyrius.lock`; resolved into `lib/` by `cyrius deps`. Sigil 3.0.1's dist re-published 2026-05-10 with `ct_eq` restored; argonaut's 1.5.1 `src/compat.cyr` shim retired at 1.5.2.
+- **`cyrius.lock`** — 5 deps locked (down from 6 at 1.5.1 — `[deps.argonaut_compat]` self-reference removed).
 
 ## In-flight
 
-- **1.6.0 — QEMU PID-1 harness + HIGH-1 resolver.** The
-  audit gated end-to-end M3 (orphan reap under real PID-1
-  reparenting) and L3 (controlling-TTY decoupling) on a QEMU
-  PID-1 boot test harness — minimal initramfs + kernel + assertion
-  output. Sibling repo (`kybernet/qemu/`) has the pattern. Same
-  minor lands the HIGH-1 follow-up: replace the 1.4.0
-  reject-non-loopback gate in health checks with a real host
-  resolver (dotted-quad parser + `gethostbyname` or
-  `getaddrinfo`).
-- **`lib/process.cyr` exec_env Str/cstr quirk** — file an upstream
-  stdlib issue. Blocks unit-level shell-exec testing across
-  `health_exec.tcyr`, the new `audit-l3-fork-setsid` group, and
-  any future shell-driven test.
+- **1.5.3 — Libro extended surface.** Pull forward libro 2.x
+  audit-chain features argonaut hasn't adopted yet (AuditChain
+  on-disk persistence via PatraStore, Ed25519 entry signing,
+  merkle batching). `src/audit.cyr` wrappers currently consume
+  only the in-memory chain.
+- **1.5.4 — Cross-arch.** Restore aarch64 builds; CI step
+  mirroring agnosys / agnostik pattern. Gated on a CI runner
+  with aarch64 capacity.
+- **1.5.5 — Closeout P(-1) audit.** Arc-closing security re-pass
+  before 1.6.0 tagging.
+- **1.6.x — QEMU PID-1 harness + carry-forwards.** Validates M3
+  (orphan reap under real PID-1 reparenting) and L3
+  (controlling-TTY decoupling) on a minimal initramfs harness;
+  also lands the deferred `audit_log_new` rename.
+- **Upstream — `lib/process.cyr` exec_env Str/cstr quirk** —
+  filed at 1.5.2 in cyrius repo
+  (`docs/development/issues/2026-05-10-process-exec-str-cstr-ambiguity.md`).
+  Blocks unit-level shell-exec testing in `health_exec.tcyr` /
+  `audit-l3-fork-setsid`; consume via toolchain bump once
+  cyrius lands the fix.
 - Release-hook gap — 1.4.0 shipped without auto-bumping this file;
   same again for 1.5.0 if the workflow isn't fixed. File against
   the release workflow before 1.6.0.
@@ -111,6 +133,7 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Recent shipped
 
+- **1.5.2** (2026-05-10) — HIGH-1 host resolver follow-up: `src/resolver.cyr` adds IPv4 dotted-quad parser + /etc/hosts scan; health checks route via `resolve_host_ipv4`; HTTP Host: header echoes configured host; `exec_env` Str/cstr quirk filed upstream; 1.5.1 compat shim retired (sigil 3.0.1 dist re-pub restored `ct_eq`)
 - **1.5.1** (2026-05-10) — toolchain + dep refresh patch: cyrius 5.7.5 → 5.10.34, libro 2.0.5 → 2.6.2, patra 1.1.1 → 1.9.3; `/lib/` gitignored; CI/release workflows aligned with 5.10 pattern; `src/compat.cyr` shims `ct_eq` for libro
 - **1.5.0** (2026-04-27) — PID-1 readiness minor; closes the three 1.4.0 audit deferrals (M1 sd_notify SO_PEERCRED wiring, M3 orphan reaper + subreaper enrol, L3 setsid + stdout/stderr dup2)
 - **1.4.0** (2026-04-26) — P(-1) hardening minor; eight audit findings landed (2 HIGH, 1 MEDIUM, 5 LOW), three deferred to 1.5.0; CLAUDE.md durable / state.md volatile split

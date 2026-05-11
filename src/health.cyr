@@ -26,8 +26,16 @@ fn health_state_str(s) {
 # =========================================================================
 
 # TCP connect check — connect and immediately close.
-# Returns 1 on success, 0 on failure.
+# Returns 1 on success, 0 on failure (resolver miss OR connect failure).
+# Caller distinguishes via the message field on the wrapping
+# HealthCheckResult in `execute_health_check`.
 fn check_tcp_connect(host, port, timeout_ms) {
+    # Resolve host to a packed IPv4 first — fail fast on
+    # unresolvable inputs rather than opening a socket against
+    # an arbitrary fallback (HIGH-1, 1.4.0).
+    var ip = resolve_host_ipv4(host);
+    if (ip < 0) { return 0; }
+
     # socket(AF_INET=2, SOCK_STREAM=1, 0)
     var fd = syscall(41, 2, 1, 0);
     if (fd < 0) { return 0; }
@@ -41,12 +49,8 @@ fn check_tcp_connect(host, port, timeout_ms) {
     var port_be = ((port & 255) << 8) | ((port >> 8) & 255);
     store16(&addr + 2, port_be);
 
-    # Parse IP: simple 127.0.0.1 handling
-    # For simplicity, encode 127.0.0.1 as 0x7f000001
-    store8(&addr + 4, 127);
-    store8(&addr + 5, 0);
-    store8(&addr + 6, 0);
-    store8(&addr + 7, 1);
+    # sin_addr (4 bytes, big-endian).
+    write_ipv4_octets(&addr + 4, ip);
 
     # Set socket non-blocking for timeout
     # fcntl(fd, F_SETFL, O_NONBLOCK)
@@ -127,12 +131,15 @@ fn execute_health_check(service_name, hc, pid) {
     var message = 0;
 
     if (check_type == HC_TCP_CONNECT) {
-        # H1: hardcoded localhost — explicitly reject non-loopback targets
-        # so the supervisor never gets a misleading "healthy" verdict.
-        # Full DNS / dotted-quad resolution lands in a future minor.
-        if (is_localhost_target(target) == 0) {
+        # H1 (closed 1.5.2): resolve the configured host via
+        # `resolve_host_ipv4` rather than silently probing 127.0.0.1.
+        # `check_tcp_connect` returns 0 for both "unresolvable" and
+        # "connect failed"; disambiguate by re-resolving here so the
+        # supervisor's audit trail names the actual cause.
+        var tcp_ip = resolve_host_ipv4(target);
+        if (tcp_ip < 0) {
             passed = 0;
-            message = str_from("TCP check rejects non-loopback target (1.4.0)");
+            message = str_from("TCP check: host did not resolve");
         } else {
             passed = check_tcp_connect(target, port, timeout);
             if (passed) {
@@ -182,19 +189,19 @@ fn execute_health_check(service_name, hc, pid) {
             }
         }
 
-        # H1: extract host and reject non-loopback. The legacy code
-        # ignored the host argument and unconditionally probed
-        # 127.0.0.1; a non-localhost target would have silently
-        # received a localhost-based verdict. Until the resolver
-        # lands, reject anything but the loopback literals.
+        # H1 (closed 1.5.2): resolve the configured host via
+        # `resolve_host_ipv4`. Unresolvable inputs short-circuit with
+        # a clear message rather than the silent-localhost fallback
+        # that shipped pre-1.4.0.
         var host_str = str_new(url_data + offset, host_end - offset);
-        if (is_localhost_target(host_str) == 0) {
+        var http_ip = resolve_host_ipv4(host_str);
+        if (http_ip < 0) {
             var result = alloc(sizeof(HealthCheckResult));
             store64(result, service_name);
             store64(result + 8, str_from(health_check_type_str(check_type)));
             store64(result + 16, 0);
             store64(result + 24, 0);
-            store64(result + 32, str_from("HTTP check rejects non-loopback host (1.4.0)"));
+            store64(result + 32, str_from("HTTP check: host did not resolve"));
             store64(result + 40, now_ms());
             return result;
         }
@@ -221,18 +228,19 @@ fn execute_health_check(service_name, hc, pid) {
             store16(&addr, 2);  # AF_INET
             var pbe = ((http_port & 255) << 8) | ((http_port >> 8) & 255);
             store16(&addr + 2, pbe);
-            store8(&addr + 4, 127);
-            store8(&addr + 5, 0);
-            store8(&addr + 6, 0);
-            store8(&addr + 7, 1);
+            write_ipv4_octets(&addr + 4, http_ip);
 
             var ret = syscall(42, fd, &addr, 16);  # connect
             if (ret == 0) {
-                # Send HTTP GET request
+                # Send HTTP GET request. Host: header echoes the
+                # configured host (not hardcoded 127.0.0.1) so
+                # virtual-host servers route the request correctly.
                 var req_sb = str_builder_new();
                 str_builder_add_cstr(req_sb, "GET ");
                 str_builder_add_cstr(req_sb, path);
-                str_builder_add_cstr(req_sb, " HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+                str_builder_add_cstr(req_sb, " HTTP/1.0\r\nHost: ");
+                str_builder_add(req_sb, host_str);
+                str_builder_add_cstr(req_sb, "\r\nConnection: close\r\n\r\n");
                 var req = str_builder_build(req_sb);
                 var req_data = str_data(req);
                 var req_len = str_len(req);

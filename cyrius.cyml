@@ -43,14 +43,6 @@ stdlib = [
     "bench",
 ]
 
-# Self-referenced compatibility shim — picks up `ct_eq` (used by
-# libro 2.6.2's `constant_time_eq_str` but retired from sigil
-# 3.0.2's surface). Listed here so the alias loads ahead of every
-# `cyrius build` / `cyrius test` compilation unit, not just main.
-[deps.argonaut_compat]
-path = "."
-modules = ["src/compat.cyr"]
-
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
 tag = "1.9.3"
