@@ -191,15 +191,21 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## In-flight
 
-- **Gated on external work:** native aarch64 CI runner (runner
-  allocation); WitnessAnchor publishing (AGNOS federation
-  protocol); durable signing-key rotation (kybernet
-  key-management surface); per-service env override
+- **1.6.4 — Native aarch64 CI.** Real-arch validation in CI
+  (not just qemu-user sweep). Adds an `aarch64-native` job
+  to `.github/workflows/ci.yml` running the full `.tcyr`
+  suite + qemu PID-1 harness natively; re-tests the
+  1.5.4-filed sigil Ed25519-aarch64 quirk on real hardware.
+  Real-hw smoke already validated manually via
+  `scripts/aarch64-pi-smoke.sh` (added post-1.6.3, argonaut
+  init in ~536 µs on RPi4); CI makes it durable. Gated on
+  GitHub `ubuntu-24.04-arm` adoption or self-hosted Pi
+  runner allocation.
+- **Gated on external work:** WitnessAnchor publishing (AGNOS
+  federation protocol); durable signing-key rotation
+  (kybernet key-management surface); per-service env override
   (consumer-driven map → flat-cstrs conversion in
   `fork_exec_service`).
-- **1.6.x arc is CLOSED.** Next minor (1.7.0 or 1.6.4 if a
-  patch lands first) depends on what the next external trigger
-  surfaces.
 - **Gated on external work:** native aarch64 CI runner
   (runner allocation); WitnessAnchor publishing (AGNOS
   federation protocol); durable signing-key rotation

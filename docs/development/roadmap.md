@@ -24,31 +24,90 @@ graduation re-audit trigger. See
 [CHANGELOG 1.6.3](../../CHANGELOG.md#163--2026-05-11) and
 [`docs/audit/2026-05-11-audit.md`](../audit/2026-05-11-audit.md).
 
-The 1.6.x arc is CLOSED. PID-1 surface is now
-production-grade: boot smoke (1.6.0), clean SIGTERM/SIGINT
-shutdown via signalfd (1.6.2), orphan reap under real-PID-1
-reparenting (M3, 1.6.2), `fork_exec_service` controlling-TTY
-decoupling validated via setsid (L3, 1.6.3). The static
-helper pattern unlocks future end-to-end tests for any
-service-lifecycle behaviour that needs PID-1 validation.
+The 1.6.x arc is CLOSED for the PID-1 graduation theme: boot
+smoke (1.6.0), clean SIGTERM/SIGINT shutdown via signalfd
+(1.6.2), orphan reap under real-PID-1 reparenting (M3, 1.6.2),
+`fork_exec_service` controlling-TTY decoupling validated via
+setsid (L3, 1.6.3). The static helper pattern unlocks future
+end-to-end tests for any service-lifecycle behaviour that
+needs PID-1 validation.
+
+One arc-extension slot follows before 1.7.0: **1.6.4 — native
+aarch64 CI** (scope below). Manual real-hardware Pi smoke
+already validated via `scripts/aarch64-pi-smoke.sh` (added
+post-1.6.3) — argonaut runs cleanly on a real RPi4, init in
+~536 µs. CI is the durable form.
+
+---
+
+## Next — v1.6.4 — Native aarch64 CI
+
+Theme: durable per-arch validation. The 1.5.4 qemu-user sweep
+(`scripts/aarch64-sweep.sh`) catches codegen regressions but
+not real-hardware behaviour (fork/setsid emulation gaps; the
+1.5.4-filed sigil Ed25519-aarch64 quirk reproduces under
+qemu-user but its real-hardware status is unknown). The
+1.6.3-shipped `scripts/aarch64-pi-smoke.sh` proves the
+real-hw path works end-to-end but is manual — a developer has
+to run it. CI makes it automatic per push.
+
+### Scope
+
+- [ ] **Native aarch64 GitHub Actions runner** — either
+  `ubuntu-24.04-arm` (GitHub-hosted, free for public repos
+  since 2024-09) or a self-hosted Raspberry Pi runner the
+  AGNOS infra fleet already runs for sibling repos. Decide
+  based on agnos / kybernet's choice; consistency across the
+  ecosystem outweighs per-repo optimization.
+- [ ] **CI job: aarch64 build + test sweep** — adds an
+  `aarch64-native` job to `.github/workflows/ci.yml`,
+  parallel to the existing x86_64 job. Builds via
+  `cc5_aarch64`, runs the full `.tcyr` suite natively, runs
+  the qemu PID-1 harness if KVM is available (qemu-system-aarch64
+  + `-cpu host` on a real aarch64 host). No `qemu-user`
+  emulation — this is the real-arch coverage.
+- [ ] **`tests/tcyr/aarch64_findings.tcyr`** — new
+  arch-specific test file separate from `audit_findings.tcyr`
+  (which stays portable / arch-agnostic). Houses the
+  real-hw retest assertions for the 1.5.4-filed sigil Ed25519
+  aarch64 quirk and any other arch-gated findings as they
+  surface. Run by the native-aarch64 CI job and the manual
+  `scripts/aarch64-pi-smoke.sh`; skipped under x86_64 sweeps
+  (gated by a small arch probe at suite entry).
+- [ ] **Re-test the upstream sigil Ed25519 aarch64 quirk** on
+  real hardware — the 1.5.4-filed issue (`ed25519_verify`
+  accepts wrong pk on aarch64) was reproduced under qemu-user.
+  If real-hw passes, file an update against the sigil issue
+  ("qemu-user-only; real hardware clean") so sigil can scope
+  the fix accordingly. Test lives in
+  `tests/tcyr/aarch64_findings.tcyr`.
+- [ ] **Per-arch known-failure budget** — `scripts/aarch64-sweep.sh`
+  already has the budget pattern (KNOWN-FAIL accounting); the
+  native runner won't have the qemu-user emulation
+  exceptions (fork/setsid land cleanly on real hardware), so
+  the budget should be empty or near-empty. If a CI run
+  surfaces a real-arch-only failure, that's the signal to
+  file a new sigil / cyrius / libro issue and (if MEDIUM+)
+  add a regression assertion to `aarch64_findings.tcyr`.
+- [ ] **Release publish gate** — once the CI job is green,
+  flip `argonaut-<VER>-aarch64-linux` in release.yml from
+  "best-effort if `cc5_aarch64` exists" to "hard
+  requirement when the CI job passes" — every release ships
+  a tested aarch64 binary, not just a built one.
+
+### Out of scope
+
+- **Apple Silicon (Asahi Linux)**: same arch as the RPi but
+  different boot path; would be a third runner. Defer to
+  consumer demand.
+- **Cross-arch service exec testing**: argonaut is
+  always single-arch at runtime (supervisor is on one host;
+  it spawns services on the same host), so sign-on-aarch64 →
+  verify-on-x86_64 paths aren't reachable in production.
 
 ---
 
 ## Open — gated on external work
-
-### Native aarch64
-
-- [ ] **Native aarch64 CI runner** — close the qemu-user
-  emulation gap from 1.5.4 (`audit-m3-reaper-orphans`,
-  `audit-l3-fork-setsid` require real fork/setsid semantics).
-  Gated on runner allocation; the aarch64 binary is ready.
-  Note: M3 + L3 are now also covered end-to-end under x86_64
-  PID-1 via `qemu/pid1-harness-test.sh`, so the aarch64
-  blocker is per-arch validation, not per-finding.
-- [ ] **Real-hardware smoke** — RPi4, Apple Silicon (Asahi
-  Linux), Graviton / Ampere cloud aarch64. Once a runner exists
-  the matrix is just `boot + audit_findings + audit_extended +
-  pid1-harness`.
 
 ### Per-service env override
 
