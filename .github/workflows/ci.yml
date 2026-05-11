@@ -110,6 +110,44 @@ jobs:
           ./build/argonaut | tee /tmp/smoke_output
           grep -q "all systems nominal" /tmp/smoke_output
 
+      - name: Cross-build aarch64 (best-effort)
+        # 1.5.4 — restore aarch64 builds. Requires `cc5_aarch64` in
+        # the toolchain bin dir; skip with a warning if the
+        # toolchain release didn't bundle it rather than fail the
+        # whole CI run (matches agnosys / agnostik convention).
+        # The translation pass converts x86_64 syscall numbers to
+        # aarch64 at codegen — no argonaut source changes needed.
+        run: |
+          if [ ! -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
+            echo "::warning::cc5_aarch64 not shipped with this Cyrius release — skipping aarch64 cross-build"
+            exit 0
+          fi
+          CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/argonaut-aarch64
+          echo "argonaut-aarch64: $(wc -c < build/argonaut-aarch64) bytes"
+          file build/argonaut-aarch64 | grep -q "aarch64" || {
+            echo "ERROR: build/argonaut-aarch64 is not an aarch64 ELF"; exit 1; }
+          xxd -l 4 build/argonaut-aarch64 | grep -q "7f45 4c46"
+
+      - name: Smoke test (aarch64 via qemu-user)
+        # Best-effort. Real-hardware coverage is gated on a CI
+        # runner with native aarch64 capacity (not yet allocated;
+        # tracked under the 1.5.4 cross-arch roadmap item). Use
+        # qemu-user-static if available — most stock Ubuntu / Debian
+        # runners have it preinstalled, but we don't fail the run
+        # if it's absent or the cross-build was skipped.
+        run: |
+          if [ ! -f build/argonaut-aarch64 ]; then
+            echo "::warning::aarch64 binary not produced — skipping smoke"
+            exit 0
+          fi
+          if ! command -v qemu-aarch64-static >/dev/null 2>&1 && ! command -v qemu-aarch64 >/dev/null 2>&1; then
+            echo "::warning::qemu-aarch64 not installed — skipping aarch64 smoke"
+            exit 0
+          fi
+          QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64)"
+          "$QEMU" ./build/argonaut-aarch64 | tee /tmp/smoke_aarch64
+          grep -q "all systems nominal" /tmp/smoke_aarch64
+
       - name: Test (27 suites / 649 assertions)
         run: |
           pass=0; fail=0; asserts=0
@@ -150,6 +188,16 @@ jobs:
         with:
           name: build-x86_64
           path: build/argonaut
+          retention-days: 5
+
+      - name: Upload aarch64 build artifact
+        # Conditional — only uploads when the cross-build step
+        # actually produced a binary (cc5_aarch64 was available).
+        if: hashFiles('build/argonaut-aarch64') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-aarch64
+          path: build/argonaut-aarch64
           retention-days: 5
 
   security:

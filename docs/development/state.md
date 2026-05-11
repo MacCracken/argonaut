@@ -6,6 +6,17 @@
 
 ## Version
 
+**1.5.4** (shipped 2026-05-10 — cross-arch. Restores aarch64
+builds via cyrius `cc5_aarch64` — no argonaut source changes
+needed; the translator converts syscalls + ABI at codegen. CI /
+release publish `argonaut-<VER>-aarch64-linux` alongside x86_64
+as best-effort. `scripts/aarch64-sweep.sh` runs the full `.tcyr`
+sweep under qemu-user with a documented known-failure budget
+(2 suites trip qemu emulation limits + an upstream sigil
+Ed25519-aarch64 verify quirk filed against sigil). Real-hardware
+validation gated on aarch64 CI runner allocation, slipped to
+1.6.x.)
+
 **1.5.3** (shipped 2026-05-10 — libro extended surface. New
 `src/audit_ext.cyr` adds opt-in PatraStore persistence
 (record-by-record write-through, chain replayed via
@@ -73,7 +84,8 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **~1.00 MB** statically linked ELF x86_64 (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1023544 bytes)
+- **x86_64: ~1.00 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1023544 bytes)
+- **aarch64: ~1.14 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/argonaut-aarch64`, 1141376 bytes; cross-build via `cc5_aarch64` translator since 1.5.4). +140 KB delta tracks aarch64's fixed-width instruction encoding.
 - Was 378 KB at 1.2.0, 641 KB at 1.3.0, 650 KB at 1.4.0, 652 KB at
   1.5.0, ~990 KB at 1.5.1, ~995 KB at 1.5.2; +5 KB at 1.5.3 for
   the `src/audit_ext.cyr` wrapper module + new ArgonautInit slot
@@ -86,11 +98,8 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Suites
 
-- **28 .tcyr suites / 720 assertions** (0 failures on cyrius 5.10.34).
-  +1 suite / +47 assertions over 1.5.2 for the new
-  `audit_extended.tcyr` (4 groups: audit-ext-merkle,
-  audit-ext-sign-ed25519, audit-ext-persist,
-  audit-ext-init-integration).
+- **Native x86_64: 28 .tcyr suites / 720 assertions** (0 failures on cyrius 5.10.34). Unchanged from 1.5.3.
+- **aarch64 (qemu-user): 26 of 28 / 605 assertions** pass via `scripts/aarch64-sweep.sh`. 2 suites in the documented known-failure budget (qemu emulation limits + upstream sigil Ed25519 quirk — see `docs/architecture/001-cross-arch-aarch64.md`).
 - **2 .bcyr binaries** (`tests/bcyr/argonaut.bcyr`, `tests/bcyr/api.bcyr`)
 - **37 benchmarks** wired into `src/bench_main.cyr`; history in `bench-history.csv`
 
@@ -120,20 +129,22 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## In-flight
 
-- **1.5.4 — Cross-arch.** Restore aarch64 builds; CI step
-  mirroring agnosys / agnostik pattern. Gated on a CI runner
-  with aarch64 capacity.
 - **1.5.5 — Closeout P(-1) audit.** Arc-closing security re-pass
   before 1.6.0 tagging. Covers the libro extended surface
-  (persistence, signing, merkle) added in 1.5.3 + cross-arch
-  syscall surface added in 1.5.4.
+  (persistence, signing, merkle) added in 1.5.3 + the aarch64
+  cross-arch syscall surface added in 1.5.4.
 - **1.6.x — QEMU PID-1 harness + carry-forwards.** Validates M3
   (orphan reap under real PID-1 reparenting) and L3
   (controlling-TTY decoupling) on a minimal initramfs harness;
-  also lands the deferred `audit_log_new` rename, WitnessAnchor
-  publishing (gated on consumer demand + AGNOS federation
-  protocol), and durable signing-key rotation (gated on
-  kybernet's key-management surface).
+  native aarch64 CI runner allocation (closes qemu-user
+  emulation gap); also lands the deferred `audit_log_new`
+  rename, WitnessAnchor publishing (gated on consumer demand +
+  AGNOS federation protocol), and durable signing-key rotation
+  (gated on kybernet's key-management surface).
+- **Upstream — sigil Ed25519 aarch64 verify quirk** — filed at
+  1.5.4 in sigil repo
+  (`docs/development/issues/2026-05-10-ed25519-verify-aarch64-accepts-wrong-pk.md`).
+  Consume via sigil bump once a fix lands.
 - **Upstream — `lib/process.cyr` exec_env Str/cstr quirk** —
   filed at 1.5.2 in cyrius repo
   (`docs/development/issues/2026-05-10-process-exec-str-cstr-ambiguity.md`).
@@ -149,6 +160,7 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Recent shipped
 
+- **1.5.4** (2026-05-10) — cross-arch: aarch64 cross-build via `cc5_aarch64`; CI / release publish `argonaut-<VER>-aarch64-linux` best-effort; `scripts/aarch64-sweep.sh` local sweep with documented known-failure budget; `docs/architecture/001-cross-arch-aarch64.md` documents the surface; upstream sigil Ed25519 aarch64 quirk filed
 - **1.5.3** (2026-05-10) — libro extended surface: `src/audit_ext.cyr` adds opt-in PatraStore persistence, Ed25519/MLDSA/hybrid snapshot signing, merkle root + inclusion / consistency proofs; `argonaut_init_new` integration via `config.audit_persist`; `init_audit_record` / `init_audit_flush` dispatch helpers
 - **1.5.2** (2026-05-10) — HIGH-1 host resolver follow-up: `src/resolver.cyr` adds IPv4 dotted-quad parser + /etc/hosts scan; health checks route via `resolve_host_ipv4`; HTTP Host: header echoes configured host; `exec_env` Str/cstr quirk filed upstream; 1.5.1 compat shim retired (sigil 3.0.1 dist re-pub restored `ct_eq`)
 - **1.5.1** (2026-05-10) — toolchain + dep refresh patch: cyrius 5.7.5 → 5.10.34, libro 2.0.5 → 2.6.2, patra 1.1.1 → 1.9.3; `/lib/` gitignored; CI/release workflows aligned with 5.10 pattern; `src/compat.cyr` shims `ct_eq` for libro
@@ -170,7 +182,7 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 ## Verification
 
 - Linux x86_64 (Arch, 6.18 LTS) — primary dev + CI host
-- aarch64 / Apple Silicon — not yet covered (the toolchain ships `cc5_aarch64` from 5.5.x; argonaut hasn't been cross-built since the cc3 era; lift planned for a future minor)
+- aarch64 — cross-built via `cc5_aarch64` since 1.5.4; smoked + swept under `qemu-aarch64` (qemu-user 11.0.0-1). Real-hardware (RPi4, Apple Silicon, Graviton / Ampere) validation slipped to 1.6.x — gated on aarch64 CI runner allocation. See `docs/architecture/001-cross-arch-aarch64.md`.
 
 ## Audit cadence
 

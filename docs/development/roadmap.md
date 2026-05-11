@@ -7,58 +7,36 @@ work only.
 
 ---
 
-## Current — v1.5.3 (shipped 2026-05-10)
+## Current — v1.5.4 (shipped 2026-05-10)
 
-Libro extended surface. New `src/audit_ext.cyr` adds opt-in
-PatraStore persistence (record-by-record write-through, chain
-replayed via `chain_from_entries` to preserve `prev_hash`
-linkage), snapshot signing (Ed25519 / ML-DSA-65 / hybrid via
-libro `proof_build_signed`), and merkle root + inclusion /
-consistency proof wrappers. `argonaut_init_new` wires the
-persistent log when `config.audit_persist` is set; new
-`init_audit_record` / `init_audit_flush` dispatch helpers route
-through the wrapper or in-memory chain automatically. See
-[CHANGELOG 1.5.3](../../CHANGELOG.md#153--2026-05-10) for full
-disposition.
+Cross-arch — restores aarch64 builds. cyrius's `cc5_aarch64`
+translator converts syscalls + ABI at codegen, so no argonaut
+source changes were needed. CI + release publish
+`argonaut-<VER>-aarch64-linux` alongside x86_64 as best-effort
+(skips without failing when toolchain doesn't bundle the
+translator). `scripts/aarch64-sweep.sh` runs the full `.tcyr`
+sweep under qemu-user with a documented known-failure budget:
+2 suites trip qemu emulation limits + an upstream sigil
+Ed25519 aarch64 verify quirk (filed against sigil with minimal
+repro). `docs/architecture/001-cross-arch-aarch64.md` is the
+canonical reference. See
+[CHANGELOG 1.5.4](../../CHANGELOG.md#154--2026-05-10).
 
-The 1.5.x arc continues: cross-arch (1.5.4) → closeout audit
-(1.5.5). 1.6.x picks up the QEMU harness and carry-forward
-cleanups (compat-shim drop, audit_log_new rename, anchor publish,
-durable signing-key rotation).
-
----
-
-## Next — v1.5.4 — Cross-arch
-
-Theme: restore aarch64 builds. `cc5_aarch64` has shipped in the
-toolchain since 5.5.x; argonaut hasn't been cross-built since
-the cc3 era.
-
-- [ ] **aarch64 cross-build** — `CYRIUS_DCE=1 cyrius build --aarch64
-  src/main.cyr build/argonaut-aarch64`. Mirror the pattern
-  agnosys / agnostik use in their CI (best-effort if
-  `cc5_aarch64` isn't in the toolchain bin dir, hard requirement
-  once it is).
-- [ ] **CI cross-build step** — add to `.github/workflows/ci.yml`
-  after the x86_64 build; verify ELF magic + `file` reports
-  aarch64. Release workflow publishes `argonaut-<V>-aarch64-linux`
-  alongside x86_64.
-- [ ] **aarch64 smoke / test sweep** — gated on a CI runner with
-  aarch64 capacity (qemu-user emulation acceptable for the
-  smoke; native required for the full `.tcyr` sweep).
-- [ ] **Real-hardware validation** — RPi4 + Apple Silicon boot
-  smoke once binaries publish.
+The 1.5.x arc closes with the P(-1) audit (1.5.5). 1.6.x picks
+up the QEMU PID-1 harness, native aarch64 CI runner (closes
+qemu-user gap), and carry-forward cleanups (audit_log_new
+rename, anchor publish, durable signing-key rotation).
 
 ---
 
-## v1.5.5 — 1.5.x closeout P(-1) audit
+## Next — v1.5.5 — 1.5.x closeout P(-1) audit
 
 Theme: arc-closing security re-pass before 1.6.0 tagging. One of
 the 2026-04-26 audit's four re-audit triggers is argonaut
 graduating to true PID 1; while that lands in 1.6.x, the 1.5.x
 arc still earns its own closeout audit covering the libro
-extended surface (persistence, signing, merkle) + cross-arch
-syscall surface added in 1.5.4.
+extended surface (persistence, signing, merkle) + the aarch64
+cross-arch syscall surface added in 1.5.4.
 
 - [ ] **P(-1) full pass** — per CLAUDE.md's procedure: roadmap
   review → cleanliness gate → bench baseline → internal deep
@@ -92,17 +70,32 @@ carry-forward items from the 1.5.x arc.
   2026-04-26 audit; runs after the harness lands as the gating
   re-audit for 1.6.x.
 
+### Native aarch64
+
+- [ ] **Native aarch64 CI runner** — close the qemu-user
+  emulation gap from 1.5.4 (`audit-m3-reaper-orphans`,
+  `audit-l3-fork-setsid` require real fork/setsid semantics).
+  Gated on runner allocation; the aarch64 binary is ready.
+- [ ] **Real-hardware smoke** — RPi4, Apple Silicon (Asahi
+  Linux), Graviton / Ampere cloud aarch64. Once a runner exists
+  the matrix is just `boot + audit_findings + audit_extended`.
+
 ### Carry-forwards from 1.5.x
 
-- [ ] **Drop `src/compat.cyr` shim** — remove the `ct_eq` alias
-  once libro releases a version that calls `ct_eq_bytes_lens`
-  directly. Remove the `[deps.argonaut_compat]` self-dep at the
-  same time. Track upstream libro releases.
 - [ ] **Rename `audit_log_new` wrapper** — sigil 3.0.1's dist
   defines `audit_log_new()`; argonaut's `src/audit.cyr:91`
   shadows it (last-wins, benign but noisy at compile time).
   Rename to `argonaut_audit_log_new` once kybernet (the
   consumer) is ready to follow.
+- [ ] **WitnessAnchor publishing** — libro's anchor primitive
+  for cross-snapshot trust pins. Gated on consumer demand +
+  AGNOS federation protocol (libro's own roadmap calls this
+  out under "Ecosystem-blocked").
+- [ ] **Durable signing-key rotation** — current 1.5.3 shape
+  generates ephemeral signing keys per `audit_log_keygen()`
+  call. Long-running supervisor sessions across boots want a
+  persisted key. Lands when kybernet wires a real
+  key-management surface; argonaut's API stays stable.
 
 ---
 

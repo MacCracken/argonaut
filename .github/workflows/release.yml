@@ -70,6 +70,21 @@ jobs:
           CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut
           echo "argonaut: $(wc -c < build/argonaut) bytes"
 
+      - name: Cross-build aarch64 (best-effort)
+        # 1.5.4 — ship aarch64 alongside x86_64 when the toolchain
+        # bundles cc5_aarch64. Skip without failing the run when
+        # absent (e.g. older toolchain release tarball); the release
+        # publishes whatever binaries were produced.
+        run: |
+          if [ ! -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
+            echo "::warning::cc5_aarch64 not shipped with this Cyrius release — aarch64 binary skipped"
+            exit 0
+          fi
+          CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/argonaut-aarch64
+          echo "argonaut-aarch64: $(wc -c < build/argonaut-aarch64) bytes"
+          file build/argonaut-aarch64 | grep -q "aarch64" || {
+            echo "ERROR: build/argonaut-aarch64 is not an aarch64 ELF"; exit 1; }
+
       - name: Test
         run: |
           pass=0; fail=0
@@ -96,6 +111,12 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           git archive --format=tar.gz --prefix="argonaut-${TAG}/" -o "argonaut-${TAG}-src.tar.gz" HEAD
           cp build/argonaut "argonaut-${TAG}-x86_64-linux"
+          # aarch64 binary is best-effort (cc5_aarch64 may not be in
+          # the toolchain). Include it when produced; the SHA256SUMS
+          # glob lists whatever -linux binaries exist.
+          if [ -f build/argonaut-aarch64 ]; then
+            cp build/argonaut-aarch64 "argonaut-${TAG}-aarch64-linux"
+          fi
           sha256sum argonaut-*.tar.gz argonaut-*-linux > SHA256SUMS
 
       - uses: actions/upload-artifact@v4

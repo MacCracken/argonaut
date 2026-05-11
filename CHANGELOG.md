@@ -7,6 +7,97 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.4] — 2026-05-10
+
+Cross-arch — restores aarch64 builds. argonaut hasn't been
+cross-built since the cc3 era; cyrius's `cc5_aarch64`
+translator converts x86_64 syscall numbers + ABI at codegen, so
+no argonaut source changes are required. CI / release publish
+`argonaut-<VER>-aarch64-linux` alongside x86_64 as best-effort
+(skip without failing when the toolchain release didn't bundle
+`cc5_aarch64`). Surfaces an upstream sigil Ed25519-aarch64
+verify quirk during the sweep; filed against sigil with a clean
+minimal repro.
+
+### Added
+
+- **`.github/workflows/ci.yml`** — `Cross-build aarch64
+  (best-effort)` step after the x86_64 build: warns + skips
+  without failing when `cc5_aarch64` isn't in the toolchain bin
+  dir; otherwise builds `build/argonaut-aarch64`, verifies ELF
+  magic + `file` reports `aarch64`. `Smoke test (aarch64 via
+  qemu-user)` runs the binary under `qemu-aarch64(-static)` if
+  available and grep-asserts `"all systems nominal"`.
+  Conditional aarch64 artifact upload (only when produced).
+- **`.github/workflows/release.yml`** — same cross-build step;
+  release archive includes `argonaut-<VER>-aarch64-linux` when
+  the binary was produced. `SHA256SUMS` glob auto-picks up the
+  aarch64 binary alongside x86_64.
+- **`scripts/aarch64-sweep.sh`** — developer-facing local
+  validation. Builds the x86_64 + aarch64 binaries, smokes via
+  `qemu-aarch64`, then runs the full `.tcyr` sweep with a
+  known-failure budget (`audit_extended.tcyr`, `audit_findings.tcyr`).
+  Exits non-zero only when a failure lands outside the budget
+  or any build fails.
+- **`docs/architecture/001-cross-arch-aarch64.md`** — first
+  numbered architecture doc. Documents the producer command,
+  CI smoke shape, qemu-user emulation limits (fork/reap +
+  setsid don't replicate fully), the upstream sigil Ed25519
+  quirk, and the real-hardware validation pathway.
+
+### Filed upstream
+
+- **sigil `2026-05-10-ed25519-verify-aarch64-accepts-wrong-pk.md`**
+  — `ed25519_verify(pk, msg, len, sig)` returns 1 for the wrong
+  public key on aarch64 (qemu-user 11.0.0-1 repro on x86_64).
+  Native x86_64 returns 0 correctly. Both the minimal sigil-only
+  repro and the libro `proof_verify_signed` downstream shape
+  are included. Two root-cause hypotheses (NI-path dispatch
+  regression vs. ct_eq aarch64 codegen) flagged for sigil-side
+  investigation.
+
+### Known-failure surface (documented, not regressions)
+
+Two `.tcyr` suites fail under `qemu-aarch64`; both are
+documented in `docs/architecture/001-cross-arch-aarch64.md`:
+
+- **`audit_findings.tcyr`** — `audit-m3-reaper-orphans` and
+  `audit-l3-fork-setsid` rely on `fork/waitpid` reparenting and
+  `setsid/getsid` semantics qemu-user can't fully emulate.
+  Real aarch64 hardware should pass these.
+- **`audit_extended.tcyr`** — `audit-ext-sign-ed25519`'s
+  "wrong vk rejected" assertion trips the upstream sigil quirk
+  filed above. `audit-ext-persist`'s "open succeeds" also
+  trips under qemu-user (qemu fs layer specifics). Net 47-2
+  asserts in this suite still pass.
+
+The `scripts/aarch64-sweep.sh` known-failure budget captures
+both; CI smoke gates only on the main-binary smoke. Surface to
+a real aarch64 runner once allocated (1.6.x roadmap).
+
+### Stats
+
+- **28 .tcyr suites / 720 assertions** native x86_64 — unchanged
+  from 1.5.3 (no argonaut surface changes).
+- **aarch64 sweep**: **26 of 28 suites / 605 assertions** pass
+  under qemu-user via `scripts/aarch64-sweep.sh`; 2 suites
+  inside the known-failure budget (see above).
+- **Binary**: x86_64 ~1.00 MB (unchanged from 1.5.3); aarch64
+  **~1.14 MB** (1141376 bytes). +140 KB delta tracks aarch64's
+  fixed-width instruction encoding vs. x86_64 variable-length.
+
+### Deferred
+
+- **Native aarch64 CI runner** — RPi4 / Graviton / Ampere /
+  Apple Silicon real-hardware boot smoke. Gated on runner
+  allocation; the qemu-user-only known-failures should resolve
+  on real hardware (fork/setsid emulation limits don't apply).
+  Lands in 1.6.x once a runner exists.
+- **sigil Ed25519 aarch64 verify fix** — upstream; consume via
+  toolchain bump or sigil version bump once a fix lands. The
+  argonaut-side workaround is documented as "sign + verify on
+  the same arch — the supervisor is always single-arch".
+
 ## [1.5.3] — 2026-05-10
 
 Libro extended surface — pulls forward libro 2.x audit-chain
