@@ -109,6 +109,31 @@ fn main() {
 
     println("argonaut: all systems nominal");
 
+    # PID-1 graduation (1.6.0). When kernel hands off to /sbin/init,
+    # argonaut sees pid==1; returning at that point panics the
+    # kernel ("Attempted to kill init"). Enter a minimal supervisor
+    # loop that:
+    #   - drains zombies via init_reap_services every 100ms (M3
+    #     end-to-end coverage: real-PID-1 reparenting now wires
+    #     through proc_table_reap_orphans for the first time)
+    #   - prints `argonaut: pid1 loop ready` as the boot-complete
+    #     marker the qemu/boot-test.sh harness greps on
+    # Signal handling (clean SIGTERM/SIGINT shutdown via
+    # init_plan_shutdown + sys_reboot) lands in the 1.6.1+ slot;
+    # the loop currently sleeps until the qemu harness times out
+    # the run or sends sys_reboot from outside.
+    if (sys_getpid() == 1) {
+        println("argonaut: pid1 loop ready");
+        var tick = alloc(16);
+        store64(tick, 0);                # tv_sec
+        store64(tick + 8, 100000000);    # tv_nsec — 100ms
+        var loop = 1;
+        while (loop == 1) {
+            init_reap_services(init);
+            syscall(35, tick, 0);        # nanosleep
+        }
+    }
+
     return 0;
 }
 

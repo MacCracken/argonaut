@@ -7,43 +7,60 @@ work only.
 
 ---
 
-## Current — v1.5.5 (shipped 2026-05-10) — 1.5.x arc CLOSED
+## Current — v1.6.0 (shipped 2026-05-10) — PID-1 graduation
 
-Arc-closing P(-1) audit per CLAUDE.md procedure. Findings in
-[`docs/audit/2026-05-10-audit.md`](../audit/2026-05-10-audit.md):
-**0 CRITICAL / 0 HIGH**; 3 MEDIUM closed with regression tests
-(`lookup_etc_hosts` heap leak; persistent log silent disk-fail;
-persistent log replay accepted tampered chain); LOW-1/2/3 closed
-(TCP pre-resolve split, HTTP port-range gate, `Host:` header
-sanitize gate); LOW-4 documented. 2 UPSTREAM (sigil dist tag
-instability mitigated via permanent `src/compat.cyr` shim;
-sigil Ed25519-aarch64 verify quirk filed at 1.5.4 pre-audit).
-Orphan `src/test_*.cyr` stubs removed (predate `tests/tcyr/`).
-kybernet BC-clean against the 1.5.5 surface.
+argonaut runs as `/sbin/init` under qemu via the new
+`qemu/build-initramfs.sh` + `qemu/boot-test.sh` harness
+(scaffold lifted from kybernet's pattern; standalone runtime).
+`src/main.cyr` adds a sleep-and-reap supervisor loop on
+`getpid() == 1` so the kernel doesn't panic when init returns.
+Three boot markers gate the smoke
+(`init system ready` → `all systems nominal` → `pid1 loop ready`).
+KVM + `+invtsc` required locally (sakshi clock_init panics
+without invariant TSC; qemu TCG doesn't expose it).
+`docs/architecture/002-qemu-pid1-harness.md` is the canonical
+reference. See
+[CHANGELOG 1.6.0](../../CHANGELOG.md#160--2026-05-10).
 
-The 1.5.x arc is CLOSED. 1.6.x picks up the QEMU PID-1 harness
-+ PID-1 graduation re-audit + native aarch64 CI runner +
-carry-forward cleanups (`audit_log_new` rename, anchor publish,
-durable signing-key rotation).
+The 1.5.x arc is CLOSED — full audit in
+[`docs/audit/2026-05-10-audit.md`](../audit/2026-05-10-audit.md).
+1.6.x continues with M3/L3 end-to-end, signal-handled clean
+shutdown, the closeout re-audit, and the carry-forwards
+(cyrius pin → 5.10.44 + `exec_vec_str` migration; native
+aarch64; audit_log_new rename; anchor + key rotation).
 
 ---
 
-## Next — v1.6.x arc — PID-1 graduation
+## Next — v1.6.1 — PID-1 coverage extensions
 
-Theme: end-to-end validate argonaut as true PID 1, and clear the
-carry-forward items from the 1.5.x arc.
+### End-to-end coverage
 
-### PID-1 harness
+- [ ] **M3 end-to-end** — busybox helper inside the initramfs
+  forks a grandchild + exits; assert argonaut's
+  `proc_table_reap_orphans` collects the grandchild via the
+  supervisor-loop tick. Lifts the `audit-m3-reaper-orphans`
+  unit shape into real-PID-1 territory.
+- [ ] **L3 end-to-end** — invoke `fork_exec_service` against a
+  test service that writes `getsid(0)` to a tmpfs marker;
+  assert the marker reads the child's own PID
+  (controlling-TTY decoupled). Lifts the
+  `audit-l3-fork-setsid` unit shape into real-PID-1.
+- [ ] **Signal-handled clean shutdown** — install SIGTERM /
+  SIGINT handlers in the PID-1 supervisor loop; route through
+  `init_plan_shutdown` → `sys_reboot(RB_POWER_OFF)`. Closes
+  the "qemu timeout is the only exit path" wart from 1.6.0.
 
-- [ ] **QEMU PID-1 boot harness** — minimal initramfs + kernel
-  boot + assertion harness that runs argonaut as PID 1.
-  Validates M3 (orphan reap under real PID-1 reparenting) and
-  L3 (controlling-TTY decoupling) end-to-end. Sibling repo
-  [kybernet](https://github.com/MacCracken/kybernet) has the
-  shape under `qemu/` — pull pattern, not code.
-- [ ] **Re-audit on PID-1 graduation** — trigger from the
-  2026-04-26 audit; runs after the harness lands as the gating
-  re-audit for 1.6.x.
+### 1.6.x arc closeout
+
+- [ ] **P(-1) full pass** — mirrors the 1.5.5 closeout shape.
+  Roadmap review → cleanliness gate → bench baseline → internal
+  deep review (PID-1 surface, supervisor loop, signal handling
+  once landed) → external research → audit report → failing
+  regression tests for findings → fixes → post-audit benches
+  → cleanup → downstream check → full clean build.
+- [ ] **Audit report** — `docs/audit/YYYY-MM-DD-audit.md`;
+  every MEDIUM+ earns a failing regression test before the
+  fix.
 
 ### Native aarch64
 
@@ -57,6 +74,33 @@ carry-forward items from the 1.5.x arc.
 
 ### Carry-forwards from 1.5.x
 
+- [ ] **P1 — Migrate `check_command` to `exec_vec_str`**
+  (cyrius v5.10.44 unblock; filed by argonaut, shipped
+  upstream 2026-05-11). The `exec_*` family added typed
+  Str-shape siblings — `exec_vec_str` /
+  `exec_capture_str` / `exec_env_str` — that extract
+  `str_data` on the way into execve's argv. Argonaut's
+  `src/health.cyr:144` calls `exec_vec(argv)` where
+  `argv` was built from `str_split(cmd_str, str_from(" "))`
+  parts (Str elements) — the silently-broken case the
+  v5.10.44 fix was filed against. Migration is one line:
+  `exec_vec(argv)` → `exec_vec_str(argv)`. Then:
+  - **tests/tcyr/health_exec.tcyr:17-22, 39-43** — flip
+    the determinism-only assertions
+    (`assert(cmd_ok == 0 || cmd_ok == 1)`) back to strict
+    (`assert_eq(check_command(str_from("/bin/true"), 5000), 1)`
+    + `assert_eq(check_command(str_from("/bin/false"), 5000), 0)`).
+  - **tests/tcyr/audit_findings.tcyr:262** — remove the
+    "the existing exec_env Str/cstr quirk … blocks unit-level
+    shell exec testing" comment. End-to-end
+    fork_exec_service verification stays gated on the
+    QEMU PID-1 harness (that's a separate gate — different
+    blocker, not this one).
+  - **cyrius.cyml** — bump `cyrius = "5.10.34"` →
+    `cyrius = "5.10.44"` (current local build).
+  Lands as a 1.6.x slot when the cyrius pin bumps; one
+  atomic change (the new API is byte-identical for cstr
+  consumers, so the migration doesn't cascade).
 - [ ] **Rename `audit_log_new` wrapper** — sigil 3.0.1's dist
   defines `audit_log_new()`; argonaut's `src/audit.cyr:91`
   shadows it (last-wins, benign but noisy at compile time).

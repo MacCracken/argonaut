@@ -23,6 +23,13 @@ qemu_*.core
 core
 core.*
 
+# 1.6.0 PID-1 harness — `qemu/build-initramfs.sh` stages a tree
+# under `qemu/initramfs/` and bundles it into `initramfs.cpio.gz`.
+# Both are build outputs (argonaut binary + busybox + cpio); the
+# checked-in shape lives in `qemu/build-initramfs.sh` only.
+/qemu/initramfs/
+/qemu/initramfs.cpio.gz
+
 # IDE / editor
 .idea/
 .vscode/

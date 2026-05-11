@@ -7,6 +7,92 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.0] — 2026-05-10
+
+**PID-1 graduation.** Argonaut now runs as `/sbin/init` under
+qemu, validated end-to-end via the new `qemu/` harness adapted
+from the kybernet pattern (pull pattern, not code — the harness
+is standalone). Closes the 2026-04-26 audit's "argonaut
+graduating to true PID 1" re-trigger as a 1.6.x arc-opening
+event; corresponding closeout re-audit slots at the end of the
+arc.
+
+### Added
+
+- **`src/main.cyr` PID-1 supervisor loop** — when
+  `sys_getpid() == 1`, after the standard init prints, argonaut
+  enters a 100 ms-tick loop that calls `init_reap_services(init)`
+  on each tick (drains zombies via the M3 orphan-reap path
+  added in 1.5.0). Returning from `main` while PID 1 panics the
+  kernel ("Attempted to kill init"); the loop holds the process
+  open until external signal / `sys_reboot` from outside.
+  Non-PID-1 runs (`cyrius test`, dev binary smoke) unchanged —
+  the path is gated on the runtime `getpid()` check.
+- **`qemu/build-initramfs.sh`** — stages a minimal cpio with
+  argonaut as `/sbin/init`, bundles busybox if present
+  (`/usr/lib/initcpio/busybox`, `/usr/bin/busybox`, or
+  `/bin/busybox`), installs minimal `/etc/hosts`, creates
+  console/null/ttyS0 device nodes (best-effort under sudo).
+  Rebuilds argonaut if the manifest is newer than the binary.
+- **`qemu/boot-test.sh`** — runs the cpio under
+  `qemu-system-x86_64`, asserts three boot markers
+  (`argonaut: init system ready` →
+  `argonaut: all systems nominal` →
+  `argonaut: pid1 loop ready`), fails on missing marker or
+  kernel panic ("Attempted to kill init"). Auto-picks kernel
+  from common paths (override via `$1`); default 15 s timeout
+  (override via `$2`).
+- **`docs/architecture/002-qemu-pid1-harness.md`** — second
+  numbered architecture doc; documents producer commands,
+  marker contract, the KVM-required invariant-TSC gate (sakshi
+  panics without CPUID 0x80000007 EDX bit 8; qemu TCG doesn't
+  expose it), kernel + initramfs sizing, future M3/L3
+  end-to-end shape, re-audit trigger.
+
+### Changed
+
+- **`qemu/boot-test.sh`** uses `-enable-kvm -cpu host,+invtsc`
+  when `/dev/kvm` is readable; falls back to
+  `-cpu max,+invtsc` (will fail under TCG with a clear
+  diagnostic) otherwise. KVM accel is effectively required for
+  the harness — documented in arch doc 002.
+- **`.gitignore`** — added `/qemu/initramfs/` (staging tree)
+  and `/qemu/initramfs.cpio.gz` (build output) so the
+  checked-in shape is the scripts only.
+
+### Stats
+
+- **28 .tcyr suites / 734 assertions** pass under cyrius
+  5.10.34 — unchanged from 1.5.5 (no production source
+  changes other than the PID-1 loop, which is gated on
+  `getpid() == 1` and inert during tests).
+- **Binary x86_64 ~1.00 MB** (1028760 bytes, `CYRIUS_DCE=1`).
+  +232 bytes vs. 1.5.5 for the supervisor loop body.
+- **Initramfs ~376 KB** cpio.gz (argonaut binary + busybox).
+- **Boot wall time:** ~0.3 s under KVM, ~2.5 s under TCG
+  (kernel decompress dominates; argonaut init_new is ~50 µs).
+
+### Deferred to 1.6.1+
+
+- **M3 end-to-end** — orphan reap under real-PID-1
+  reparenting from inside qemu (busybox helper that forks +
+  exits; assert reaper collects via supervisor-loop tick).
+- **L3 end-to-end** — `fork_exec_service` controlling-TTY
+  decoupling validated by a test service writing
+  `getsid(0)` to a tmpfs marker.
+- **Signal-handled clean shutdown** — SIGTERM → `init_plan_shutdown`
+  → `sys_reboot(RB_POWER_OFF)`; current 1.6.0 loop is
+  sleep-and-reap only, relies on qemu-side timeout or
+  external `sys_reboot`.
+- **1.6.x arc closeout P(-1) audit** — mirrors the 1.5.5
+  closeout; covers the PID-1 surface + signal handling
+  (once landed) + any other 1.6.x additions.
+- **Carry-forwards from 1.5.x** (still open): cyrius pin
+  bump → 5.10.44 + `exec_vec_str` migration (unblocked by
+  the upstream issue argonaut filed at 1.5.2);
+  `audit_log_new` rename; WitnessAnchor publishing;
+  durable signing-key rotation.
+
 ## [1.5.5] — 2026-05-10
 
 **1.5.x arc closeout.** Final patch before 1.6.x; closes the

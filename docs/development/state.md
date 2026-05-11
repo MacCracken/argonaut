@@ -6,6 +6,17 @@
 
 ## Version
 
+**1.6.0** (shipped 2026-05-10 — PID-1 graduation. Argonaut runs
+as `/sbin/init` under qemu, validated end-to-end via the new
+`qemu/` harness (`build-initramfs.sh` + `boot-test.sh`, adapted
+from the kybernet pattern). `src/main.cyr` adds a sleep-and-reap
+supervisor loop gated on `sys_getpid() == 1` so the kernel
+doesn't panic when init returns. KVM accel + `+invtsc` required
+locally — TCG doesn't expose invariant TSC to sakshi's clock
+init. Architecture doc 002 covers the surface. Boot wall time
+~0.3 s under KVM. M3 / L3 end-to-end + signal-handled clean
+shutdown deferred to 1.6.1+.)
+
 **1.5.5** (shipped 2026-05-10 — 1.5.x arc closeout. Full
 P(-1) pass per CLAUDE.md procedure; findings doc'd in
 `docs/audit/2026-05-10-audit.md`. **0 CRITICAL / 0 HIGH**;
@@ -95,7 +106,7 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **x86_64: ~1.00 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1024256 bytes)
+- **x86_64: ~1.00 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1028760 bytes at 1.6.0; +232 bytes for the PID-1 supervisor loop)
 - **aarch64: ~1.14 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/argonaut-aarch64`, ~1141 KB; cross-build via `cc5_aarch64` translator since 1.5.4). +140 KB delta tracks aarch64's fixed-width instruction encoding.
 - Dead-code floor: ~2,114 unreachable functions NOPed under DCE (was ~2,140 at 1.5.4; orphan stub removal + `tcp_connect_ip` split tightened the reachable set).
 - Was 378 KB at 1.2.0, 641 KB at 1.3.0, 650 KB at 1.4.0, 652 KB at
@@ -141,14 +152,21 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## In-flight
 
-- **1.6.x — QEMU PID-1 harness + carry-forwards.** Validates M3
-  (orphan reap under real PID-1 reparenting) and L3
-  (controlling-TTY decoupling) on a minimal initramfs harness;
-  native aarch64 CI runner allocation (closes qemu-user
-  emulation gap); also lands the deferred `audit_log_new`
-  rename, WitnessAnchor publishing (gated on consumer demand +
-  AGNOS federation protocol), and durable signing-key rotation
-  (gated on kybernet's key-management surface).
+- **1.6.1+ — PID-1 harness coverage extensions.** M3
+  end-to-end (orphan reap under real-PID-1 reparenting from
+  inside qemu) and L3 end-to-end (`fork_exec_service`
+  controlling-TTY decoupling); signal-handled clean shutdown
+  (SIGTERM → `init_plan_shutdown` → `sys_reboot`).
+- **1.6.x arc closeout P(-1) audit.** Mirrors the 1.5.5
+  closeout shape — covers PID-1 surface + signal handling +
+  any other 1.6.x additions.
+- **1.6.x — Carry-forwards.** cyrius pin bump 5.10.34 →
+  5.10.44 + `exec_vec_str` migration (unblocked by the
+  upstream issue argonaut filed at 1.5.2); native aarch64 CI
+  runner; `audit_log_new` rename; WitnessAnchor publishing
+  (gated on consumer demand + AGNOS federation protocol);
+  durable signing-key rotation (gated on kybernet's
+  key-management surface).
 - **Upstream — sigil Ed25519 aarch64 verify quirk** — filed at
   1.5.4 in sigil repo
   (`docs/development/issues/2026-05-10-ed25519-verify-aarch64-accepts-wrong-pk.md`).
@@ -168,6 +186,7 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Recent shipped
 
+- **1.6.0** (2026-05-10) — PID-1 graduation: `src/main.cyr` adds sleep-and-reap supervisor loop on `getpid() == 1`; `qemu/build-initramfs.sh` + `qemu/boot-test.sh` validate boot end-to-end (three markers, ~0.3 s under KVM); `docs/architecture/002-qemu-pid1-harness.md` documents the surface (KVM + `+invtsc` requirement, future M3/L3 shape, re-audit trigger). 1.6.x arc opens.
 - **1.5.5** (2026-05-10) — 1.5.x arc closeout P(-1) audit: 3 MEDIUM closed with regression tests (etc-hosts heap leak, persist silent disk-fail, persist tamper-rejected); LOW-1/2/3 closed (TCP pre-resolve split, HTTP port range, Host: header sanitize); orphan src/test_*.cyr stubs removed; sigil compat shim re-installed as permanent fixture
 - **1.5.4** (2026-05-10) — cross-arch: aarch64 cross-build via `cc5_aarch64`; CI / release publish `argonaut-<VER>-aarch64-linux` best-effort; `scripts/aarch64-sweep.sh` local sweep with documented known-failure budget; `docs/architecture/001-cross-arch-aarch64.md` documents the surface; upstream sigil Ed25519 aarch64 quirk filed
 - **1.5.3** (2026-05-10) — libro extended surface: `src/audit_ext.cyr` adds opt-in PatraStore persistence, Ed25519/MLDSA/hybrid snapshot signing, merkle root + inclusion / consistency proofs; `argonaut_init_new` integration via `config.audit_persist`; `init_audit_record` / `init_audit_flush` dispatch helpers
