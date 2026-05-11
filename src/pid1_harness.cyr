@@ -17,7 +17,12 @@
 #   "argonaut: harness done"           — both finished; clean poweroff
 # Any FAIL line is fatal for the harness wrapper.
 
-# pid1_harness_requested(): 1 if /proc/cmdline carries the marker.
+# pid1_harness_requested(): 1 if /proc/cmdline carries the marker
+# as a whole token. **1.6.3 audit LOW-1** added the
+# left-and-right-boundary check; the pre-1.6.3 raw substring
+# match would have accepted `argonaut.harness=11` and
+# `noargonaut.harness=1` (neither shows up in practice, but the
+# safety property is now explicit).
 fn pid1_harness_requested() {
     var fd = sys_open("/proc/cmdline", 0, 0);
     if (fd < 0) { return 0; }
@@ -34,12 +39,32 @@ fn pid1_harness_requested() {
         while (j < nlen) {
             if (load8(buf + i + j) != load8(needle + j)) {
                 matched = 0;
-                j = nlen;            # cyrius `break` quirk inside `while + var`
+                j = nlen;
             } else {
                 j = j + 1;
             }
         }
-        if (matched == 1) { return 1; }
+        if (matched == 1) {
+            # Left boundary: start-of-buffer, space, or tab.
+            var left_ok = 0;
+            if (i == 0) { left_ok = 1; }
+            else {
+                var lb = load8(buf + i - 1);
+                if (lb == 32) { left_ok = 1; }
+                if (lb == 9)  { left_ok = 1; }
+            }
+            # Right boundary: end-of-buffer / space / tab / newline.
+            var right_ok = 0;
+            var ri = i + nlen;
+            if (ri >= n) { right_ok = 1; }
+            else {
+                var rb = load8(buf + ri);
+                if (rb == 32) { right_ok = 1; }
+                if (rb == 9)  { right_ok = 1; }
+                if (rb == 10) { right_ok = 1; }
+            }
+            if (left_ok == 1 && right_ok == 1) { return 1; }
+        }
         i = i + 1;
     }
     return 0;
@@ -85,29 +110,69 @@ fn pid1_harness_m3() {
 # if sid == pid (proves setsid ran before exec), 0 otherwise.
 # Print the raw marker contents either way for harness-side diagnosis.
 fn pid1_harness_l3() {
-    # Reserved for 1.6.3. The L3 end-to-end shape was prototyped
-    # during 1.6.2 (fork_exec_service → busybox `sh -c "echo
-    # sid=$6 pid=$$ > /l3.marker"`, then parent-side parse), but
-    # the path hit two compounded blockers:
+    # 1.6.3 — bundled static helper at /bin/l3-helper (built
+    # from qemu/helpers/l3-helper.cyr by build-initramfs.sh).
+    # No shell, no dyn-loader — just raw syscalls writing
+    # `sid=N pid=M\n` to /l3.marker. Sidesteps the
+    # busybox-shell blockers from 1.6.2.
     #
-    #   1. Arch's `/usr/lib/initcpio/busybox` is dynamically
-    #      linked, so execve returned ENOENT until the harness
-    #      bundled `/lib64/ld-linux-x86-64.so.2` + `libc.so.6`
-    #      into the initramfs (build-initramfs.sh handles that
-    #      now under `file ... | grep dynamically linked`).
-    #   2. After the dyn-loader fix, fork_exec_service's parent-side
-    #      waitpid still hung in a way that wasn't reproducible
-    #      outside the harness. Diagnosis (the M3 path through
-    #      proc_table_reap_orphans completing immediately before
-    #      the L3 fork; trace markers landing before the waitpid
-    #      but never after) points at PID-1-specific waitpid /
-    #      signal-delivery interaction.
-    #
-    # 1.6.3 lands either (a) a statically-linked test helper
-    # bundled into the initramfs (no dyn-loader dep, no busybox
-    # path), or (b) the deeper fix once the PID-1 waitpid hang
-    # is understood.
-    return 0;
+    # All output uses direct `sys_write` to fd 1 rather than
+    # `print()` + `str_println()` builder chains — the
+    # buffer/builder interaction silently dropped output on the
+    # PID-1 path during 1.6.2 dev (turned out to be why the
+    # earlier marker-echo never appeared even when the file was
+    # written correctly). Direct writes are unbuffered.
+    syscall(87, "/l3.marker");
+
+    var sd = svc_def_new(
+    str_from("l3-test"),
+    str_from("L3 setsid end-to-end test (1.6.3 helper)"),
+    str_from("/bin/l3-helper"));
+
+    var spid = fork_exec_service(sd);
+    if (spid <= 0) {
+        println("argonaut: harness l3 FAIL: fork_exec_service returned <= 0");
+        return 0;
+    }
+    var stbuf = alloc(8);
+    sys_waitpid(spid, stbuf, 0);
+
+    var mfd = sys_open("/l3.marker", 0, 0);
+    if (mfd < 0) {
+        println("argonaut: harness l3 FAIL: /l3.marker missing");
+        return 0;
+    }
+    var mbuf = alloc(256);
+    var mn = sys_read(mfd, mbuf, 255);
+    sys_close(mfd);
+    if (mn <= 0) {
+        println("argonaut: harness l3 FAIL: marker empty");
+        return 0;
+    }
+    store8(mbuf + mn, 0);
+
+    # Echo marker via raw sys_write (see fn header note).
+    sys_write(1, "argonaut: harness l3 marker: ", 29);
+    var k = 0;
+    while (k < mn) {
+        if (load8(mbuf + k) == 10) { store8(mbuf + k, 32); }
+        k = k + 1;
+    }
+    sys_write(1, mbuf, mn);
+    sys_write(1, "\n", 1);
+
+    # Parse `sid=<n> pid=<m>` and assert n == m.
+    var sid = _harness_parse_kv(mbuf, mn, "sid=", 4);
+    var pid = _harness_parse_kv(mbuf, mn, "pid=", 4);
+    if (sid < 0 || pid < 0) {
+        println("argonaut: harness l3 FAIL: marker parse");
+        return 0;
+    }
+    if (sid != pid) {
+        println("argonaut: harness l3 FAIL: sid != pid (setsid not effective)");
+        return 0;
+    }
+    return 1;
 }
 
 # _harness_parse_kv(buf, len, key, klen): return integer value of
@@ -159,17 +224,11 @@ fn pid1_run_harness(init) {
         println("argonaut: harness m3 FAIL: orphan not reaped");
     }
 
-    # L3 end-to-end (fork_exec_service → busybox sh writing the
-    # session id via the marker file) was working at the
-    # mid-1.6.2 dev cycle but turned out to depend on busybox
-    # static linking. Arch ships the initcpio busybox dynamically
-    # linked; bundling ld-linux.so + libc lets execve succeed but
-    # the parent-side waitpid + marker-read path then hangs in a
-    # way that isn't reproducible outside the harness. Slot
-    # **1.6.3** is dedicated to the L3 path — either bundle a
-    # genuinely static busybox or build a tiny static helper that
-    # writes the marker without depending on the shell.
-    println("argonaut: harness l3 deferred-to-1.6.3");
+    # 1.6.3 — L3 end-to-end via the bundled static helper.
+    var l3_ok = pid1_harness_l3();
+    if (l3_ok == 1) {
+        println("argonaut: harness l3 ok");
+    }
 
     println("argonaut: harness done");
     return 0;

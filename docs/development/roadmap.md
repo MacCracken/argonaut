@@ -7,53 +7,34 @@ work only.
 
 ---
 
-## Current — v1.6.2 (shipped 2026-05-10) — PID-1 harness extensions (partial)
+## Current — v1.6.3 (shipped 2026-05-11) — 1.6.x arc CLOSED
 
-`src/pid1_harness.cyr` adds opt-in self-test mode via
-`/proc/cmdline argonaut.harness=1`. **M3 end-to-end** validates
-orphan reap under real-PID-1 reparenting inside qemu;
-`src/main.cyr` signalfd-blocked SIGTERM/SIGINT/SIGCHLD wires
-clean shutdown via `sys_reboot(RB_POWER_OFF)`. Discovered + fixed
-a double-fork bug in `fork_exec_service` (pre-1.6.2 the nested
-`exec_env_str` fork made `setsid` apply to the wrong process).
-**L3 end-to-end deferred to 1.6.3** — prototyped but hit
-compounded blockers (dynamically-linked busybox → execve ENOENT
-unless ld-linux is bundled; then a parent-side waitpid hang
-specific to PID-1). See
-[CHANGELOG 1.6.2](../../CHANGELOG.md#162--2026-05-10).
+L3 end-to-end lands via `qemu/helpers/l3-helper.cyr` — a 12 KB
+statically-linked cyrius helper that writes `sid=N pid=M\n` to
+`/l3.marker` via raw syscalls. No shell, no dyn-loader,
+sidesteps the busybox-shell blockers from 1.6.2. Spawned by
+`fork_exec_service`; the harness wrapper greps the marker +
+asserts `sid == pid` (proves setsid ran before exec). 1.6.x
+closeout P(-1) audit per CLAUDE.md procedure:
+**0 CRITICAL / 0 HIGH**; 2 MEDIUM closed with regression tests
+(`fork_exec_service` child inherited the PID-1 sigmask block;
+empty envp dropped PATH for spawned services); 3 LOW (1
+closed, 2 documented). Closes the 2026-04-26 audit's PID-1
+graduation re-audit trigger. See
+[CHANGELOG 1.6.3](../../CHANGELOG.md#163--2026-05-11) and
+[`docs/audit/2026-05-11-audit.md`](../audit/2026-05-11-audit.md).
 
-The next slot picks up L3 end-to-end and the arc-closing
-P(-1) audit.
+The 1.6.x arc is CLOSED. PID-1 surface is now
+production-grade: boot smoke (1.6.0), clean SIGTERM/SIGINT
+shutdown via signalfd (1.6.2), orphan reap under real-PID-1
+reparenting (M3, 1.6.2), `fork_exec_service` controlling-TTY
+decoupling validated via setsid (L3, 1.6.3). The static
+helper pattern unlocks future end-to-end tests for any
+service-lifecycle behaviour that needs PID-1 validation.
 
 ---
 
-## Next — v1.6.3 — L3 end-to-end + closeout P(-1) audit
-
-### L3 end-to-end
-
-- [ ] **Static test helper in initramfs** — cleanest path: a
-  small statically-linked C/cyrius helper bundled into the
-  initramfs that argonaut spawns via `fork_exec_service` and
-  that writes `sid pid` to `/l3.marker` directly via syscalls
-  (no shell, no dyn-loader, no busybox path). Helper sources
-  in `qemu/helpers/` next to `build-initramfs.sh`.
-- [ ] **OR — root-cause the parent-side waitpid hang** — the
-  1.6.2 prototype with bundled ld-linux had execve succeeding
-  but the parent's `sys_waitpid(spid, ...)` not returning.
-  Diagnose with strace under qemu (kernel logs to serial)
-  or with a custom signal handler that prints SIGCHLD.
-
-### 1.6.x arc closeout (v1.6.3)
-
-- [ ] **P(-1) full pass** — mirrors the 1.5.5 closeout shape.
-  Roadmap review → cleanliness gate → bench baseline → internal
-  deep review (PID-1 surface, supervisor loop, signal handling
-  once landed) → external research → audit report → failing
-  regression tests for findings → fixes → post-audit benches
-  → cleanup → downstream check → full clean build.
-- [ ] **Audit report** — `docs/audit/YYYY-MM-DD-audit.md`;
-  every MEDIUM+ earns a failing regression test before the
-  fix.
+## Open — gated on external work
 
 ### Native aarch64
 
@@ -61,9 +42,22 @@ P(-1) audit.
   emulation gap from 1.5.4 (`audit-m3-reaper-orphans`,
   `audit-l3-fork-setsid` require real fork/setsid semantics).
   Gated on runner allocation; the aarch64 binary is ready.
+  Note: M3 + L3 are now also covered end-to-end under x86_64
+  PID-1 via `qemu/pid1-harness-test.sh`, so the aarch64
+  blocker is per-arch validation, not per-finding.
 - [ ] **Real-hardware smoke** — RPi4, Apple Silicon (Asahi
   Linux), Graviton / Ampere cloud aarch64. Once a runner exists
-  the matrix is just `boot + audit_findings + audit_extended`.
+  the matrix is just `boot + audit_findings + audit_extended +
+  pid1-harness`.
+
+### Per-service env override
+
+- [ ] **`fork_exec_service` map → flat-cstrs** — 1.6.3
+  shipped a default envp containing only PATH. Consumers
+  needing per-service env (HOME, locale, LD_LIBRARY_PATH, etc.)
+  surface a need for the full `svc_def_env` map → flat
+  `KEY=VAL` cstr conversion. Lands when the first such
+  consumer appears.
 
 ### Gated on external work
 

@@ -1,0 +1,81 @@
+# l3-helper.cyr — statically-linked PID-1 harness helper (1.6.3).
+#
+# Spawned by argonaut's `fork_exec_service` from `pid1_harness_l3`.
+# Writes `sid=N pid=M\n` to /l3.marker via raw syscalls so the
+# harness can verify that fork_exec_service called setsid before
+# exec (sid should equal pid in a properly-decoupled session
+# leader). No shell, no dyn-loader, no libc — the 1.6.2 attempt
+# went through busybox's `/bin/sh` and hit:
+#   1. ENOENT from execve because Arch's busybox is dynamically
+#      linked and `/lib64/ld-linux-x86-64.so.2` wasn't in the
+#      initramfs (fixed at 1.6.2 by ld-linux bundling); then
+#   2. a parent-side waitpid hang specific to the busybox-shell
+#      path that didn't reproduce outside the harness.
+# This helper sidesteps both.
+
+# Syscall numbers (x86_64 Linux). Stdlib `syscalls` defines most
+# of these (SYS_WRITE / SYS_OPEN / SYS_CLOSE / SYS_GETPID /
+# SYS_EXIT); SYS_GETSID isn't in argonaut's stdlib so we define
+# it locally.
+enum HelperSyscalls {
+    SYS_GETSID_L = 124;
+}
+
+# Minimal decimal int → buffer. Returns the byte count written
+# starting at `dst`. Handles only non-negative values (PIDs/SIDs
+# are always positive). Caller guarantees `dst` has >= 16 bytes.
+fn write_int(dst, n) {
+    if (n == 0) { store8(dst, 48); return 1; }
+    var tmp[20];
+    var i = 0;
+    while (n > 0) {
+        store8(&tmp + i, 48 + (n - (n / 10) * 10));
+        n = n / 10;
+        i = i + 1;
+    }
+    # Reverse copy into dst.
+    var j = 0;
+    while (j < i) {
+        store8(dst + j, load8(&tmp + (i - 1 - j)));
+        j = j + 1;
+    }
+    return i;
+}
+
+fn main() {
+    var pid = syscall(SYS_GETPID);
+    var sid = syscall(SYS_GETSID_L, 0);
+
+    # Marker layout: "sid=<sid> pid=<pid>\n"
+    var buf[64];
+    var p = &buf;
+    store8(p,     115);        # 's'
+    store8(p + 1, 105);        # 'i'
+    store8(p + 2, 100);        # 'd'
+    store8(p + 3,  61);        # '='
+    var off = 4;
+    off = off + write_int(p + off, sid);
+    store8(p + off,      32);   # ' '
+    store8(p + off + 1, 112);   # 'p'
+    store8(p + off + 2, 105);   # 'i'
+    store8(p + off + 3, 100);   # 'd'
+    store8(p + off + 4,  61);   # '='
+    off = off + 5;
+    off = off + write_int(p + off, pid);
+    store8(p + off, 10);        # '\n'
+    off = off + 1;
+
+    # O_WRONLY | O_CREAT | O_TRUNC = 0x241; mode 0o644 = 0x1A4.
+    # /l3.marker because /tmp wasn't writable from the busybox
+    # path in 1.6.2; root of the initramfs tmpfs is always writable
+    # under PID-1 mounts.
+    var fd = syscall(SYS_OPEN, "/l3.marker", 0x241, 0x1A4);
+    if (fd >= 0) {
+        syscall(SYS_WRITE, fd, p, off);
+        syscall(SYS_CLOSE, fd);
+    }
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

@@ -6,6 +6,18 @@
 
 ## Version
 
+**1.6.3** (shipped 2026-05-11 — 1.6.x arc closeout. L3
+end-to-end lands via `qemu/helpers/l3-helper.cyr` (12 KB
+statically-linked cyrius helper writing `sid pid` via raw
+syscalls — no shell, no dyn-loader; sidesteps the
+busybox-shell blockers from 1.6.2). Full P(-1) audit per
+CLAUDE.md procedure (findings in
+`docs/audit/2026-05-11-audit.md`): **0 CRITICAL / 0 HIGH**;
+2 MEDIUM closed with regression tests (signal-mask
+inheritance into spawned services; empty envp dropping
+PATH); 3 LOW (1 closed, 2 documented). Closes the
+2026-04-26 audit's PID-1 graduation re-audit trigger.)
+
 **1.6.2** (shipped 2026-05-10 — PID-1 harness extensions
 (partial). New `src/pid1_harness.cyr` opt-in mode via
 `/proc/cmdline argonaut.harness=1`; `pid1_harness_m3` validates
@@ -131,7 +143,8 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **x86_64: ~1.00 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1034568 bytes at 1.6.2; +6 KB over 1.6.1 for `src/pid1_harness.cyr` + signalfd supervisor loop + early-mount block)
+- **x86_64: ~1.00 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1033368 bytes at 1.6.3; effectively unchanged from 1.6.2 — fixes are small surface tweaks)
+- **L3 helper: 11936 bytes** static cyrius ELF (`qemu/helpers/l3-helper`); bundled into the qemu harness initramfs as `/bin/l3-helper`
 - **aarch64: ~1.14 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/argonaut-aarch64`, ~1141 KB; cross-build via `cc5_aarch64` translator since 1.5.4). +140 KB delta tracks aarch64's fixed-width instruction encoding.
 - Dead-code floor: ~2,114 unreachable functions NOPed under DCE (was ~2,140 at 1.5.4; orphan stub removal + `tcp_connect_ip` split tightened the reachable set).
 - Was 378 KB at 1.2.0, 641 KB at 1.3.0, 650 KB at 1.4.0, 652 KB at
@@ -146,7 +159,8 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Suites
 
-- **Native x86_64: 28 .tcyr suites / 735 assertions** (0 failures on cyrius 5.10.44). +1 over 1.6.0 for the strict `execute_health_check` HC_COMMAND assertion the exec_vec_str migration unblocked.
+- **Native x86_64: 28 .tcyr suites / 741 assertions** (0 failures on cyrius 5.10.44). +6 over 1.6.2 for the 1.6.x closeout regressions (M1 fork_exec sigmask reset, M2 envp PATH, plus helper-fn unit checks).
+- **qemu harness:** `qemu/pid1-harness-test.sh` covers M3 + L3 end-to-end under real PID 1 (KVM + `+invtsc`); `qemu/boot-test.sh` covers the supervisor-loop smoke. Both ~0.5 s wall time on local KVM.
 - **aarch64 (qemu-user): 26 of 28** pass via `scripts/aarch64-sweep.sh`. 2 suites in the documented known-failure budget (qemu emulation limits + upstream sigil Ed25519 quirk — see `docs/architecture/001-cross-arch-aarch64.md`).
 - **2 .bcyr binaries** (`tests/bcyr/argonaut.bcyr`, `tests/bcyr/api.bcyr`)
 - **37 benchmarks** wired into `src/bench_main.cyr`; history in `bench-history.csv`
@@ -177,13 +191,15 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## In-flight
 
-- **1.6.3 — L3 end-to-end + closeout P(-1) audit.** Landing
-  the L3 path (fork_exec_service setsid validated under real
-  PID 1) via either a static test helper bundled into the
-  initramfs or a deeper fix once the parent-side waitpid hang
-  is understood. Same slot lands the arc-closing P(-1) audit
-  per CLAUDE.md procedure, mirroring the 1.5.5 closeout
-  shape.
+- **Gated on external work:** native aarch64 CI runner (runner
+  allocation); WitnessAnchor publishing (AGNOS federation
+  protocol); durable signing-key rotation (kybernet
+  key-management surface); per-service env override
+  (consumer-driven map → flat-cstrs conversion in
+  `fork_exec_service`).
+- **1.6.x arc is CLOSED.** Next minor (1.7.0 or 1.6.4 if a
+  patch lands first) depends on what the next external trigger
+  surfaces.
 - **Gated on external work:** native aarch64 CI runner
   (runner allocation); WitnessAnchor publishing (AGNOS
   federation protocol); durable signing-key rotation
@@ -207,6 +223,7 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Recent shipped
 
+- **1.6.3** (2026-05-11) — 1.6.x arc closeout: L3 end-to-end via static `qemu/helpers/l3-helper.cyr`; full P(-1) audit (0 CRITICAL / 0 HIGH, 2 MEDIUM closed with regressions — fork_exec sigmask + envp PATH); PID-1 graduation re-audit trigger CLOSED
 - **1.6.2** (2026-05-10) — PID-1 harness extensions: M3 end-to-end + signalfd shutdown landed; `fork_exec_service` double-fork bug fixed (setsid wired correctly now); dyn-loader bundling in initramfs; L3 end-to-end deferred to 1.6.3
 - **1.6.1** (2026-05-10) — toolchain + cleanup: cyrius 5.10.34 → 5.10.44; `exec_vec`/`exec_env` → `exec_vec_str`/`exec_env_str` migration across all argonaut call sites (closes 1.5.2 upstream issue); `audit_log_new` → `argonaut_audit_log_new` rename drops sigil shadow warning; `health_exec.tcyr` strict assertions
 - **1.6.0** (2026-05-10) — PID-1 graduation: `src/main.cyr` adds sleep-and-reap supervisor loop on `getpid() == 1`; `qemu/build-initramfs.sh` + `qemu/boot-test.sh` validate boot end-to-end (three markers, ~0.3 s under KVM); `docs/architecture/002-qemu-pid1-harness.md` documents the surface (KVM + `+invtsc` requirement, future M3/L3 shape, re-audit trigger). 1.6.x arc opens.

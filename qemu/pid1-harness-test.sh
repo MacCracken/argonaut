@@ -77,16 +77,18 @@ echo ""
 echo "=== marker check ==="
 
 fail=0
-# 1.6.2 ships M3 end-to-end + signal-handled shutdown. L3
-# end-to-end is deferred to 1.6.3 — the harness still prints
-# `l3 deferred-to-1.6.3` so the wrapper can confirm the path
-# is reached. Marker check is M3-only.
+# Pipeline filters binary data-segment matches by requiring `^M`
+# (CR terminator from qemu's serial output); the binary's
+# .rodata strings end in `^@` (NUL) and are dropped.
+RUNTIME_OUT=$(cat -v "$LOG" | tr '\r' '\n')
+
 for marker in \
     "argonaut: harness mode" \
     "argonaut: harness m3 ok" \
-    "argonaut: harness l3 deferred-to-1.6.3" \
+    "argonaut: harness l3 marker:" \
+    "argonaut: harness l3 ok" \
     "argonaut: harness done"; do
-    if cat -v "$LOG" | tr '\r' '\n' | grep -aqF "$marker"; then
+    if echo "$RUNTIME_OUT" | grep -aqF "$marker"; then
         echo "  OK: $marker"
     else
         echo "  FAIL: missing marker — \"$marker\""
@@ -94,12 +96,9 @@ for marker in \
     fi
 done
 
-# Only count an M3 FAIL diagnostic as an actual failure; binary
-# data segment matches from `cat $LOG` would be filtered by the
-# `cat -v | tr` pipeline (binary strings end with `^@` not `^M`).
-if cat -v "$LOG" | tr '\r' '\n' | grep -aqE "^argonaut: harness m3 FAIL"; then
-    echo "  FAIL: M3 self-test reported failure:"
-    cat -v "$LOG" | tr '\r' '\n' | grep -aE "^argonaut: harness m3 FAIL" | sed 's/^/    /'
+if echo "$RUNTIME_OUT" | grep -aqE "^argonaut: harness (m3|l3) FAIL"; then
+    echo "  FAIL: harness self-test reported failure:"
+    echo "$RUNTIME_OUT" | grep -aE "^argonaut: harness (m3|l3) FAIL" | sed 's/^/    /'
     fail=1
 fi
 
@@ -110,7 +109,8 @@ fi
 
 if [ $fail -eq 0 ]; then
     echo ""
-    echo "=== HARNESS TEST: OK (M3 end-to-end; L3 deferred to 1.6.3) ==="
+    echo "$RUNTIME_OUT" | grep -aE "argonaut: harness l3 marker:" | head -1 | sed 's/^/  /'
+    echo "=== HARNESS TEST: OK (M3 + L3 end-to-end) ==="
     exit 0
 else
     echo "=== HARNESS TEST: FAIL ==="

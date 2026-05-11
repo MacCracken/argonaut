@@ -140,6 +140,30 @@ fn spawn_service(svc_def) {
     return exec_env_str(argv, env);
 }
 
+# reset_child_signal_mask: clear the inherited signal mask
+# (1.6.3 audit MEDIUM-1). The PID-1 supervisor loop in
+# `src/main.cyr` blocks SIGTERM/SIGINT/SIGCHLD so the signalfd
+# read path can drain them; fork inherits that block, and
+# execve preserves it. Services started without their default
+# disposition can't handle SIGTERM (the kernel queues it against
+# the masked process indefinitely). Reset to empty before exec.
+fn reset_child_signal_mask() {
+    var empty = sigset_new();
+    return sys_sigprocmask(SIG_SETMASK, empty, 0);
+}
+
+# build_default_envp: minimal PATH-only environment vec for
+# services spawned without an explicit env (1.6.3 audit
+# MEDIUM-2). The pre-1.6.3 empty envp dropped PATH entirely;
+# this gives every service a usable PATH without needing
+# per-service config. Full `svc_def_env` map → flat-cstrs
+# conversion lands when a service legitimately needs custom env.
+fn build_default_envp() {
+    var v = vec_new();
+    vec_push(v, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    return v;
+}
+
 # Fork + exec a service, returning child PID.
 # Parent returns immediately; child execs the binary.
 fn fork_exec_service(svc_def) {
@@ -202,14 +226,26 @@ fn fork_exec_service(svc_def) {
         }
         store64(argv_buf + argc * 8, 0);
 
-        # Environment: `svc_def_env` is a map keyed by KEY → VAL;
-        # execve takes a flat vec of "KEY=VAL" cstrings. The
-        # full map → flat-cstrs conversion lands in a follow-up
-        # slot once a service legitimately needs env vars (none
-        # do today; passing empty envp is safe for /bin/sh + the
-        # default-service set).
-        var envp_buf = alloc(8);
-        store64(envp_buf, 0);
+        # Environment (1.6.3 audit MEDIUM-2): pass a minimal
+        # default envp containing PATH. Pre-1.6.3 passed empty
+        # envp; services lost PATH silently. Full map →
+        # flat-cstrs lands when a service surfaces a need for
+        # custom env beyond PATH.
+        var env_vec = build_default_envp();
+        var envc = vec_len(env_vec);
+        var envp_buf = alloc((envc + 1) * 8);
+        var enpi = 0;
+        while (enpi < envc) {
+            store64(envp_buf + enpi * 8, vec_get(env_vec, enpi));
+            enpi = enpi + 1;
+        }
+        store64(envp_buf + envc * 8, 0);
+
+        # Reset signal mask (1.6.3 audit MEDIUM-1) — drop the
+        # PID-1 supervisor loop's SIGTERM/SIGINT/SIGCHLD block
+        # before exec so the service can install its own handlers
+        # and receive shutdown signals.
+        reset_child_signal_mask();
 
         sys_execve(str_data(binary), argv_buf, envp_buf);
         sys_exit(127);  # exec failed

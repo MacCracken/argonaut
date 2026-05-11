@@ -396,6 +396,47 @@ fn main() {
     var nul_str = str_new(nul_buf, 9);
     assert_eq(sanitize_host_for_header(nul_str), 0, "L3: NUL byte rejected");
 
+    # =====================================================================
+    # 1.6.3 closeout audit (docs/audit/2026-05-11-audit.md)
+    # =====================================================================
+
+    test_group("closeout-medium1-fork-exec-sigmask-reset");
+
+    # MEDIUM-1: fork_exec_service child path must reset the inherited
+    # PID-1 signal mask before execve. The fix extracts the reset
+    # into `reset_child_signal_mask()`; the unit test below verifies
+    # the function clears the mask we artificially set in the parent.
+    # (End-to-end coverage is in the qemu harness — argonaut isn't
+    # PID 1 under `cyrius test`, so we can't reproduce the supervisor
+    # loop's sigprocmask blocking.)
+    var probe_set = sigset_new();
+    sigset_add(probe_set, SIGTERM);
+    sigset_add(probe_set, SIGINT);
+    sys_sigprocmask(SIG_BLOCK, probe_set, 0);
+    # Confirm we ARE now blocking SIGTERM via a read-back.
+    var current_set = sigset_new();
+    sys_sigprocmask(SIG_BLOCK, 0, current_set);
+    assert_eq(sigset_has(current_set, SIGTERM), 1, "M1: pre-state — SIGTERM blocked");
+    # Call the helper.
+    reset_child_signal_mask();
+    var post_set = sigset_new();
+    sys_sigprocmask(SIG_BLOCK, 0, post_set);
+    assert_eq(sigset_has(post_set, SIGTERM), 0, "M1: SIGTERM unblocked after reset");
+    assert_eq(sigset_has(post_set, SIGINT),  0, "M1: SIGINT unblocked after reset");
+
+    test_group("closeout-medium2-fork-exec-envp-path");
+
+    # MEDIUM-2: fork_exec_service must pass a usable PATH in envp,
+    # not an empty environment. The fix extracts the envp build into
+    # `build_default_envp()`; the unit test below verifies the
+    # produced vec starts with a "PATH=" entry.
+    var envp = build_default_envp();
+    assert(envp != 0, "M2: envp non-null");
+    assert(vec_len(envp) >= 1, "M2: envp has at least one entry");
+    var first_env = vec_get(envp, 0);
+    var first_env_str = str_new(first_env, 5);
+    assert(str_eq(first_env_str, str_from("PATH=")), "M2: first envp entry starts with PATH=");
+
     return assert_summary();
 }
 

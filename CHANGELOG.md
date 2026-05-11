@@ -7,6 +7,114 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.6.3] — 2026-05-11
+
+**1.6.x arc closeout.** Lands L3 end-to-end (the carry-forward
+from 1.6.2) via a statically-linked test helper, plus the
+arc-closing P(-1) audit per CLAUDE.md procedure. Findings in
+[`docs/audit/2026-05-11-audit.md`](docs/audit/2026-05-11-audit.md):
+**0 CRITICAL / 0 HIGH**; 2 MEDIUM closed with regression tests
+(signal-mask inheritance into spawned services; empty envp
+dropping PATH); 3 LOW (1 closed, 2 documented). Closes the
+2026-04-26 audit's PID-1 graduation re-audit trigger.
+
+### Added
+
+- **`qemu/helpers/l3-helper.cyr`** — 12 KB statically-linked
+  cyrius binary. Spawned by argonaut's `fork_exec_service` from
+  `pid1_harness_l3`; writes `sid=N pid=M\n` to `/l3.marker` via
+  raw syscalls (no shell, no dyn-loader). Sidesteps the
+  busybox-shell-path blockers from 1.6.2 (Arch's busybox is
+  dynamically linked; even after bundling ld-linux a parent-side
+  waitpid hang remained that didn't reproduce outside the
+  harness). Its own minimal `cyrius.cyml` lists only the
+  `syscalls` stdlib module — no libro / sigil / sakshi
+  transitive pull-in.
+- **`qemu/helpers/cyrius.cyml`** — 30-line minimal manifest
+  for the helpers subproject. Pins cyrius 5.10.44 (matches
+  argonaut's pin); no external deps.
+- **`qemu/build-initramfs.sh`** — builds the L3 helper from its
+  subdir, then stages it as `/bin/l3-helper` in the initramfs
+  alongside the argonaut binary and busybox.
+- **`src/pid1_harness.cyr` `pid1_harness_l3`** — now wires the
+  full path: `fork_exec_service(/bin/l3-helper)` → waitpid →
+  read `/l3.marker` → parse `sid=N pid=M` → assert `n == m`.
+  Output via raw `sys_write` to fd 1 (the 1.6.2 debug session
+  revealed that the `print()` + `str_println()` builder chain
+  silently dropped output on the PID-1 path under some
+  conditions; raw writes are unbuffered and reliable). The
+  `audit-l3-fork-setsid` unit shape from `audit_findings.tcyr`
+  is now validated end-to-end under real PID 1
+  (`sid=59 pid=59` on local KVM runs).
+- **`docs/audit/2026-05-11-audit.md`** — full 1.6.x closeout
+  audit report. Summary table, per-finding analysis, scope
+  notes, bench impact, test count delta.
+
+### Security (1.6.x closeout audit findings)
+
+- **[MEDIUM-1, closed]** `fork_exec_service` child path
+  inherited the PID-1 supervisor loop's SIGTERM/SIGINT/SIGCHLD
+  block (added at 1.6.2). Services spawned with that mask
+  can't receive shutdown signals — the kernel queues them
+  against the masked process indefinitely. New
+  `reset_child_signal_mask()` helper in `src/process_mgmt.cyr`
+  calls `sys_sigprocmask(SIG_SETMASK, empty_set, 0)` before
+  `sys_execve`. Regression in `audit_findings.tcyr`
+  `closeout-medium1-fork-exec-sigmask-reset`.
+- **[MEDIUM-2, closed]** `fork_exec_service` passed an empty
+  envp to spawned services — the 1.6.2 fix for the
+  nested-fork-via-`exec_env_str` bug punted on the
+  map→flat-cstrs conversion. Services lost PATH silently. New
+  `build_default_envp()` helper produces a minimal vec with
+  `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`.
+  Full per-service env override tracks as a roadmap item.
+  Regression in `closeout-medium2-fork-exec-envp-path`.
+- **[LOW-1, closed]** `pid1_harness_requested` substring match
+  added boundary checks (start-of-buffer / space / tab / NL on
+  both sides). Pre-1.6.3 raw substring match would have
+  accepted `argonaut.harness=11` or `noargonaut.harness=1`
+  (neither shows up in practice, but the safety property is now
+  explicit).
+- **[LOW-2, documented]** `/proc/cmdline` read buffer capped at
+  1024 bytes. Linux `CONFIG_CMDLINE_SIZE` is typically 2048
+  or 4096; argonaut deployments don't have very long cmdlines.
+  Bump when a consumer surfaces a need.
+- **[LOW-3, documented]** `qemu/build-initramfs.sh` `ldd`
+  output parsing — handles the two common shapes (`lib => path`
+  and bare absolute paths) but theoretical edge case for paths
+  containing spaces. Documented; no fix shipped.
+
+### Stats
+
+- **28 .tcyr suites / 741 assertions** pass under cyrius
+  5.10.44 (was 28 / 735 at 1.6.2; +6 for the closeout
+  regressions M1 + M2 + the helper-fn unit checks).
+- **Binary x86_64 ~1.00 MB** (1033368 bytes,
+  `CYRIUS_DCE=1`) — effectively unchanged from 1.6.2.
+- **L3 helper binary**: 11936 bytes static cyrius ELF.
+- **qemu harness wall time**: ~0.5 s under KVM
+  (`pid1-harness-test.sh` covers M3 + L3 end-to-end).
+- 1 audit re-trigger CLOSED: argonaut graduating to true PID 1
+  (queued in `docs/audit/2026-04-26-audit.md` since 1.4.0).
+
+### Disposition
+
+1.6.x arc CLOSED at 1.6.3. PID-1 surface is now validated
+end-to-end under qemu — boot to supervisor loop (1.6.0), clean
+shutdown via signalfd (1.6.2), orphan reap under real-PID-1
+reparenting (1.6.2 M3), and fork_exec_service controlling-TTY
+decoupling via setsid (1.6.3 L3). The static L3 helper pattern
+also unlocks future end-to-end tests for any service-lifecycle
+behaviour that needs validation under real PID 1 — drop a
+helper next to `l3-helper.cyr`, spawn via `fork_exec_service`,
+assert via marker file.
+
+Remaining 1.6.x carry-forwards (still open, gated on external
+work): native aarch64 CI runner; WitnessAnchor publishing
+(AGNOS federation protocol); durable signing-key rotation
+(kybernet key-management surface); per-service env override
+(map→flat-cstrs conversion in fork_exec_service).
+
 ## [1.6.2] — 2026-05-10
 
 PID-1 harness extensions, partial. Lands signal-handled clean

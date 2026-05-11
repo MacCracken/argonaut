@@ -37,6 +37,23 @@ mkdir -p "${INITRAMFS_DIR}"/{bin,sbin,dev,proc,sys,run,tmp,etc,usr/bin}
 cp "$BINARY" "${INITRAMFS_DIR}/sbin/init"
 chmod +x "${INITRAMFS_DIR}/sbin/init"
 
+# Bundle the L3 helper (1.6.3) — a tiny statically-linked cyrius
+# binary that writes `sid pid` to /l3.marker via raw syscalls.
+# Avoids the busybox-shell path that hit dyn-loader + waitpid
+# blockers at 1.6.2. Built from qemu/helpers/l3-helper.cyr with
+# its own minimal manifest so it doesn't pull in libro/sigil/etc.
+HELPER_SRC="${SCRIPT_DIR}/helpers/l3-helper.cyr"
+HELPER_BIN="${SCRIPT_DIR}/helpers/l3-helper"
+if [ -f "$HELPER_SRC" ] && { [ ! -f "$HELPER_BIN" ] || [ "$HELPER_SRC" -nt "$HELPER_BIN" ]; }; then
+    echo "Building L3 helper..."
+    (cd "${SCRIPT_DIR}/helpers" && CYRIUS_DCE=1 cyrius build l3-helper.cyr l3-helper >/dev/null)
+fi
+if [ -f "$HELPER_BIN" ]; then
+    cp "$HELPER_BIN" "${INITRAMFS_DIR}/bin/l3-helper"
+    chmod +x "${INITRAMFS_DIR}/bin/l3-helper"
+    echo "  bundled L3 helper ($(wc -c < "$HELPER_BIN") bytes, static)"
+fi
+
 # Bundle busybox for shells / test helpers used by the M3 orphan-reap
 # and L3 controlling-TTY test variants. Optional — boot smoke works
 # without it; M3/L3 end-to-end tests need it.
