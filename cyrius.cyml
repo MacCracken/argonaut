@@ -43,6 +43,14 @@ stdlib = [
     "bench",
 ]
 
+# UPSTREAM-1 (1.5.5 audit) — sigil 3.0.1's dist file has
+# re-published mid-arc twice, removing `ct_eq` both times. Keep
+# the shim wired so argonaut is immune to upstream tag mutation
+# until libro migrates to `ct_eq_bytes_lens` directly.
+[deps.argonaut_compat]
+path = "."
+modules = ["src/compat.cyr"]
+
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
 tag = "1.9.3"

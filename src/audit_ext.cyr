@@ -41,23 +41,57 @@ fn audit_ext_init() {
 
 # PersistentAuditLog layout (no #derive — keeps the fn-count
 # headroom; consumers access via load64 with explicit offsets):
-#   +0   chain   — in-memory AuditChain (libro chain_*)
-#   +8   store   — PatraStore handle
-#   +16  path    — Str (diagnostics only)
+#   +0   chain               — in-memory AuditChain (libro chain_*)
+#   +8   store               — PatraStore handle
+#   +16  path                — Str (diagnostics only)
+#   +24  _force_disk_fail    — 1.5.5 audit test hook (0 = normal,
+#                              1 = make next patrastore_append
+#                              return non-zero without touching disk).
+#                              Production callers leave this at 0.
 struct PersistentAuditLog {
     chain;
     store;
     path;
+    _force_disk_fail;
 }
 
 fn pal_chain(pal) { return load64(pal); }
 fn pal_store(pal) { return load64(pal + 8); }
 fn pal_path(pal)  { return load64(pal + 16); }
 
+# Test hook (1.5.5 audit MEDIUM-2 regression coverage). NOT public
+# API — flip the force-fail bit on a PersistentAuditLog so the next
+# `audit_log_record_persistent` simulates a patrastore_append failure
+# without requiring real disk-pressure / fs-readonly conditions.
+fn _audit_ext_test_force_disk_fail(pal, on) {
+    if (pal == 0) { return 0; }
+    store64(pal + 24, on);
+    return 0;
+}
+
+# Test hook (1.5.5 audit MEDIUM-3 regression coverage). Opens the
+# patra file at `path` directly via libro's patra accessor and
+# rewrites the `det` column of every row to "tampered", breaking
+# the chain hash linkage without going through the audit_log API.
+# Patra 1.9.x's UPDATE parser doesn't yet handle subqueries, so we
+# use an unbounded UPDATE — fine for the test, every entry's hash
+# now mismatches its stored hash column. Caller re-opens via
+# `audit_log_open_persistent` to assert verify rejects.
+fn _audit_ext_test_mutate_first_detail(path) {
+    audit_ext_init();
+    var db = patra_open(_entry_to_cstr(path));
+    if (db == 0) { return 0; }
+    patra_exec(db, "UPDATE audit_entries SET det='tampered'");
+    patra_close(db);
+    return 0;
+}
+
 # audit_log_open_persistent(path) — open or create a PatraStore-backed
 # audit log. On reopen, existing entries are loaded into the chain
-# (verified-on-load via `chain_from_entries` → `chain_verify`).
-# Returns the wrapper pointer or 0 on failure.
+# AND verified for hash-linkage integrity (1.5.5 audit MEDIUM-3 fix);
+# verify failure closes the store and returns 0 so consumers see
+# the same "open failed" signal as for any other open-time error.
+# Returns the wrapper pointer or 0 on any failure (open / verify).
 fn audit_log_open_persistent(path) {
     audit_ext_init();
     var store = patrastore_open(path);
@@ -72,19 +106,31 @@ fn audit_log_open_persistent(path) {
         chain = chain_new();
     } else {
         chain = chain_from_entries(loaded);
+        # MEDIUM-3 (1.5.5 closeout audit): verify chain integrity on
+        # replay so tampered on-disk state doesn't get silently
+        # accepted. libro `chain_verify` returns 0 on success, an
+        # error pointer on failure.
+        if (chain_verify(chain) != 0) {
+            patrastore_close(store);
+            return 0;
+        }
     }
 
     var pal = alloc(sizeof(PersistentAuditLog));
     store64(pal,      chain);
     store64(pal + 8,  store);
     store64(pal + 16, path);
+    store64(pal + 24, 0);                # _force_disk_fail (1.5.5 test hook, off)
     return pal;
 }
 
 # audit_log_record_persistent(pal, service, event_type) — append to both
 # the in-memory chain and the on-disk store. Returns the libro entry
-# pointer (for further wrapping / signing); caller is responsible for
-# flushing if durability across crashes is required.
+# pointer on full success; **returns 0 if patrastore_append failed**
+# (1.5.5 audit MEDIUM-2 fix). The in-memory chain still carries the
+# entry (rolling back would break the hash linkage for subsequent
+# appends), but the 0 return signals "disk diverged from chain;
+# treat this entry as unrecorded for durability purposes".
 fn audit_log_record_persistent(pal, service, event_type) {
     var chain = load64(pal);
     var store = load64(pal + 8);
@@ -93,12 +139,16 @@ fn audit_log_record_persistent(pal, service, event_type) {
     var action = str_from(event_type_str(event_type));
     var details = str_from(service);
     var e = chain_append(chain, severity, source, action, details);
-    patrastore_append(store, e);
+    # Test hook: bypass real patra to simulate disk failure.
+    if (load64(pal + 24) == 1) { return 0; }
+    var rc = patrastore_append(store, e);
+    if (rc != 0) { return 0; }       # libro convention: non-zero = error
     return e;
 }
 
 # audit_log_record_persistent_with_agent — same shape with explicit
 # agent_id; matches the in-memory `audit_log_record_with_agent` API.
+# Same MEDIUM-2 disk-fail contract: returns 0 on patrastore_append failure.
 fn audit_log_record_persistent_with_agent(pal, service, event_type, agent) {
     var chain = load64(pal);
     var store = load64(pal + 8);
@@ -108,7 +158,9 @@ fn audit_log_record_persistent_with_agent(pal, service, event_type, agent) {
     var details = str_from(service);
     var e = chain_append_with_agent(chain, severity, source, action, details,
     str_from(agent));
-    patrastore_append(store, e);
+    if (load64(pal + 24) == 1) { return 0; }
+    var rc = patrastore_append(store, e);
+    if (rc != 0) { return 0; }
     return e;
 }
 

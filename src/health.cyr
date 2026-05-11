@@ -3,6 +3,29 @@
 # Ported from rust-old/src/health.rs
 
 # =========================================================================
+# 1.5.5 audit helpers — LOW-3 defense-in-depth
+# =========================================================================
+# sanitize_host_for_header(host): 1 if `host` is safe to embed in an
+# HTTP `Host:` header, 0 otherwise. Rejects empty strings + any byte
+# in the control-character range [0..31] or DEL (127). The primary
+# defense against HTTP request-line / Host-header injection is the
+# resolver gate (`resolve_host_ipv4` only accepts dotted quads or
+# /etc/hosts names, neither of which can contain CRLF); this is a
+# second gate so a future refactor that skips the resolver doesn't
+# re-open the injection class.
+fn sanitize_host_for_header(host) {
+    var n = str_len(host);
+    if (n == 0) { return 0; }
+    var d = str_data(host);
+    for (var i = 0; i < n; i = i + 1) {
+        var c = load8(d + i);
+        if (c < 32)  { return 0; }
+        if (c == 127) { return 0; }
+    }
+    return 1;
+}
+
+# =========================================================================
 # Health state
 # =========================================================================
 
@@ -25,17 +48,12 @@ fn health_state_str(s) {
 # Individual check implementations
 # =========================================================================
 
-# TCP connect check — connect and immediately close.
-# Returns 1 on success, 0 on failure (resolver miss OR connect failure).
-# Caller distinguishes via the message field on the wrapping
-# HealthCheckResult in `execute_health_check`.
-fn check_tcp_connect(host, port, timeout_ms) {
-    # Resolve host to a packed IPv4 first — fail fast on
-    # unresolvable inputs rather than opening a socket against
-    # an arbitrary fallback (HIGH-1, 1.4.0).
-    var ip = resolve_host_ipv4(host);
-    if (ip < 0) { return 0; }
-
+# tcp_connect_ip(ip, port, timeout_ms) — core TCP connect over a
+# pre-resolved packed-BE IPv4. Returns 1 on success, 0 on failure.
+# Split from `check_tcp_connect` (1.5.5 audit LOW-1) so the
+# dispatcher can pre-resolve once and pass the IP, avoiding the
+# duplicate /etc/hosts read on the hot path.
+fn tcp_connect_ip(ip, port, timeout_ms) {
     # socket(AF_INET=2, SOCK_STREAM=1, 0)
     var fd = syscall(41, 2, 1, 0);
     if (fd < 0) { return 0; }
@@ -95,6 +113,17 @@ fn check_tcp_connect(host, port, timeout_ms) {
     return 0;
 }
 
+# check_tcp_connect(host, port, timeout_ms) — backwards-compatible
+# wrapper. Resolves host then dispatches to `tcp_connect_ip`. Returns
+# 1 on success, 0 on resolver miss OR connect failure (the
+# dispatcher in `execute_health_check` re-resolves separately to
+# distinguish the two cases in the audit message).
+fn check_tcp_connect(host, port, timeout_ms) {
+    var ip = resolve_host_ipv4(host);
+    if (ip < 0) { return 0; }
+    return tcp_connect_ip(ip, port, timeout_ms);
+}
+
 # Process alive check — kill(pid, 0)
 fn check_process_alive(pid) {
     if (pid <= 0) { return 0; }
@@ -134,14 +163,17 @@ fn execute_health_check(service_name, hc, pid) {
         # H1 (closed 1.5.2): resolve the configured host via
         # `resolve_host_ipv4` rather than silently probing 127.0.0.1.
         # `check_tcp_connect` returns 0 for both "unresolvable" and
-        # "connect failed"; disambiguate by re-resolving here so the
+        # "connect failed"; disambiguate by pre-resolving here so the
         # supervisor's audit trail names the actual cause.
+        # **LOW-1 (1.5.5 audit):** pre-resolve once and dispatch to
+        # `tcp_connect_ip` with the resolved value rather than letting
+        # `check_tcp_connect` re-resolve internally.
         var tcp_ip = resolve_host_ipv4(target);
         if (tcp_ip < 0) {
             passed = 0;
             message = str_from("TCP check: host did not resolve");
         } else {
-            passed = check_tcp_connect(target, port, timeout);
+            passed = tcp_connect_ip(tcp_ip, port, timeout);
             if (passed) {
                 message = str_from("TCP connect succeeded");
             } else {
@@ -189,11 +221,43 @@ fn execute_health_check(service_name, hc, pid) {
             }
         }
 
+        # LOW-2 (1.5.5 audit): reject ports outside the valid TCP
+        # range (1..65535) at parse time so the supervisor sees a
+        # clear "port out of range" message instead of a silent
+        # connect failure on a wraparound port.
+        if (http_port < 1 || http_port > 65535) {
+            var result = alloc(sizeof(HealthCheckResult));
+            store64(result, service_name);
+            store64(result + 8, str_from(health_check_type_str(check_type)));
+            store64(result + 16, 0);
+            store64(result + 24, 0);
+            store64(result + 32, str_from("HTTP check: port out of range"));
+            store64(result + 40, now_ms());
+            return result;
+        }
+
         # H1 (closed 1.5.2): resolve the configured host via
         # `resolve_host_ipv4`. Unresolvable inputs short-circuit with
         # a clear message rather than the silent-localhost fallback
         # that shipped pre-1.4.0.
         var host_str = str_new(url_data + offset, host_end - offset);
+
+        # LOW-3 (1.5.5 audit): defense-in-depth — block CRLF / NUL /
+        # control bytes from reaching the `Host:` header builder.
+        # The resolver gate already rejects these, but a future
+        # refactor that skips the resolver shouldn't re-open the
+        # injection class.
+        if (sanitize_host_for_header(host_str) == 0) {
+            var result = alloc(sizeof(HealthCheckResult));
+            store64(result, service_name);
+            store64(result + 8, str_from(health_check_type_str(check_type)));
+            store64(result + 16, 0);
+            store64(result + 24, 0);
+            store64(result + 32, str_from("HTTP check: host has invalid byte"));
+            store64(result + 40, now_ms());
+            return result;
+        }
+
         var http_ip = resolve_host_ipv4(host_str);
         if (http_ip < 0) {
             var result = alloc(sizeof(HealthCheckResult));

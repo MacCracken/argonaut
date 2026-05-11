@@ -6,6 +6,17 @@
 
 ## Version
 
+**1.5.5** (shipped 2026-05-10 — 1.5.x arc closeout. Full
+P(-1) pass per CLAUDE.md procedure; findings doc'd in
+`docs/audit/2026-05-10-audit.md`. **0 CRITICAL / 0 HIGH**;
+3 MEDIUM closed with regression tests (etc-hosts heap leak,
+persistent log silent disk-fail, persistent log accepts
+tampered chain); 4 LOW (3 closed, 1 documented); 2 UPSTREAM
+(sigil dist tag instability mitigated via permanent
+`src/compat.cyr` shim; sigil Ed25519-aarch64 quirk filed at
+1.5.4). Orphan `src/test_*.cyr` stubs removed. kybernet
+BC-clean against the 1.5.5 surface. 1.5.x arc CLOSED.)
+
 **1.5.4** (shipped 2026-05-10 — cross-arch. Restores aarch64
 builds via cyrius `cc5_aarch64` — no argonaut source changes
 needed; the translator converts syscalls + ABI at codegen. CI /
@@ -84,8 +95,9 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **x86_64: ~1.00 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1023544 bytes)
-- **aarch64: ~1.14 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/argonaut-aarch64`, 1141376 bytes; cross-build via `cc5_aarch64` translator since 1.5.4). +140 KB delta tracks aarch64's fixed-width instruction encoding.
+- **x86_64: ~1.00 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1024256 bytes)
+- **aarch64: ~1.14 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/argonaut-aarch64`, ~1141 KB; cross-build via `cc5_aarch64` translator since 1.5.4). +140 KB delta tracks aarch64's fixed-width instruction encoding.
+- Dead-code floor: ~2,114 unreachable functions NOPed under DCE (was ~2,140 at 1.5.4; orphan stub removal + `tcp_connect_ip` split tightened the reachable set).
 - Was 378 KB at 1.2.0, 641 KB at 1.3.0, 650 KB at 1.4.0, 652 KB at
   1.5.0, ~990 KB at 1.5.1, ~995 KB at 1.5.2; +5 KB at 1.5.3 for
   the `src/audit_ext.cyr` wrapper module + new ArgonautInit slot
@@ -98,8 +110,8 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Suites
 
-- **Native x86_64: 28 .tcyr suites / 720 assertions** (0 failures on cyrius 5.10.34). Unchanged from 1.5.3.
-- **aarch64 (qemu-user): 26 of 28 / 605 assertions** pass via `scripts/aarch64-sweep.sh`. 2 suites in the documented known-failure budget (qemu emulation limits + upstream sigil Ed25519 quirk — see `docs/architecture/001-cross-arch-aarch64.md`).
+- **Native x86_64: 28 .tcyr suites / 734 assertions** (0 failures on cyrius 5.10.34). +14 over 1.5.4 for the closeout audit regressions in `audit_findings.tcyr` (`closeout-medium1` / `medium2` / `medium3` / `low2` / `low3` groups).
+- **aarch64 (qemu-user): 26 of 28** pass via `scripts/aarch64-sweep.sh`. 2 suites in the documented known-failure budget (qemu emulation limits + upstream sigil Ed25519 quirk — see `docs/architecture/001-cross-arch-aarch64.md`).
 - **2 .bcyr binaries** (`tests/bcyr/argonaut.bcyr`, `tests/bcyr/api.bcyr`)
 - **37 benchmarks** wired into `src/bench_main.cyr`; history in `bench-history.csv`
 
@@ -129,10 +141,6 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## In-flight
 
-- **1.5.5 — Closeout P(-1) audit.** Arc-closing security re-pass
-  before 1.6.0 tagging. Covers the libro extended surface
-  (persistence, signing, merkle) added in 1.5.3 + the aarch64
-  cross-arch syscall surface added in 1.5.4.
 - **1.6.x — QEMU PID-1 harness + carry-forwards.** Validates M3
   (orphan reap under real PID-1 reparenting) and L3
   (controlling-TTY decoupling) on a minimal initramfs harness;
@@ -160,6 +168,7 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Recent shipped
 
+- **1.5.5** (2026-05-10) — 1.5.x arc closeout P(-1) audit: 3 MEDIUM closed with regression tests (etc-hosts heap leak, persist silent disk-fail, persist tamper-rejected); LOW-1/2/3 closed (TCP pre-resolve split, HTTP port range, Host: header sanitize); orphan src/test_*.cyr stubs removed; sigil compat shim re-installed as permanent fixture
 - **1.5.4** (2026-05-10) — cross-arch: aarch64 cross-build via `cc5_aarch64`; CI / release publish `argonaut-<VER>-aarch64-linux` best-effort; `scripts/aarch64-sweep.sh` local sweep with documented known-failure budget; `docs/architecture/001-cross-arch-aarch64.md` documents the surface; upstream sigil Ed25519 aarch64 quirk filed
 - **1.5.3** (2026-05-10) — libro extended surface: `src/audit_ext.cyr` adds opt-in PatraStore persistence, Ed25519/MLDSA/hybrid snapshot signing, merkle root + inclusion / consistency proofs; `argonaut_init_new` integration via `config.audit_persist`; `init_audit_record` / `init_audit_flush` dispatch helpers
 - **1.5.2** (2026-05-10) — HIGH-1 host resolver follow-up: `src/resolver.cyr` adds IPv4 dotted-quad parser + /etc/hosts scan; health checks route via `resolve_host_ipv4`; HTTP Host: header echoes configured host; `exec_env` Str/cstr quirk filed upstream; 1.5.1 compat shim retired (sigil 3.0.1 dist re-pub restored `ct_eq`)

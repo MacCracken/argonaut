@@ -105,8 +105,24 @@ fn write_ipv4_octets(dst, ip) {
 # on stock distros, <2 KB on machines with explicit fleet pinning);
 # 8 KB is comfortable headroom without putting an arbitrary heap
 # buffer into the health-check hot path.
+#
+# **1.5.5 audit MEDIUM-1:** the buffer is hoisted to module-scope
+# static so consumers calling `resolve_host_ipv4` on the health-check
+# hot path don't grow the bump arena by 8 KB / call. /etc/hosts is
+# re-read on every call (still picks up fleet-management updates);
+# only the destination buffer is reused.
+
+var _etc_hosts_buf = 0;
+
+fn _etc_hosts_buf_ptr() {
+    return _etc_hosts_buf;
+}
+
 fn lookup_etc_hosts(host) {
-    var buf = alloc(8192);
+    if (_etc_hosts_buf == 0) {
+        _etc_hosts_buf = alloc(8192);
+    }
+    var buf = _etc_hosts_buf;
     var n = file_read_all("/etc/hosts", buf, 8192);
     if (n <= 0) { return 0 - 1; }
 

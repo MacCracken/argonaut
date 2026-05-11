@@ -7,53 +7,28 @@ work only.
 
 ---
 
-## Current — v1.5.4 (shipped 2026-05-10)
+## Current — v1.5.5 (shipped 2026-05-10) — 1.5.x arc CLOSED
 
-Cross-arch — restores aarch64 builds. cyrius's `cc5_aarch64`
-translator converts syscalls + ABI at codegen, so no argonaut
-source changes were needed. CI + release publish
-`argonaut-<VER>-aarch64-linux` alongside x86_64 as best-effort
-(skips without failing when toolchain doesn't bundle the
-translator). `scripts/aarch64-sweep.sh` runs the full `.tcyr`
-sweep under qemu-user with a documented known-failure budget:
-2 suites trip qemu emulation limits + an upstream sigil
-Ed25519 aarch64 verify quirk (filed against sigil with minimal
-repro). `docs/architecture/001-cross-arch-aarch64.md` is the
-canonical reference. See
-[CHANGELOG 1.5.4](../../CHANGELOG.md#154--2026-05-10).
+Arc-closing P(-1) audit per CLAUDE.md procedure. Findings in
+[`docs/audit/2026-05-10-audit.md`](../audit/2026-05-10-audit.md):
+**0 CRITICAL / 0 HIGH**; 3 MEDIUM closed with regression tests
+(`lookup_etc_hosts` heap leak; persistent log silent disk-fail;
+persistent log replay accepted tampered chain); LOW-1/2/3 closed
+(TCP pre-resolve split, HTTP port-range gate, `Host:` header
+sanitize gate); LOW-4 documented. 2 UPSTREAM (sigil dist tag
+instability mitigated via permanent `src/compat.cyr` shim;
+sigil Ed25519-aarch64 verify quirk filed at 1.5.4 pre-audit).
+Orphan `src/test_*.cyr` stubs removed (predate `tests/tcyr/`).
+kybernet BC-clean against the 1.5.5 surface.
 
-The 1.5.x arc closes with the P(-1) audit (1.5.5). 1.6.x picks
-up the QEMU PID-1 harness, native aarch64 CI runner (closes
-qemu-user gap), and carry-forward cleanups (audit_log_new
-rename, anchor publish, durable signing-key rotation).
-
----
-
-## Next — v1.5.5 — 1.5.x closeout P(-1) audit
-
-Theme: arc-closing security re-pass before 1.6.0 tagging. One of
-the 2026-04-26 audit's four re-audit triggers is argonaut
-graduating to true PID 1; while that lands in 1.6.x, the 1.5.x
-arc still earns its own closeout audit covering the libro
-extended surface (persistence, signing, merkle) + the aarch64
-cross-arch syscall surface added in 1.5.4.
-
-- [ ] **P(-1) full pass** — per CLAUDE.md's procedure: roadmap
-  review → cleanliness gate → bench baseline → internal deep
-  review → external research (CVEs, init/service-manager
-  0-days) → security audit → regression tests for findings →
-  post-audit benches → doc sweep.
-- [ ] **Audit report** — `docs/audit/YYYY-MM-DD-audit.md` with
-  severity tags. Every MEDIUM+ earns a failing regression test
-  before the fix.
-- [ ] **Closeout pass** — full test suite, bench snapshot vs
-  prior closeout label, dead-code floor, refactor + cleanup
-  sweep, downstream consumer check (kybernet builds clean
-  against tagged 1.5.5).
+The 1.5.x arc is CLOSED. 1.6.x picks up the QEMU PID-1 harness
++ PID-1 graduation re-audit + native aarch64 CI runner +
+carry-forward cleanups (`audit_log_new` rename, anchor publish,
+durable signing-key rotation).
 
 ---
 
-## v1.6.x arc — PID-1 graduation + carry-forwards
+## Next — v1.6.x arc — PID-1 graduation
 
 Theme: end-to-end validate argonaut as true PID 1, and clear the
 carry-forward items from the 1.5.x arc.

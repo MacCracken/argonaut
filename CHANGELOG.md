@@ -7,6 +7,162 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.5.5] — 2026-05-10
+
+**1.5.x arc closeout.** Final patch before 1.6.x; closes the
+arc-spanning P(-1) audit pass per CLAUDE.md procedure
+(roadmap review → cleanliness gate → bench baseline → internal
+deep review → audit report → failing regression tests → fixes
+→ post-audit benches → cleanup → downstream check → full
+clean build). Full disposition in
+[`docs/audit/2026-05-10-audit.md`](docs/audit/2026-05-10-audit.md).
+
+### Security (1.5.x closeout audit findings)
+
+- **[UPSTREAM-1]** sigil 3.0.1 dist tag re-published mid-arc
+  for the third time, dropping `ct_eq` again (caught by the
+  cleanliness gate). `src/compat.cyr` + `[deps.argonaut_compat]`
+  self-reference re-installed and re-documented as a
+  **permanent** fixture, not a 1.6.x-deferred cleanup —
+  three observations of tag mutation in two weeks of arc work
+  proves the upstream tag isn't a stable contract. Drops when
+  libro migrates its own internal call sites to
+  `ct_eq_bytes_lens` directly.
+- **[MEDIUM-1, closed]** `lookup_etc_hosts` hoists its 8 KB
+  scratch buffer to a module-scope static (`_etc_hosts_buf`)
+  alloc'd lazily on first call and reused after.
+  Pre-fix: bump-arena grew 8 KB / call. Post-fix: 8 KB total
+  across the supervisor's lifetime. Probe via new
+  `_etc_hosts_buf_ptr()` accessor; regression in
+  `audit_findings.tcyr` `closeout-medium1-etc-hosts-stable-buf`
+  asserts the buffer pointer stays identical across 100
+  successive resolves.
+- **[MEDIUM-2, closed]** `audit_log_record_persistent` now
+  returns `0` when `patrastore_append` reports failure
+  (libro non-zero error convention). The in-memory chain
+  still carries the entry (rolling it back would break the
+  hash linkage for subsequent appends); the 0 return signals
+  "disk diverged from chain; treat as unrecorded for
+  durability". Same contract on the `_with_agent` variant.
+  Regression in `closeout-medium2-persist-disk-fail` via a
+  new `_audit_ext_test_force_disk_fail` test hook (avoids
+  the fragility of simulating real fs-readonly conditions
+  in CI).
+- **[MEDIUM-3, closed]** `audit_log_open_persistent` calls
+  `chain_verify` after `chain_from_entries` on replay; verify
+  failure closes the store and returns 0, so callers see the
+  same "open failed" signal as for any other open-time error
+  rather than silently accepting tampered on-disk state.
+  Regression in `closeout-medium3-persist-tamper-rejected`
+  via a new `_audit_ext_test_mutate_first_detail` helper
+  that mutates a row's `det` column directly via
+  `patra_exec(UPDATE ...)` bypassing the audit_log API; the
+  reopen-then-verify path rejects the resulting chain.
+- **[LOW-1, closed]** TCP health-check dispatcher pre-resolves
+  the target host once and dispatches to a new
+  `tcp_connect_ip(ip, port, timeout)` core fn rather than
+  letting `check_tcp_connect` re-resolve internally. Removes
+  the redundant `/etc/hosts` read on the hot path and
+  closes the (narrow) TOCTOU window between resolve and
+  connect. `check_tcp_connect` retained as a BC wrapper.
+- **[LOW-2, closed]** HTTP_GET branch rejects port values
+  outside `[1, 65535]` at parse time with a clear
+  `"HTTP check: port out of range"` message rather than
+  silently connecting to a wraparound port. Regression in
+  `closeout-low2-http-port-range`.
+- **[LOW-3, closed]** New `sanitize_host_for_header(host)`
+  defense-in-depth gate in `src/health.cyr`: rejects any host
+  string containing a control byte ([0..31] or DEL) before
+  the value reaches the `Host:` header builder. The resolver
+  gate already blocks CRLF-containing inputs at parse / lookup
+  time; this is a second gate so a future refactor that
+  skips the resolver doesn't re-open an HTTP-injection class.
+  Regression in `closeout-low3-http-host-crlf` (CRLF, bare
+  LF, embedded NUL, empty all rejected; alphanumeric +
+  dotted-quad accepted).
+- **[LOW-4, documented]** `audit_ext_init`'s static-flag
+  guard isn't atomic. Argonaut 1.5.x is single-threaded —
+  no thread spawn points in the call graph — so the race is
+  speculative. Re-evaluate when argonaut grows its first
+  intentional thread.
+
+### Changed
+
+- **`src/resolver.cyr`** — `lookup_etc_hosts` uses
+  `_etc_hosts_buf` module static instead of per-call
+  `alloc(8192)`. `_etc_hosts_buf_ptr()` accessor added for
+  the regression test.
+- **`src/audit_ext.cyr`** — `PersistentAuditLog` grows a
+  `_force_disk_fail` slot at offset +24 (1.5.5 test hook,
+  default 0). `audit_log_open_persistent` adds
+  `chain_verify` on replay; `audit_log_record_persistent` +
+  `_with_agent` return 0 on patrastore failure; new test
+  hooks `_audit_ext_test_force_disk_fail` and
+  `_audit_ext_test_mutate_first_detail` (not public API —
+  prefixed with `_` and called only from
+  `tests/tcyr/audit_findings.tcyr`).
+- **`src/health.cyr`** — new `sanitize_host_for_header(host)`
+  helper. `check_tcp_connect` split into a thin
+  resolve-then-call wrapper around the new `tcp_connect_ip`
+  core. HTTP_GET branch gains the port-range gate, the
+  Host-header sanitize gate, and uses the pre-resolved IP
+  to the TCP connect.
+- **`src/compat.cyr`** — restored after sigil 3.0.1 dist
+  re-publication; permanent fixture now (was 1.5.2 retirement,
+  1.5.1 first install).
+- **`cyrius.cyml`** — `[deps.argonaut_compat]` self-reference
+  restored.
+
+### Removed
+
+- **`src/test_*.cyr`** orphan stubs — `test_advanced.cyr`,
+  `test_api.cyr`, `test_audit.cyr`, `test_display.cyr`,
+  `test_header.cyr`, `test_init.cyr`, `test_lifecycle.cyr`,
+  `test_modules.cyr`, `test_serde.cyr`, `test_types.cyr`.
+  Predate `tests/tcyr/`; not referenced by anything in
+  production or the CI workflows. State.md's "stale stub
+  cleanup" deferral closes here.
+
+### Added
+
+- **`docs/audit/2026-05-10-audit.md`** — full closeout audit
+  report (summary table, per-finding analysis, downstream
+  consumer check, bench-impact note). Replaces the 1.4.0
+  audit doc as the canonical reference for the 1.5.x arc
+  surface.
+- **`tests/tcyr/audit_findings.tcyr`** — 5 new test groups
+  (`closeout-medium1-etc-hosts-stable-buf`,
+  `closeout-medium2-persist-disk-fail`,
+  `closeout-medium3-persist-tamper-rejected`,
+  `closeout-low2-http-port-range`,
+  `closeout-low3-http-host-crlf`); +14 assertions.
+
+### Stats
+
+- **28 .tcyr suites / 734 assertions** pass (was 28 / 720 at
+  1.5.4; +14 for the closeout regressions).
+- **Binary ~1.00 MB** (1024256 bytes, `CYRIUS_DCE=1`).
+  Effectively unchanged from 1.5.4 — the audit fixes are
+  small surface tweaks, the orphan stub removal didn't shift
+  the DCE-eliminated set since the stubs were already
+  dead.
+- Dead-code floor: ~2,114 unreachable functions NOPed under
+  DCE (was ~2,140 at 1.5.4 — the orphan stub removal +
+  the tcp_connect_ip split reduce the unreachable set).
+- Bench: no measurable regression on existing groups
+  (`bench-history.csv` 1.5.5-baseline → 1.5.5-post-audit).
+
+### Disposition
+
+1.5.x arc CLOSED at 1.5.5. **0 CRITICAL / 0 HIGH** findings;
+3 MEDIUM (all closed with regression coverage); 4 LOW
+(3 closed, 1 documented); 2 UPSTREAM (1 mitigated locally
+via permanent shim, 1 filed against sigil at 1.5.4).
+Argonaut 1.5.5 is BC-clean for kybernet's declared pin
+surface (kybernet's coordinated-bump tracked in kybernet's
+own roadmap). 1.6.x picks up the QEMU PID-1 harness +
+re-audit on PID-1 graduation + native aarch64 CI runner.
+
 ## [1.5.4] — 2026-05-10
 
 Cross-arch — restores aarch64 builds. argonaut hasn't been

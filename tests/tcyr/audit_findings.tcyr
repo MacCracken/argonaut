@@ -288,6 +288,114 @@ fn main() {
 
     syscall(87, sid_path);
 
+    # =====================================================================
+    # 1.5.5 closeout audit (docs/audit/2026-05-10-audit.md)
+    # =====================================================================
+
+    test_group("closeout-medium1-etc-hosts-stable-buf");
+
+    # MEDIUM-1: lookup_etc_hosts() must reuse a single static buffer
+    # rather than alloc()ing 8 KB per call. Probe by capturing the
+    # buffer pointer after a baseline call, then asserting it
+    # doesn't move on repeated calls. (Earlier groups in this
+    # suite — `audit-high1-resolver` — already triggered the first
+    # alloc, so we don't assert `== 0` pre-call; the contract under
+    # test is "stable across calls", not "lazy first alloc".)
+    resolve_host_ipv4(str_from("localhost"));
+    var p1 = _etc_hosts_buf_ptr();
+    assert(p1 != 0, "M1: buf populated after lookup");
+    var i_m1 = 0;
+    while (i_m1 < 100) {
+        resolve_host_ipv4(str_from("localhost"));
+        i_m1 = i_m1 + 1;
+    }
+    var p2 = _etc_hosts_buf_ptr();
+    assert_eq(p1, p2, "M1: buf ptr stable across 100 lookups");
+
+    test_group("closeout-medium2-persist-disk-fail");
+
+    # MEDIUM-2: audit_log_record_persistent must return 0 when the
+    # patrastore append fails. Force the failure by passing a
+    # PersistentAuditLog with a poisoned store handle (a sentinel
+    # value the audit_ext recognises as "force-fail" — see the
+    # `_audit_ext_test_force_disk_fail` helper that flags the store).
+    var pal_test = audit_log_open_persistent(str_from("/tmp/argonaut_closeout_m2.patra"));
+    assert(pal_test != 0, "M2: open succeeded for setup");
+    _audit_ext_test_force_disk_fail(pal_test, 1);
+    var e_fail = audit_log_record_persistent(pal_test, "svc-m2", EVT_STARTING);
+    assert_eq(e_fail, 0, "M2: disk-fail path returns 0");
+    _audit_ext_test_force_disk_fail(pal_test, 0);
+    var e_ok = audit_log_record_persistent(pal_test, "svc-m2", EVT_STARTED);
+    assert(e_ok != 0, "M2: clean-path still returns entry");
+    audit_log_close_persistent(pal_test);
+    syscall(87, str_data(str_from("/tmp/argonaut_closeout_m2.patra")));
+
+    test_group("closeout-medium3-persist-tamper-rejected");
+
+    # MEDIUM-3: open must verify chain integrity on replay. Build a
+    # 3-entry log, close, mutate one stored entry's details field
+    # directly via patra so the chain hash no longer holds, reopen
+    # and assert it returns 0 (verify rejected). The mutation
+    # helper `_audit_ext_test_mutate_first_detail` performs the
+    # in-place SQL update bypassing the audit_log_record API.
+    var m3_path = str_from("/tmp/argonaut_closeout_m3.patra");
+    syscall(87, str_data(m3_path));
+    var m3_pal = audit_log_open_persistent(m3_path);
+    audit_log_record_persistent(m3_pal, "svc-m3", EVT_STARTING);
+    audit_log_record_persistent(m3_pal, "svc-m3", EVT_STARTED);
+    audit_log_record_persistent(m3_pal, "svc-m3", EVT_STOPPED_OK);
+    audit_log_flush_persistent(m3_pal);
+    audit_log_close_persistent(m3_pal);
+
+    _audit_ext_test_mutate_first_detail(m3_path);
+
+    var m3_pal2 = audit_log_open_persistent(m3_path);
+    assert_eq(m3_pal2, 0, "M3: tampered chain rejected on open");
+    syscall(87, str_data(m3_path));
+
+    test_group("closeout-low2-http-port-range");
+
+    # LOW-2: HTTP_GET branch must reject port > 65535 with a clear
+    # message rather than silent connect-fail on a wraparound port.
+    var hc_p = alloc(sizeof(HealthCheck));
+    store64(hc_p,      HC_HTTP_GET);
+    store64(hc_p + 8,  str_from("http://localhost:99999/healthz"));
+    store64(hc_p + 16, 0);
+    store64(hc_p + 24, 0);
+    store64(hc_p + 32, 100);
+    store64(hc_p + 40, 0);
+    var r_p = execute_health_check(str_from("svc"), hc_p, 0);
+    assert_eq(load64(r_p + 16), 0, "L2: out-of-range port = not passed");
+    var msg_p = load64(r_p + 32);
+    assert(str_contains(msg_p, str_from("port out of range")), "L2: message names port-range failure");
+
+    test_group("closeout-low3-http-host-crlf");
+
+    # LOW-3: defense-in-depth. The resolver gate already blocks
+    # CRLF-containing hosts at parse_ipv4 / /etc/hosts lookup, but
+    # `sanitize_host_for_header` is a separate gate so a future
+    # refactor that skips the resolver doesn't re-open the injection.
+    assert_eq(sanitize_host_for_header(str_from("localhost")),       1, "L3: alphanumeric accepted");
+    assert_eq(sanitize_host_for_header(str_from("127.0.0.1")),       1, "L3: dotted quad accepted");
+    assert_eq(sanitize_host_for_header(str_from("evil\r\nHost: x")), 0, "L3: CRLF rejected");
+    assert_eq(sanitize_host_for_header(str_from("evil\nGET /")),     0, "L3: bare LF rejected");
+    assert_eq(sanitize_host_for_header(str_from("")),                0, "L3: empty rejected");
+    # NUL embedded in a Str (cstr literals truncate at first NUL —
+    # build the string by hand: "evil" + NUL + "null"). Asserts
+    # sanitize_host_for_header scans by length, not by NUL terminator.
+    var nul_buf = alloc(9);
+    store8(nul_buf,     101);   # e
+    store8(nul_buf + 1, 118);   # v
+    store8(nul_buf + 2, 105);   # i
+    store8(nul_buf + 3, 108);   # l
+    store8(nul_buf + 4, 0);     # NUL
+    store8(nul_buf + 5, 110);   # n
+    store8(nul_buf + 6, 117);   # u
+    store8(nul_buf + 7, 108);   # l
+    store8(nul_buf + 8, 108);   # l
+    var nul_str = str_new(nul_buf, 9);
+    assert_eq(sanitize_host_for_header(nul_str), 0, "L3: NUL byte rejected");
+
     return assert_summary();
 }
 
