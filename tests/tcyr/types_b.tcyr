@@ -5,8 +5,9 @@ fn main() {
     test_group("svc-cfg-rl");
     # --- Default services ---
     var min_v = default_services(BOOT_MINIMAL);
-    assert_eq(vec_len(min_v), 1, "min 1 svc");
+    assert_eq(vec_len(min_v), 2, "min 2 svcs");
     assert(svcs_has_name(min_v, "daimon"), "min daimon");
+    assert(svcs_has_name(min_v, "agnoshi"), "min agnoshi");
 
     var srv_v = default_services(BOOT_SERVER);
     assert_eq(vec_len(srv_v), 5, "srv 5 svcs");

@@ -7,6 +7,64 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.0] — 2026-05-11
+
+**Boot-to-shell MVP path.** `default_services(BOOT_MINIMAL)` and
+`build_boot_sequence(BOOT_MINIMAL)` now register/announce **agnoshi
+as a console shell** (no `aethersafha` Wayland dependency). This
+unblocks the AGNOS closed-beta MVP — kernel + kybernet + agnoshi
+reaching a shell prompt on real iron without the desktop compositor
+stack.
+
+### Added
+
+- **`default_services(BOOT_MINIMAL)`** now registers **agnoshi** alongside
+  daimon. Console-mode shell, no `aethersafha` dependency, no `daimon`
+  dependency. Same binary path (`/usr/lib/agnos/agnoshi`) as the
+  desktop-mode shell; agnoshi handles the console-vs-terminal distinction
+  itself. Process-alive health check (10s interval, 3 failures).
+- **`build_boot_sequence(BOOT_MINIMAL)`** gains `STAGE_SHELL` announcement
+  ("Start agnoshi (console shell)"). Pairs with the services-side change
+  so the boot log surfaces the shell stage in minimal mode the same way
+  it does in desktop mode.
+
+### Changed
+
+- `default_services(BOOT_MINIMAL)` service count: **1 → 2** (daimon +
+  agnoshi). Consumers asserting the previous count (kybernet ≤1.2.0,
+  test fixtures) need to update — see kybernet 1.2.1 for the consumer
+  bump that picks this up.
+- `build_boot_sequence(BOOT_MINIMAL)` step count: **6 → 7**.
+
+### Tests
+
+- `tests/tcyr/types_b.tcyr` — service-count assertion bumped 1→2;
+  new `svcs_has_name(min_v, "agnoshi")` assertion. **40 passed, 0 failed**
+  (was 39).
+- `tests/tcyr/types_a2.tcyr` — step-count assertion bumped 6→7;
+  new `steps_has_stage(min_s, STAGE_SHELL)` assertion. **18 passed, 0 failed**.
+
+### Backward compatibility
+
+- **Breaking for service-count assertions in BOOT_MINIMAL** only. Any
+  consumer treating BOOT_MINIMAL as a "daimon-only" mode will see one
+  additional service registered. agnoshi is a process-alive service —
+  if it isn't present at `/usr/lib/agnos/agnoshi`, the service
+  will fail health checks but won't block boot (default-failure-tolerant
+  health check).
+- BOOT_SERVER, BOOT_DESKTOP, BOOT_EDGE, BOOT_RECOVERY behavior **unchanged**.
+
+### Motivation
+
+The AGNOS closed-beta MVP is **boot-to-shell on real hardware** —
+kernel + PID 1 + shell prompt on iron. Previously the only mode that
+launched a shell (BOOT_DESKTOP) required `aethersafha` (Wayland
+compositor, not yet Cyrius-ported, blocked on Asahi-class driver work).
+Adding a no-deps agnoshi to BOOT_MINIMAL unblocks the MVP path without
+waiting on the compositor.
+
+---
+
 ## [1.6.3] — 2026-05-11
 
 **1.6.x arc closeout.** Lands L3 end-to-end (the carry-forward

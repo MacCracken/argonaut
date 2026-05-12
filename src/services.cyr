@@ -179,6 +179,19 @@ fn default_services(mode) {
 
     vec_push(services, daimon);
 
+    # BOOT_MINIMAL: console agnoshi — no aethersafha dep (no Wayland in minimal).
+    # Enables boot-to-shell MVP: kernel + kybernet + agnoshi reach a prompt on iron.
+    if (mode == BOOT_MINIMAL) {
+        var min_shell = svc_def_new(
+        str_from("agnoshi"),
+        str_from("AI shell (console mode)"),
+        str_from("/usr/lib/agnos/agnoshi")
+        );
+        vec_push(svc_def_modes(min_shell), BOOT_MINIMAL);
+        store64(min_shell + 72, health_check_new(HC_PROCESS_ALIVE, 0, 0, 10000, 1000, 3));
+        vec_push(services, min_shell);
+    }
+
     # LLM gateway and ifran for Server/Desktop
     if (mode == BOOT_SERVER || mode == BOOT_DESKTOP) {
         var gw = svc_def_new(

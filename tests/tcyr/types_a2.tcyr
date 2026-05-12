@@ -4,7 +4,7 @@ fn main() {
     alloc_init();
     test_group("boot-seq");
     # --- Boot sequence counts ---
-    assert_eq(vec_len(build_boot_sequence(BOOT_MINIMAL)), 6, "min 6 steps");
+    assert_eq(vec_len(build_boot_sequence(BOOT_MINIMAL)), 7, "min 7 steps");
     assert_eq(vec_len(build_boot_sequence(BOOT_SERVER)), 9, "srv 9 steps");
     assert_eq(vec_len(build_boot_sequence(BOOT_DESKTOP)), 11, "dsk 11 steps");
     assert_eq(vec_len(build_boot_sequence(BOOT_EDGE)), 6, "edge 6 steps");
@@ -13,6 +13,7 @@ fn main() {
     # --- Stage presence ---
     var min_s = build_boot_sequence(BOOT_MINIMAL);
     assert(steps_has_stage(min_s, STAGE_AGENT_RUNTIME), "min has agent");
+    assert(steps_has_stage(min_s, STAGE_SHELL), "min has shell");
     assert(steps_has_stage(min_s, STAGE_BOOT_COMPLETE), "min has done");
     assert(1 - steps_has_stage(min_s, STAGE_COMPOSITOR), "min no comp");
     assert(1 - steps_has_stage(min_s, STAGE_LLM_GATEWAY), "min no llm");

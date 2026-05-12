@@ -39,6 +39,12 @@ fn build_boot_sequence(mode) {
     # Agent runtime (all non-recovery, non-edge modes)
     vec_push(steps, boot_step_new(STAGE_AGENT_RUNTIME, str_from("Start daimon (agent-runtime) on port 8090"), 1, 5000));
 
+    # Minimal mode: console shell (no compositor).
+    # Pairs with default_services(BOOT_MINIMAL) agnoshi addition.
+    if (mode == BOOT_MINIMAL) {
+        vec_push(steps, boot_step_new(STAGE_SHELL, str_from("Start agnoshi (console shell)"), 0, 3000));
+    }
+
     # Server and Desktop get LLM gateway + model services
     if (mode == BOOT_SERVER || mode == BOOT_DESKTOP) {
         vec_push(steps, boot_step_new(STAGE_LLM_GATEWAY, str_from("Start hoosh (llm-gateway) on port 8088"), 0, 5000));
