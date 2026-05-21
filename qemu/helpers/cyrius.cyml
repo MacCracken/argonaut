@@ -4,7 +4,7 @@ version = "1.6.3"
 description = "Statically-linked helpers bundled in the qemu PID-1 harness initramfs"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "5.10.44"
+cyrius = "6.0.1"
 
 [build]
 entry = "l3-helper.cyr"

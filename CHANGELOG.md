@@ -7,6 +7,20 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.7.1] — 2026-05-21
+
+Toolchain pin bump to the cyrius 6.0.x series.
+
+### Changed
+
+- **`cyrius.cyml`** — `[package].cyrius` pinned `5.10.44` →
+  `6.0.1`. First adoption of the cyrius 6.x line.
+- **`qemu/helpers/cyrius.cyml`** — same bump (`5.10.44` →
+  `6.0.1`); the helpers subproject tracks the parent harness's
+  toolchain pin per the 1.7.0 contract.
+
+---
+
 ## [1.7.0] — 2026-05-11
 
 **Boot-to-shell MVP path.** `default_services(BOOT_MINIMAL)` and
