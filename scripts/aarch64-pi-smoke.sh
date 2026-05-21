@@ -15,7 +15,8 @@
 #   scripts/aarch64-pi-smoke.sh pi /tmp/argo    # remote stage dir
 #
 # Requires:
-#   - cc5_aarch64 in the toolchain bin dir
+#   - cycc_aarch64 in the toolchain bin dir (renamed from
+#     cc5_aarch64 in Cyrius 6.0)
 #   - ssh access to the target (key-based, no interactive prompt)
 #   - the target arch must be aarch64 (script checks `uname -m`)
 
@@ -28,8 +29,8 @@ REMOTE="${1:-pi}"
 REMOTE_DIR="${2:-/tmp/argonaut-smoke}"
 BINARY="${PROJECT_DIR}/build/argonaut-aarch64"
 
-if [ ! -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
-    echo "ERROR: cc5_aarch64 not in toolchain bin dir."
+if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ]; then
+    echo "ERROR: cycc_aarch64 not in toolchain bin dir."
     echo "  Bump cyrius or pull a release that bundles the aarch64 codegen."
     exit 1
 fi

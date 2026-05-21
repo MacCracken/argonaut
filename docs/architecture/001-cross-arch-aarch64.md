@@ -5,12 +5,14 @@ Status: Active (since 1.5.4, 2026-05-10)
 ## Summary
 
 Argonaut cross-builds to aarch64 via cyrius's
-`cc5_aarch64` translator. No argonaut source changes are
-required — the toolchain converts x86_64 syscall numbers + ABI
-to aarch64 at codegen time. Binary ships in CI / release
-artifacts as `argonaut-<VER>-aarch64-linux` alongside the
-x86_64 build, **best-effort** (skipped without failing the run
-when the toolchain release didn't bundle `cc5_aarch64`).
+`cycc_aarch64` translator (renamed from `cc5_aarch64` in
+Cyrius 6.0, when the host compiler renamed `cc5` → `cycc`). No
+argonaut source changes are required — the toolchain converts
+x86_64 syscall numbers + ABI to aarch64 at codegen time.
+Binary ships in CI / release artifacts as
+`argonaut-<VER>-aarch64-linux` alongside the x86_64 build,
+**best-effort** (skipped without failing the run when the
+toolchain release didn't bundle `cycc_aarch64`).
 
 ## Producer
 
@@ -27,7 +29,7 @@ instruction encoding vs. x86_64's variable-length.
 CI runs `qemu-aarch64` on the cross-built binary and grep-asserts
 `"all systems nominal"` on stdout. Best-effort:
 
-- Skips with a warning when `cc5_aarch64` isn't in the toolchain
+- Skips with a warning when `cycc_aarch64` isn't in the toolchain
   bin dir.
 - Skips with a warning when neither `qemu-aarch64-static` nor
   `qemu-aarch64` is on PATH.

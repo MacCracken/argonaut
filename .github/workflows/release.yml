@@ -34,8 +34,9 @@ jobs:
           echo "Version verified: $TAG (cyrius.cyml pulls from VERSION via \${file:VERSION})"
 
       - name: Install Cyrius toolchain
-        # Version-pinned layout — cc5 5.10.9+ resolves arch-peer includes
-        # (syscalls_x86_64_linux.cyr etc.) under ~/.cyrius/versions/<V>/lib.
+        # Version-pinned layout — cycc (was cc5, renamed in Cyrius 6.0)
+        # 5.10.9+ resolves arch-peer includes (syscalls_x86_64_linux.cyr
+        # etc.) under ~/.cyrius/versions/<V>/lib.
         run: |
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
           echo "Installing Cyrius $CYRIUS_VERSION"
@@ -46,6 +47,10 @@ jobs:
           mkdir -p "$VERSIONED/bin" "$VERSIONED/lib"
           cp "$CYRIUS_DIR/bin/"* "$VERSIONED/bin/" 2>/dev/null || true
           cp -r "$CYRIUS_DIR/lib/"* "$VERSIONED/lib/" 2>/dev/null || true
+          # cycc_aarch64 (renamed from cc5_aarch64 in Cyrius 6.0) may
+          # ship under bin/ or at the tarball top-level depending on
+          # the release. Cover both.
+          [ -f "$CYRIUS_DIR/cycc_aarch64" ] && cp "$CYRIUS_DIR/cycc_aarch64" "$VERSIONED/bin/"
           chmod +x "$VERSIONED/bin/"* 2>/dev/null || true
           ln -sfn "$VERSIONED/bin" "$HOME/.cyrius/bin"
           ln -sfn "$VERSIONED/lib" "$HOME/.cyrius/lib"
@@ -72,12 +77,23 @@ jobs:
 
       - name: Cross-build aarch64 (best-effort)
         # 1.5.4 — ship aarch64 alongside x86_64 when the toolchain
-        # bundles cc5_aarch64. Skip without failing the run when
-        # absent (e.g. older toolchain release tarball); the release
-        # publishes whatever binaries were produced.
+        # bundles cycc_aarch64 (renamed from cc5_aarch64 in Cyrius
+        # 6.0). Skip without failing the run when absent (e.g. older
+        # toolchain release tarball); the release publishes whatever
+        # binaries were produced.
+        #
+        # 1.7.1: gated off under Cyrius 6.0.x — cycc_aarch64 6.0.1
+        # hangs or stubs out on argonaut's src/main.cyr (see
+        # CHANGELOG 1.7.1 Known issues). Releases under 6.0.x ship
+        # x86_64 only. Re-enable once an upstream fix lands.
         run: |
-          if [ ! -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
-            echo "::warning::cc5_aarch64 not shipped with this Cyrius release — aarch64 binary skipped"
+          CYRIUS_MAJOR="$(cut -d. -f1 "$HOME/.cyrius/current" 2>/dev/null || echo unknown)"
+          if [ "$CYRIUS_MAJOR" = "6" ]; then
+            echo "::warning::aarch64 cross-build disabled under Cyrius 6.x — cycc_aarch64 regression (see CHANGELOG 1.7.1 Known issues). Releasing x86_64 only."
+            exit 0
+          fi
+          if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ]; then
+            echo "::warning::cycc_aarch64 not shipped with this Cyrius release — aarch64 binary skipped"
             exit 0
           fi
           CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/argonaut-aarch64
@@ -111,8 +127,8 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           git archive --format=tar.gz --prefix="argonaut-${TAG}/" -o "argonaut-${TAG}-src.tar.gz" HEAD
           cp build/argonaut "argonaut-${TAG}-x86_64-linux"
-          # aarch64 binary is best-effort (cc5_aarch64 may not be in
-          # the toolchain). Include it when produced; the SHA256SUMS
+          # aarch64 binary is best-effort (cycc_aarch64 may not be
+          # in the toolchain). Include it when produced; the SHA256SUMS
           # glob lists whatever -linux binaries exist.
           if [ -f build/argonaut-aarch64 ]; then
             cp build/argonaut-aarch64 "argonaut-${TAG}-aarch64-linux"

@@ -62,7 +62,8 @@ to run it. CI makes it automatic per push.
 - [ ] **CI job: aarch64 build + test sweep** — adds an
   `aarch64-native` job to `.github/workflows/ci.yml`,
   parallel to the existing x86_64 job. Builds via
-  `cc5_aarch64`, runs the full `.tcyr` suite natively, runs
+  `cycc_aarch64` (was `cc5_aarch64` pre-Cyrius-6.0), runs
+  the full `.tcyr` suite natively, runs
   the qemu PID-1 harness if KVM is available (qemu-system-aarch64
   + `-cpu host` on a real aarch64 host). No `qemu-user`
   emulation — this is the real-arch coverage.
@@ -91,7 +92,7 @@ to run it. CI makes it automatic per push.
   add a regression assertion to `aarch64_findings.tcyr`.
 - [ ] **Release publish gate** — once the CI job is green,
   flip `argonaut-<VER>-aarch64-linux` in release.yml from
-  "best-effort if `cc5_aarch64` exists" to "hard
+  "best-effort if `cycc_aarch64` exists" to "hard
   requirement when the CI job passes" — every release ships
   a tested aarch64 binary, not just a built one.
 

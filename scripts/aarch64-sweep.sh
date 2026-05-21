@@ -8,8 +8,9 @@
 #   scripts/aarch64-sweep.sh            # build + sweep
 #   scripts/aarch64-sweep.sh smoke      # smoke only
 #
-# Requires: cc5_aarch64 in $PATH (cyrius toolchain), qemu-aarch64
-# (qemu-user package). Builds drop into /tmp/argonaut-aa/.
+# Requires: cycc_aarch64 in $PATH (cyrius toolchain; renamed from
+# cc5_aarch64 in Cyrius 6.0), qemu-aarch64 (qemu-user package).
+# Builds drop into /tmp/argonaut-aa/.
 
 set -uo pipefail
 # Loop body intentionally tolerates per-test build / run failures —
@@ -19,8 +20,8 @@ set -uo pipefail
 if ! command -v cyrius >/dev/null 2>&1; then
     echo "FAIL: cyrius not in PATH"; exit 1
 fi
-if [ ! -x "$HOME/.cyrius/bin/cc5_aarch64" ] && ! command -v cc5_aarch64 >/dev/null 2>&1; then
-    echo "FAIL: cc5_aarch64 not in toolchain bin dir"; exit 1
+if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ] && ! command -v cycc_aarch64 >/dev/null 2>&1; then
+    echo "FAIL: cycc_aarch64 not in toolchain bin dir"; exit 1
 fi
 QEMU="$(command -v qemu-aarch64-static 2>/dev/null || command -v qemu-aarch64 2>/dev/null || true)"
 if [ -z "$QEMU" ]; then

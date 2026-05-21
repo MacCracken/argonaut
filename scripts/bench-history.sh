@@ -22,8 +22,8 @@ fi
 echo "=== Argonaut Benchmark Run: ${LABEL} @ ${TIMESTAMP} ==="
 
 # Build bench_main via cyrius (auto-resolves manifest deps + applies DCE).
-# cc3 was renamed cc5 at v5.0.0; use the toolchain-aware build command
-# instead of piping a single source file at a raw cc.
+# Use the toolchain-aware `cyrius build` driver (the underlying compiler
+# was cc3 → cc5 → cycc across Cyrius major bumps; the driver wraps it).
 cd "${PROJECT_DIR}"
 mkdir -p build
 CYRIUS_DCE=1 cyrius build src/bench_main.cyr build/argonaut_bench >/dev/null

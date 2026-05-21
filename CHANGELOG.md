@@ -9,15 +9,88 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.7.1] — 2026-05-21
 
-Toolchain pin bump to the cyrius 6.0.x series.
+**Toolchain pin bump to the cyrius 6.0.x series.** First adoption of
+the 6.x line. Picks up the `cc5` → `cycc` compiler rename and the
+downstream `cc5_aarch64` → `cycc_aarch64` cross-compiler rename. All
+CI workflows and dev scripts that reference the cross-compiler binary
+updated; the `cyrius build` / `cyrius test` / `cyrius bench` driver
+surface is unchanged (the driver wraps the underlying compiler — was
+cc3 → cc5 → cycc across Cyrius majors).
 
 ### Changed
 
 - **`cyrius.cyml`** — `[package].cyrius` pinned `5.10.44` →
-  `6.0.1`. First adoption of the cyrius 6.x line.
+  `6.0.1`.
 - **`qemu/helpers/cyrius.cyml`** — same bump (`5.10.44` →
   `6.0.1`); the helpers subproject tracks the parent harness's
   toolchain pin per the 1.7.0 contract.
+- **`.github/workflows/ci.yml`** — `cc5 --version` → `cyrius --version`
+  (the driver answers `--version` consistently across toolchain
+  majors). Install step adds the agnosys/sankoch/yukti workaround
+  copying `cycc_aarch64` from the tarball top-level when the
+  release didn't drop it under `bin/`. Aarch64 cross-build step
+  and "build artifact present?" guard renamed `cc5_aarch64` →
+  `cycc_aarch64`.
+- **`.github/workflows/release.yml`** — same install-step workaround
+  and `cc5_aarch64` → `cycc_aarch64` renames in the cross-build and
+  archive steps. Header comment about "cc5 5.10.9+ arch-peer
+  includes" amended to call out the rename.
+- **`scripts/aarch64-sweep.sh`**, **`scripts/aarch64-pi-smoke.sh`** —
+  toolchain-binary checks renamed `cc5_aarch64` → `cycc_aarch64`.
+- **`scripts/bench-history.sh`** — comment updated to reflect the
+  full cc3 → cc5 → cycc compiler-name history under the driver.
+
+### Verified
+
+- **DCE build clean** under cyrius 6.0.1: `build/argonaut`
+  1,036,656 bytes; 2,084 unreachable fns NOPed (621,713 bytes
+  reclaimed); ELF magic 7f 45 4c 46. Zero warnings.
+- **28 .tcyr suites / 743 assertions** pass under cyrius 6.0.1
+  (unchanged from 1.7.0 — toolchain bump didn't touch any test
+  surface).
+- **Smoke**: `./build/argonaut` reaches `argonaut: all systems
+  nominal` and the seven-step reboot shutdown plan executes
+  end-to-end.
+- **Lint / fmt / vet**: clean across `src/*.cyr`, `tests/tcyr/*.tcyr`,
+  `tests/bcyr/*.bcyr`. `cyrius vet`: 15 deps, 0 untrusted, 0 missing.
+- **Bench snapshot** (`1.7.1-toolchain-bump` label in
+  `bench-history.csv`, vs `1.6.3-post-audit` baseline — 1.7.0 had no
+  bench label): every micro at or below its prior `avg_us`. Notable
+  codegen wins from the 6.0.x compiler: **`resolve_order_chain_50`
+  92 → 84 us (−8.7 %)**, **`resolve_order_chain_100` 217 → 207 us
+  (−4.6 %)**, **`resolve_waves_chain_20` 65 → 62 us**,
+  **`plan_runlevel_switch` 9 → 7 us**, **`mark_all_steps_complete`
+  70 → 68 us**. No regressions.
+
+### Known issues
+
+- **`cycc_aarch64` 6.0.1 hangs or stubs out on `src/main.cyr`** —
+  the aarch64 cross-build either pegs CPU indefinitely (observed
+  > 5-minute hang against argonaut's source while the x86_64 build
+  finishes in seconds) or silently produces a stub binary (~21 KB
+  vs the pre-1.7.1 ~1.14 MB; ELF-magic check still passes, smoke
+  produces no output). The x86_64 build is unaffected — `cycc`
+  6.0.1 is clean and faster than 5.10.44. CI / release publish the
+  aarch64 artifact as **disabled** under Cyrius 6.0.x via a new
+  6.x-major guard in `.github/workflows/{ci,release}.yml` (skips
+  the cross-build step with an explanatory `::warning::` until
+  upstream lands a fix). Argonaut sources unchanged; the
+  regression is in `cycc_aarch64`. File upstream against
+  MacCracken/cyrius — minimal repro is just argonaut's `cyrius
+  build --aarch64 src/main.cyr build/x` under 6.0.1.
+
+### Operator notes
+
+- **Wipe `./lib/` after pulling this version.** `./lib/` is
+  gitignored and populated by `cyrius deps` from the
+  version-pinned stdlib snapshot, but `cyrius deps` does **not**
+  detect a toolchain-major change and refresh stale entries. The
+  pre-1.7.1 `./lib/process.cyr` lacks the typed-Str `exec_*_str`
+  family that argonaut has consumed since 1.6.1; building against
+  the stale copy emits `undefined function 'exec_vec_str' /
+  'exec_env_str'` warnings even though the 6.0.1 stdlib defines
+  them. `rm -rf lib && cyrius deps` clears it. CI is unaffected —
+  it starts from a clean checkout.
 
 ---
 
