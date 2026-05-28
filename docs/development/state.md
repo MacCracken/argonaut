@@ -6,22 +6,29 @@
 
 ## Version
 
-**1.7.1** (shipped 2026-05-21 — toolchain pin bump to the
-cyrius 6.0.x series. `cyrius.cyml` + `qemu/helpers/cyrius.cyml`
-both bumped 5.10.44 → 6.0.1. CI workflows + aarch64 dev scripts
-picked up the `cc5_aarch64` → `cycc_aarch64` rename; the
+**1.7.1** (shipped 2026-05-28 — toolchain pin bump to cyrius
+**6.0.14** + aarch64 cross-build restored. `cyrius.cyml` +
+`qemu/helpers/cyrius.cyml` both bumped 5.10.44 → 6.0.14 (drafted
+against 6.0.1; shipped on 6.0.14 once the `cycc_aarch64` fix
+landed); **patra 1.9.3 → 1.10.3**. CI workflows + aarch64 dev
+scripts picked up the `cc5_aarch64` → `cycc_aarch64` rename; the
 `cyrius build`/`test`/`bench` driver surface is unchanged.
-**x86_64 build** clean (zero warnings); 28 .tcyr suites / 743
-assertions green; codegen wins from the 6.0.x compiler — notable
-`resolve_order_chain_50` 92 → 84 µs (−8.7 %),
-`resolve_order_chain_100` 217 → 207 µs (−4.6 %) — no regressions.
-**aarch64 cross-build BROKEN** under 6.0.1: `cycc_aarch64` either
-hangs > 5 min or emits a no-op stub when fed `src/main.cyr`. CI
-/ release gated off under 6.x via a major-version check; x86_64
-unaffected. Upstream report pending against MacCracken/cyrius.
-Operator gotcha on x86_64: stale `./lib/` from pre-1.7.1
-shadows the version-pinned stdlib's new `exec_*_str` family;
-`rm -rf lib && cyrius deps` clears it.)
+**aarch64 cross-build RESTORED** — the 6.0.1 `cycc_aarch64`
+hang/stub on `src/main.cyr` is fixed in 6.0.14; `cyrius build
+--aarch64` emits a real 1,166,336-byte ARM ELF, so the CI /
+release 6.x-major gate is removed. **x86_64 DCE build** clean
+(1,045,144 bytes); 28 .tcyr suites / 743 assertions green;
+benches flat vs the 6.0.1 draft (±2 µs noise) — no regressions.
+`cyrius.lock` now populated with per-file SHA-256s (was empty;
+38 verified). **libro held at 2.6.2** — latest libro 2.6.3 makes
+`cycc` 6.0.14 abort silently (no output, exit 0; over a unit
+limit), deferred to a follow-up. Known warning: `ct_eq`
+duplicate-fn (sigil 3.0.1 dist ships `ct_eq`, colliding with the
+1.5.5 `src/compat.cyr` shim — harmless, not a cyrlint finding;
+libro 2.6.3 would retire it but doesn't build). Operator gotcha
+on x86_64: stale `./lib/` from pre-1.7.1 shadows the
+version-pinned stdlib's `exec_*_str` family; `rm -rf lib &&
+cyrius deps` clears it.)
 
 **1.7.0** (shipped 2026-05-11 — boot-to-shell MVP path.
 `default_services(BOOT_MINIMAL)` and
@@ -162,8 +169,9 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Toolchain
 
-- `cyrius = "6.0.1"` pinned in `cyrius.cyml [package]` (was 5.10.44
-  at 1.7.0; first adoption of the 6.x line at 1.7.1)
+- `cyrius = "6.0.14"` pinned in `cyrius.cyml [package]` (was 5.10.44
+  at 1.7.0; first 6.x adoption at 1.7.1, drafted on 6.0.1 and shipped
+  on 6.0.14 once the `cycc_aarch64` cross-build fix landed)
 - Compiler renamed `cc5` → `cycc` at Cyrius 6.0 (`cc5_aarch64` →
   `cycc_aarch64` follows). The `cyrius build`/`test`/`bench` driver
   is the stable surface — call sites in CI / scripts / dev loops use
@@ -181,10 +189,10 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **x86_64: ~1.04 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1,036,656 bytes at 1.7.1; +3 KB from 1.6.3 / 1,033,368 bytes — tracks the 1.7.0 agnoshi shell wiring and the cyrius 6.0 codegen).
+- **x86_64: ~1.05 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, 1,045,144 bytes at 1.7.1 under cyrius 6.0.14; +8 KB from the 1,036,656-byte 6.0.1 draft — tracks patra 1.10.3).
 - **L3 helper: 11936 bytes** static cyrius ELF (`qemu/helpers/l3-helper`); bundled into the qemu harness initramfs as `/bin/l3-helper`
-- **aarch64: BROKEN under Cyrius 6.0.x** (last green: ~1.14 MB at 1.6.3 under `cc5_aarch64` 5.10.44). `cycc_aarch64` 6.0.1 either hangs > 5 min or silently emits a ~21 KB stub when fed argonaut's `src/main.cyr`; CI / release skip the cross-build step under 6.x via a major-version gate (`$HOME/.cyrius/current`). x86_64 cycc 6.0.1 is unaffected. Re-enable once an upstream fix lands — file pending against MacCracken/cyrius. The +140 KB delta vs x86_64 (when working) tracks aarch64's fixed-width instruction encoding.
-- Dead-code floor: **2,084 unreachable functions NOPed** under DCE at 1.7.1 (621,713 bytes reclaimed; was ~2,114 at 1.6.3). The 6.0.x codegen reaches into ~30 fewer fns post-monomorphisation than 5.10.44 — small mechanical drift, not a public-surface change.
+- **aarch64: 1,166,336 bytes** statically linked ARM ELF (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`), **RESTORED under cyrius 6.0.14**. The 6.0.1 `cycc_aarch64` regression (hang > 5 min, or silent ~21 KB stub on `src/main.cyr`) is fixed; the CI / release 6.x-major gate is removed, leaving only the `cycc_aarch64`-presence check. The +121 KB delta vs x86_64 tracks aarch64's fixed-width instruction encoding. (Last green before the 6.0.1 regression: ~1.14 MB at 1.6.3 under `cc5_aarch64` 5.10.44.)
+- Dead-code floor: **2,086 unreachable functions NOPed** under DCE at 1.7.1 / 6.0.14 (629,092 bytes reclaimed; aarch64 build NOPs 2,091 / 752,716 bytes). Small mechanical drift from patra 1.10.3 + the 6.0.x codegen — not a public-surface change.
 - Was 378 KB at 1.2.0, 641 KB at 1.3.0, 650 KB at 1.4.0, 652 KB at
   1.5.0, ~990 KB at 1.5.1, ~995 KB at 1.5.2; +5 KB at 1.5.3 for
   the `src/audit_ext.cyr` wrapper module + new ArgonautInit slot
@@ -197,17 +205,19 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Suites
 
-- **Native x86_64: 28 .tcyr suites / 743 assertions** (0 failures on cyrius 6.0.1). +2 over 1.6.3 for the 1.7.0 BOOT_MINIMAL shape additions (`svcs_has_name` in `types_b.tcyr`, `steps_has_stage` in `types_a2.tcyr`); 1.7.1 left the test surface untouched.
+- **Native x86_64: 28 .tcyr suites / 743 assertions** (0 failures on cyrius 6.0.14). +2 over 1.6.3 for the 1.7.0 BOOT_MINIMAL shape additions (`svcs_has_name` in `types_b.tcyr`, `steps_has_stage` in `types_a2.tcyr`); 1.7.1 left the test surface untouched.
 - **qemu harness:** `qemu/pid1-harness-test.sh` covers M3 + L3 end-to-end under real PID 1 (KVM + `+invtsc`); `qemu/boot-test.sh` covers the supervisor-loop smoke. Both ~0.5 s wall time on local KVM.
-- **aarch64 (qemu-user): blocked under Cyrius 6.0.x** by the `cycc_aarch64` regression (no aarch64 binary to sweep). Last green sweep: **26 of 28** at 1.6.3 under `cc5_aarch64` 5.10.44 (2 suites in the documented known-failure budget — qemu emulation limits + upstream sigil Ed25519 quirk — see `docs/architecture/001-cross-arch-aarch64.md`). Re-runs when upstream lands a cycc_aarch64 fix.
+- **aarch64 (qemu-user): unblocked under cyrius 6.0.14** — the `cycc_aarch64` cross-build works again, so the sweep can run. Last green sweep: **26 of 28** at 1.6.3 under `cc5_aarch64` 5.10.44 (2 suites in the documented known-failure budget — qemu emulation limits + upstream sigil Ed25519 quirk — see `docs/architecture/001-cross-arch-aarch64.md`). A fresh 6.0.14 sweep is pending a host with `qemu-aarch64` installed (absent on the current dev host); CI runs it.
 - **2 .bcyr binaries** (`tests/bcyr/argonaut.bcyr`, `tests/bcyr/api.bcyr`)
 - **37 benchmarks** wired into `src/bench_main.cyr`; history in `bench-history.csv`
 
-### Bench snapshot (1.7.1-toolchain-bump, 2026-05-21)
+### Bench snapshot (1.7.1-patra-1.10.3, 2026-05-28)
 
-vs `1.6.3-post-audit`; 1.7.0 had no bench label. Every micro at
-or below its prior `avg_us`; notable codegen wins from the 6.0.x
-compiler called out in bold.
+Table below is vs `1.6.3-post-audit` (the `1.7.1-toolchain-bump`
+6.0.1-draft column). The shipped `1.7.1-patra-1.10.3` label (cyrius
+6.0.14 + patra 1.10.3) lands within ±2 µs of the draft on every
+micro — the 6.0.x codegen wins below hold; patra 1.10.3 adds no
+measurable regression.
 
 | Bench | 1.6.3 avg | 1.7.1 avg | Δ |
 |---|---|---|---|
@@ -230,10 +240,10 @@ compiler called out in bold.
 ## Dependencies
 
 - **stdlib (23 modules)**: `string fmt alloc vec str syscalls io fs process hashmap tagged args json fnptr freelist bigint chrono ct keccak thread random assert bench` (sakshi + sigil dropped — promoted upstream from stdlib to external git pins; thread + random added — libro 2.6.2's dist depends on both)
-- **libro 2.6.2** — single-module dist (`lib/libro.cyr`) via `[deps.libro] tag = "2.6.2" modules = ["dist/libro.cyr"]`. SHA pinned in `cyrius.lock`.
-- **patra 1.9.3** — explicit dep, was transitive of libro 2.0. SHA pinned in `cyrius.lock`.
-- **sakshi 2.2.3 + sigil 3.0.1 + agnosys 1.0.4** — transitive via libro 2.6.2 (sakshi also via patra 1.9.3). All SHA-pinned in `cyrius.lock`; resolved into `lib/` by `cyrius deps`. Sigil 3.0.1's dist re-published 2026-05-10 with `ct_eq` restored; argonaut's 1.5.1 `src/compat.cyr` shim retired at 1.5.2.
-- **`cyrius.lock`** — 5 deps locked (down from 6 at 1.5.1 — `[deps.argonaut_compat]` self-reference removed).
+- **libro 2.6.2** — single-module dist (`lib/libro.cyr`) via `[deps.libro] tag = "2.6.2" modules = ["dist/libro.cyr"]`. **Held at 2.6.2**: libro 2.6.3 (latest) makes `cycc` 6.0.14 abort silently (no output, exit 0 — over a unit limit). Bump deferred; see In-flight.
+- **patra 1.10.3** — explicit dep (bumped from 1.9.3 at 1.7.1), was transitive of libro 2.0. Builds clean under 6.0.14.
+- **sakshi 2.2.3 + sigil 3.0.1 + agnosys 1.0.4** — transitive via libro 2.6.2 (sakshi also via patra 1.10.3); resolved into `lib/` by `cyrius deps`. **`src/compat.cyr` `ct_eq` shim is live** — re-installed at 1.5.5 (`UPSTREAM-1`) as insurance against sigil dropping `ct_eq`; the current sigil 3.0.1 dist ships `ct_eq` again, so the build emits a harmless `duplicate fn 'ct_eq' (last definition wins)` warning (not a cyrlint finding). Wired via `[deps.argonaut_compat] path = "." modules = ["src/compat.cyr"]`. libro 2.6.3 retires it (migrates to `ct_eq_bytes_lens`) but doesn't build — retirement rides with the deferred libro bump.
+- **`cyrius.lock`** — was a committed empty file; 6.0.14's `cyrius deps` now populates it with per-file SHA-256 hashes for all 38 resolved `lib/*.cyr` units (`cyrius deps --verify` → `38 verified, 0 failed`), making the CI verify gate meaningful.
 
 ## In-flight
 
@@ -264,21 +274,28 @@ compiler called out in bold.
   auto-bumping this file**; 1.7.1 hand-edited from the stale
   1.6.3 baseline. Still needs a workflow fix; file against
   `.github/workflows/release.yml` before 1.8.0.
-- **Upstream — `cycc_aarch64` 6.0.1 hang/stub on argonaut's
-  `src/main.cyr`** — discovered during 1.7.1 closeout pass.
-  Either hangs > 5 min at 99 % CPU or silently emits a ~21 KB
-  no-op stub (last good output: ~1.14 MB under `cc5_aarch64`
-  5.10.44). x86_64 cycc 6.0.1 unaffected. Aarch64 CI / release
-  step gated off under 6.0.x via major-version check on
-  `$HOME/.cyrius/current`. File against MacCracken/cyrius;
-  consume via toolchain bump once a fix lands.
+- **RESOLVED — `cycc_aarch64` 6.0.1 hang/stub on `src/main.cyr`** —
+  fixed in cyrius **6.0.14**: `cyrius build --aarch64` emits a real
+  1,166,336-byte ARM ELF. The 6.x-major CI / release gate added at
+  the 1.7.1 draft is removed. (Was: hang > 5 min or silent ~21 KB
+  stub under 6.0.1.) Kept here for one release as the why-trail.
+- **Deferred — libro 2.6.3 over `cycc` 6.0.14 unit limit.** Latest
+  libro (+ transitive sigil 3.5.7 / agnosys 1.2.8) makes `cycc`
+  6.0.14 abort silently — exits 0 but emits no output, driver reports
+  `compile failed (exit0)`. The enlarged single compilation unit
+  appears to trip a `cycc` internal limit (functions / fixups). libro
+  held at 2.6.2 for 1.7.1; patra 1.10.3 ships. The `src/compat.cyr`
+  `ct_eq` shim retirement rides with this bump (libro 2.6.3 migrates
+  to `ct_eq_bytes_lens`). File upstream against MacCracken/cyrius
+  (silent abort on large units); re-attempt the libro bump once the
+  unit limit is raised or libro's footprint shrinks.
 - Stale `src/test_*.cyr` stub cleanup (predate `tests/tcyr/`).
 - Patra `json_build/6` namespace upstream — file an issue against
   patra rather than continue working around it.
 
 ## Recent shipped
 
-- **1.7.1** (2026-05-21) — toolchain pin bump to cyrius 6.0.1; CI + aarch64 dev scripts pick up `cc5_aarch64` → `cycc_aarch64` rename; clean DCE build (1,036,656 bytes, 2,084 dead-fns NOPed); 28 / 743 green; codegen wins on chain-resolve micros (−8.7 % at chain_50, −4.6 % at chain_100). `./lib/` cache invalidation across toolchain majors documented as an operator gotcha.
+- **1.7.1** (2026-05-28) — toolchain pin bump to cyrius **6.0.14** + **aarch64 cross-build restored** (6.0.1 `cycc_aarch64` hang/stub fixed upstream; CI / release 6.x gate removed; real 1,166,336-byte ARM ELF). patra 1.9.3 → 1.10.3 (libro held at 2.6.2 — 2.6.3 trips a `cycc` 6.0.14 unit limit, deferred). Clean x86_64 DCE build (1,045,144 bytes, 2,086 dead-fns NOPed); 28 / 743 green; benches flat vs the 6.0.1 draft. `cyrius.lock` populated with per-file SHA-256s (was empty). Known harmless `ct_eq` duplicate-fn warning (sigil 3.0.1 dist ships `ct_eq`, collides with the live 1.5.5 compat shim).
 - **1.7.0** (2026-05-11) — boot-to-shell MVP: `BOOT_MINIMAL` adds agnoshi as a console shell (no Wayland dep); service count 1 → 2, step count 6 → 7; breaking for callers asserting the pre-1.7.0 shape (kybernet ≤1.2.0); BOOT_SERVER/DESKTOP/EDGE/RECOVERY unchanged. Unblocks the AGNOS closed-beta MVP path.
 - **1.6.3** (2026-05-11) — 1.6.x arc closeout: L3 end-to-end via static `qemu/helpers/l3-helper.cyr`; full P(-1) audit (0 CRITICAL / 0 HIGH, 2 MEDIUM closed with regressions — fork_exec sigmask + envp PATH); PID-1 graduation re-audit trigger CLOSED
 - **1.6.2** (2026-05-10) — PID-1 harness extensions: M3 end-to-end + signalfd shutdown landed; `fork_exec_service` double-fork bug fixed (setsid wired correctly now); dyn-loader bundling in initramfs; L3 end-to-end deferred to 1.6.3
@@ -307,7 +324,7 @@ compiler called out in bold.
 ## Verification
 
 - Linux x86_64 (Arch, 6.18 LTS) — primary dev + CI host
-- aarch64 — **blocked under Cyrius 6.0.x** by the `cycc_aarch64` regression discovered at 1.7.1 ship. Last working build / sweep / smoke: 1.6.3 under `cc5_aarch64` 5.10.44, smoked + swept under `qemu-aarch64` (qemu-user 11.0.0-1). Real-hardware validation (RPi4, Apple Silicon, Graviton / Ampere) was slipped to 1.6.x gated on CI runner allocation; now further blocked on the upstream cycc_aarch64 fix. See `docs/architecture/001-cross-arch-aarch64.md` for the surface, CHANGELOG 1.7.1 *Known issues* for the regression report.
+- aarch64 — **cross-build restored under cyrius 6.0.14** (the 6.0.1 `cycc_aarch64` regression is fixed). The local 6.0.14 cross-build produces a real 1,166,336-byte ARM ELF; a full `.tcyr` sweep + smoke under `qemu-aarch64` is pending a host with qemu-user installed (absent on the current dev host — CI runs it). Last green sweep / smoke: 1.6.3 under `cc5_aarch64` 5.10.44 / qemu-user 11.0.0-1 (26 of 28). Real-hardware validation (RPi4, Apple Silicon, Graviton / Ampere) is slipped to the 1.6.4 native-aarch64-CI item, gated on runner allocation. See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
 
 ## Audit cadence
 

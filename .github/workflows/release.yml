@@ -82,16 +82,12 @@ jobs:
         # toolchain release tarball); the release publishes whatever
         # binaries were produced.
         #
-        # 1.7.1: gated off under Cyrius 6.0.x — cycc_aarch64 6.0.1
-        # hangs or stubs out on argonaut's src/main.cyr (see
-        # CHANGELOG 1.7.1 Known issues). Releases under 6.0.x ship
-        # x86_64 only. Re-enable once an upstream fix lands.
+        # 1.7.1: the cycc_aarch64 6.0.1 hang/stub on src/main.cyr is
+        # FIXED in cyrius 6.0.14 — the cross-build produces a real
+        # ~1.14 MB aarch64 ELF again. The 6.0.x major-version gate is
+        # removed; the cycc_aarch64-presence check below remains the
+        # only skip condition (older tarballs without the cross-tool).
         run: |
-          CYRIUS_MAJOR="$(cut -d. -f1 "$HOME/.cyrius/current" 2>/dev/null || echo unknown)"
-          if [ "$CYRIUS_MAJOR" = "6" ]; then
-            echo "::warning::aarch64 cross-build disabled under Cyrius 6.x — cycc_aarch64 regression (see CHANGELOG 1.7.1 Known issues). Releasing x86_64 only."
-            exit 0
-          fi
           if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ]; then
             echo "::warning::cycc_aarch64 not shipped with this Cyrius release — aarch64 binary skipped"
             exit 0
