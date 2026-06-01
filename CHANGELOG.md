@@ -7,7 +7,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [1.8.0] — 2026-06-01
+## [1.8.0] — Unreleased
 
 **Toolchain pin bump to cyrius 6.0.26 + closeout refactor.** Aligns
 the manifest pin with the installed 6.0.26 wrapper (clearing the

@@ -6,7 +6,7 @@
 
 ## Version
 
-**1.8.0** (shipped 2026-06-01 — toolchain pin bump to cyrius
+**1.8.0** (UNRELEASED — toolchain pin bump to cyrius
 **6.0.26** + 1.7.x closeout refactor. `cyrius.cyml` +
 `qemu/helpers/cyrius.cyml` both bumped 6.0.14 → 6.0.26, clearing the
 `pins 6.0.14 but cycc is 6.0.26` drift warning. **Closeout refactor**
@@ -335,9 +335,12 @@ table is retained as the standing reference micro-by-micro. The shipped
 - Patra `json_build/6` namespace upstream — file an issue against
   patra rather than continue working around it.
 
+## Pending release (unreleased)
+
+- **1.8.0** (UNRELEASED — staged in the working tree, not yet tagged) — toolchain pin bump to cyrius **6.0.26** + 1.7.x closeout refactor. Cleared the 6.0.14→6.0.26 pin-drift warning (`cyrius.cyml` + `qemu/helpers/cyrius.cyml`). Removed a leftover `/child.marker` debug write from `fork_exec_service` (1.6.2 harness artifact, wrote to root FS on every spawn, referenced nowhere); consolidated six `HealthCheckResult` allocations into `health_result_new`; fixed a stale `cyrius.toml`→`cyrius.cyml` comment. Added a **mandatory benchmark gate** to CLAUDE.md (release-blocking on unexplained regression). Clean x86_64 DCE build (**1,044,440 bytes**, −704; 2,090 dead-fns NOPed); 28 / 743 green; benches neutral vs the 1.8.0 baseline. patra 1.10.3, libro held at 2.6.2. Broad `0 - N`→`-N` cleanup (74 sites) deferred to a standalone patch.
+
 ## Recent shipped
 
-- **1.8.0** (2026-06-01) — toolchain pin bump to cyrius **6.0.26** + 1.7.x closeout refactor. Cleared the 6.0.14→6.0.26 pin-drift warning (`cyrius.cyml` + `qemu/helpers/cyrius.cyml`). Removed a leftover `/child.marker` debug write from `fork_exec_service` (1.6.2 harness artifact, wrote to root FS on every spawn, referenced nowhere); consolidated six `HealthCheckResult` allocations into `health_result_new`; fixed a stale `cyrius.toml`→`cyrius.cyml` comment. Added a **mandatory benchmark gate** to CLAUDE.md (release-blocking on unexplained regression). Clean x86_64 DCE build (**1,044,440 bytes**, −704; 2,090 dead-fns NOPed); 28 / 743 green; benches neutral vs the 1.8.0 baseline. patra 1.10.3, libro held at 2.6.2. Broad `0 - N`→`-N` cleanup (74 sites) deferred to a standalone patch.
 - **1.7.1** (2026-05-28) — toolchain pin bump to cyrius **6.0.14** + **aarch64 cross-build restored** (6.0.1 `cycc_aarch64` hang/stub fixed upstream; CI / release 6.x gate removed; real 1,166,336-byte ARM ELF). patra 1.9.3 → 1.10.3 (libro held at 2.6.2 — 2.6.3 trips a `cycc` 6.0.14 unit limit, deferred). Clean x86_64 DCE build (1,045,144 bytes, 2,086 dead-fns NOPed); 28 / 743 green; benches flat vs the 6.0.1 draft. `cyrius.lock` populated with per-file SHA-256s (was empty). Known harmless `ct_eq` duplicate-fn warning (sigil 3.0.1 dist ships `ct_eq`, collides with the live 1.5.5 compat shim).
 - **1.7.0** (2026-05-11) — boot-to-shell MVP: `BOOT_MINIMAL` adds agnoshi as a console shell (no Wayland dep); service count 1 → 2, step count 6 → 7; breaking for callers asserting the pre-1.7.0 shape (kybernet ≤1.2.0); BOOT_SERVER/DESKTOP/EDGE/RECOVERY unchanged. Unblocks the AGNOS closed-beta MVP path.
 - **1.6.3** (2026-05-11) — 1.6.x arc closeout: L3 end-to-end via static `qemu/helpers/l3-helper.cyr`; full P(-1) audit (0 CRITICAL / 0 HIGH, 2 MEDIUM closed with regressions — fork_exec sigmask + envp PATH); PID-1 graduation re-audit trigger CLOSED
