@@ -5,7 +5,7 @@ description = "Init system and service manager for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/argonaut"
 language = "cyrius"
-cyrius = "6.0.14"
+cyrius = "6.0.26"
 
 [build]
 entry = "src/main.cyr"

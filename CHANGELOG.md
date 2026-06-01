@@ -7,6 +7,71 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.8.0] — 2026-06-01
+
+**Toolchain pin bump to cyrius 6.0.26 + closeout refactor.** Aligns
+the manifest pin with the installed 6.0.26 wrapper (clearing the
+`cyrius.cyml pins 6.0.14 but cycc is 6.0.26` drift warning), removes
+leftover debug instrumentation from the service-spawn path, and
+consolidates the open-coded health-result allocation. Also makes the
+benchmark delta-check a **mandatory, release-blocking gate** for every
+`VERSION` bump (see CLAUDE.md). Dependencies unchanged: patra 1.10.3,
+libro held at 2.6.2 (2.6.3 still trips a `cycc` unit limit — deferred).
+
+### Changed
+
+- **`cyrius.cyml`** — `[package].cyrius` pinned `6.0.14` → `6.0.26`.
+- **`qemu/helpers/cyrius.cyml`** — same toolchain bump (`6.0.14` →
+  `6.0.26`); the helpers subproject tracks the parent harness's pin.
+- **`src/health.cyr`** — extracted `health_result_new(service,
+  check_type_str, passed, latency, message)`, consolidating the six
+  open-coded `alloc(sizeof(HealthCheckResult))` + 6×`store64` +
+  `now_ms()` blocks at every check exit into one helper.
+  Behavior-preserving; `health_exec` / `svc_life` assertions unchanged.
+
+### Removed
+
+- **`src/process_mgmt.cyr`** — deleted the leftover `/child.marker`
+  debug write in `fork_exec_service`'s child branch (a 1.6.2 harness
+  artifact). It opened/wrote `/child.marker` on the root filesystem on
+  **every** service spawn under PID 1; nothing referenced it (the real
+  L3 validation writes `/l3.marker` via `qemu/helpers/l3-helper`).
+
+### Fixed
+
+- **`src/main.cyr`** — stale header comment `cyrius.toml` → `cyrius.cyml`
+  (the manifest was renamed at the 1.3.0 port).
+
+### Process
+
+- **CLAUDE.md — mandatory benchmark gate.** Added a hard `VERSION`-bump
+  constraint plus a dedicated "Mandatory Benchmark Gate (every release)"
+  section and a Work Loop step: every release (patch, minor, *and*
+  major) runs `./scripts/bench-history.sh`, diffs against the prior
+  label, classifies (win / neutral / regression), and records the
+  result. An unexplained regression is now a release blocker.
+
+### Performance
+
+- No regression. The `1.8.0-closeout` bench label is statistically
+  indistinguishable from `1.8.0-baseline`: a same-binary control re-run
+  swings up to 21 µs run-to-run on the heaviest micros
+  (`resolve_waves_chain_20`), which exceeds every apparent delta — the
+  spread is system-load variance, not code. The DRY refactor sits on
+  cold, non-benched health paths. Full series in `bench-history.csv`.
+
+### Verified
+
+- **DCE build clean** under cyrius 6.0.26: `build/argonaut`
+  **1,044,440 bytes** (−704 from 1.7.1's 1,045,144 — debug-block
+  removal + health-result consolidation); 2,090 unreachable fns NOPed
+  (629,474 bytes reclaimed); ELF magic `7f 45 4c 46`. The pin-drift
+  warning is gone.
+- **28 `.tcyr` suites / 743 assertions** green, 0 failures.
+- Known harmless `duplicate fn 'ct_eq'` warning persists (sigil 3.0.1
+  dist ships `ct_eq`, colliding with the live 1.5.5 compat shim — not
+  a cyrlint finding).
+
 ## [1.7.1] — 2026-05-28
 
 **Toolchain pin bump to cyrius 6.0.14 + aarch64 cross-build

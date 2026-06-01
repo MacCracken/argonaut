@@ -153,6 +153,22 @@ fn check_command(cmd_str, timeout_ms) {
 # Execute a health check
 # =========================================================================
 
+# health_result_new: allocate + fill a HealthCheckResult. `checked_at`
+# is stamped with now_ms() here so every result carries a wall-clock
+# timestamp. Consolidates the 6-store64 layout that was open-coded at
+# every check exit (1.8.0 closeout refactor — behavior-preserving).
+# Pass check_type_str=0 for results that don't carry a type label.
+fn health_result_new(service, check_type_str, passed, latency, message) {
+    var result = alloc(sizeof(HealthCheckResult));
+    store64(result, service);
+    store64(result + 8, check_type_str);
+    store64(result + 16, passed);
+    store64(result + 24, latency);
+    store64(result + 32, message);
+    store64(result + 40, now_ms());
+    return result;
+}
+
 fn execute_health_check(service_name, hc, pid) {
     var start = monotonic_ms();
     var check_type = load64(hc);      # HealthCheckType
@@ -230,14 +246,9 @@ fn execute_health_check(service_name, hc, pid) {
         # clear "port out of range" message instead of a silent
         # connect failure on a wraparound port.
         if (http_port < 1 || http_port > 65535) {
-            var result = alloc(sizeof(HealthCheckResult));
-            store64(result, service_name);
-            store64(result + 8, str_from(health_check_type_str(check_type)));
-            store64(result + 16, 0);
-            store64(result + 24, 0);
-            store64(result + 32, str_from("HTTP check: port out of range"));
-            store64(result + 40, now_ms());
-            return result;
+            return health_result_new(service_name,
+            str_from(health_check_type_str(check_type)), 0, 0,
+            str_from("HTTP check: port out of range"));
         }
 
         # H1 (closed 1.5.2): resolve the configured host via
@@ -252,26 +263,16 @@ fn execute_health_check(service_name, hc, pid) {
         # refactor that skips the resolver shouldn't re-open the
         # injection class.
         if (sanitize_host_for_header(host_str) == 0) {
-            var result = alloc(sizeof(HealthCheckResult));
-            store64(result, service_name);
-            store64(result + 8, str_from(health_check_type_str(check_type)));
-            store64(result + 16, 0);
-            store64(result + 24, 0);
-            store64(result + 32, str_from("HTTP check: host has invalid byte"));
-            store64(result + 40, now_ms());
-            return result;
+            return health_result_new(service_name,
+            str_from(health_check_type_str(check_type)), 0, 0,
+            str_from("HTTP check: host has invalid byte"));
         }
 
         var http_ip = resolve_host_ipv4(host_str);
         if (http_ip < 0) {
-            var result = alloc(sizeof(HealthCheckResult));
-            store64(result, service_name);
-            store64(result + 8, str_from(health_check_type_str(check_type)));
-            store64(result + 16, 0);
-            store64(result + 24, 0);
-            store64(result + 32, str_from("HTTP check: host did not resolve"));
-            store64(result + 40, now_ms());
-            return result;
+            return health_result_new(service_name,
+            str_from(health_check_type_str(check_type)), 0, 0,
+            str_from("HTTP check: host did not resolve"));
         }
 
         # M2: heap-copy + NUL-terminate the path. The legacy code
@@ -375,13 +376,8 @@ fn execute_health_check(service_name, hc, pid) {
 
     var latency = monotonic_ms() - start;
 
-    var result = alloc(sizeof(HealthCheckResult));
-    store64(result, service_name);
-    store64(result + 8, str_from(health_check_type_str(check_type)));
-    store64(result + 16, passed);
-    store64(result + 24, latency);
-    store64(result + 32, message);
-    store64(result + 40, now_ms());
+    var result = health_result_new(service_name,
+    str_from(health_check_type_str(check_type)), passed, latency, message);
 
     # Trace result
     if (passed) {
@@ -423,14 +419,9 @@ fn execute_ready_check(service_name, rc, pid) {
         var remaining = timeout - (monotonic_ms() - overall_start);
         if (remaining <= 0) {
             # Timed out
-            var result = alloc(sizeof(HealthCheckResult));
-            store64(result, service_name);
-            store64(result + 8, 0);
-            store64(result + 16, 0);  # not passed
-            store64(result + 24, monotonic_ms() - overall_start);
-            store64(result + 32, str_from("ready check timed out"));
-            store64(result + 40, now_ms());
-            return result;
+            return health_result_new(service_name, 0, 0,
+            monotonic_ms() - overall_start,
+            str_from("ready check timed out"));
         }
 
         # Update remaining timeout for this attempt
@@ -451,18 +442,12 @@ fn execute_ready_check(service_name, rc, pid) {
     }
 
     # All retries exhausted
-    var result = alloc(sizeof(HealthCheckResult));
-    store64(result, service_name);
-    store64(result + 8, 0);
-    store64(result + 16, 0);
-    store64(result + 24, monotonic_ms() - overall_start);
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "ready check failed after ");
     str_builder_add_int(sb, retries);
     str_builder_add_cstr(sb, " retries");
-    store64(result + 32, str_builder_build(sb));
-    store64(result + 40, now_ms());
-    return result;
+    return health_result_new(service_name, 0, 0,
+    monotonic_ms() - overall_start, str_builder_build(sb));
 }
 
 # =========================================================================

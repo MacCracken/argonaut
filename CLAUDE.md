@@ -68,6 +68,7 @@ CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut    # release build
 - **NEVER use `gh` CLI** — use `curl` to the GitHub API if needed
 - Do not add unnecessary dependencies — keep it lean
 - Do not skip tests / benchmarks before claiming a change works
+- **Do not bump `VERSION` without a benchmark delta check** — every release (patch, minor, *and* major) runs `./scripts/bench-history.sh "<version>-<label>"` against the prior label in `bench-history.csv`. Inspect the deltas, flag any regression, and record the result (win, neutral, or regression-with-justification) in the CHANGELOG entry and `state.md` bench snapshot. A regression ships only with an explicit written reason. See [Mandatory Benchmark Gate](#mandatory-benchmark-gate-every-release)
 - Do not commit `build/` (compiled binaries)
 - Do not add Cyrius stdlib includes in individual src files — the manifest resolves them
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the only source of truth (no separate `.cyrius-toolchain` file)
@@ -105,7 +106,8 @@ CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut    # release build
 5. **Security check** — any new syscall usage, user input handling, buffer allocation
 6. **Documentation** — update CHANGELOG, roadmap, `docs/development/state.md`, any ADR the change earned
 7. **Version check** — `VERSION`, `cyrius.cyml` (via `${file:VERSION}`), CHANGELOG header in sync
-8. **Return to step 1**
+8. **Benchmark gate** — on any `VERSION` bump, run the [Mandatory Benchmark Gate](#mandatory-benchmark-gate-every-release): bench delta vs the prior label, classify, record. Release-blocking on an unexplained regression
+9. **Return to step 1**
 
 ### Security Hardening (before every release)
 
@@ -138,6 +140,19 @@ Run before tagging `X.Y.0` or `X.0.0`. Ship as the last patch of the prior minor
 9. **Doc sync** — CHANGELOG, roadmap, `docs/development/state.md`, CLAUDE.md (if durable content changed)
 10. **Version verify** — `VERSION`, `cyrius.cyml`, CHANGELOG header, intended git tag all match
 11. **Full clean build** — `rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build` passes clean
+
+### Mandatory Benchmark Gate (every release)
+
+**Non-negotiable, runs for every `VERSION` bump — patch, minor, and major.** A release is not done until the bench delta is checked and recorded.
+
+1. **Run** — `./scripts/bench-history.sh "<version>-<label>"` (DCE build) appends a fresh row to `bench-history.csv`. Use a descriptive label (e.g. `1.8.0-toolchain-6.0.26`).
+2. **Compare** — diff every micro against the prior release's label. The closeout-label series is the canonical baseline; for a patch, compare against the most recent label.
+3. **Classify** the result:
+   - **Win / neutral** (within ±2 µs noise, or faster) — record the snapshot table in `state.md` and note it in the CHANGELOG entry.
+   - **Regression** (a micro slower beyond noise) — do **not** ship silently. Either fix it, or ship with an explicit written justification in the CHANGELOG (`### Performance`) naming the bench, the delta, and why it's acceptable.
+4. **Record** — update the `state.md` "Bench snapshot" table to the new label and reference `bench-history.csv` for the full series.
+
+Rationale: argonaut is PID 1 — boot sequencing, dependency resolution, and health-check latency are user-visible. Every release proves its perf posture against the prior one; an unexplained regression is a release blocker. See the `VERSION`-bump hard constraint in [Rules](#rules-hard-constraints).
 
 ### Task Sizing
 

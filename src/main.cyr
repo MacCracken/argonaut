@@ -4,7 +4,7 @@
 # Boot sequencing, service lifecycle, health checks,
 # runlevel switching, shutdown orchestration.
 
-# Stdlib + deps auto-included via cyrius.toml
+# Stdlib + deps auto-included via cyrius.cyml
 
 # Argonaut modules
 # (src/compat.cyr is auto-included via [deps.argonaut_compat] in

@@ -174,12 +174,6 @@ fn fork_exec_service(svc_def) {
     if (pid < 0) { return 0 - 1; }
 
     if (pid == 0) {
-        # DEBUG: child writes marker directly (bypass shell)
-        var mfd_d = sys_open("/child.marker", 0x42, 0x1B6);   # O_RDWR|O_CREAT, 0666
-        if (mfd_d >= 0) {
-            sys_write(mfd_d, "child here\n", 11);
-            sys_close(mfd_d);
-        }
         # Child process
         # L3: detach from argonaut's controlling TTY so signals on the
         # parent terminal (e.g. ^C when argonaut is foregrounded for
