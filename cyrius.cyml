@@ -5,7 +5,7 @@ description = "Init system and service manager for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/argonaut"
 language = "cyrius"
-cyrius = "6.0.26"
+cyrius = "6.0.53"
 
 [build]
 entry = "src/main.cyr"
@@ -23,6 +23,7 @@ stdlib = [
     "alloc",
     "vec",
     "str",
+    "slice",
     "syscalls",
     "io",
     "fs",
@@ -38,19 +39,17 @@ stdlib = [
     "ct",
     "keccak",
     "thread",
+    "thread_local",
     "random",
     "assert",
     "bench",
 ]
 
-# UPSTREAM-1 (1.5.5 audit) — sigil 3.0.1's dist file has
-# re-published mid-arc twice, removing `ct_eq` both times. Keep
-# the shim wired so argonaut is immune to upstream tag mutation
-# until libro migrates to `ct_eq_bytes_lens` directly.
-[deps.argonaut_compat]
-path = "."
-modules = ["src/compat.cyr"]
-
+# UPSTREAM-1 RETIRED (1.8.1) — the `ct_eq` shim is gone. libro 2.7.1
+# migrated to `ct_eq_bytes_lens` directly, and that symbol now lives in
+# the stdlib `ct` module (not sigil's mutable dist), so the tag-mutation
+# churn the shim insulated against can no longer occur. sigil 3.6.0 no
+# longer ships its own `ct_eq`; nothing calls the bare symbol.
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
 tag = "1.10.3"
@@ -58,5 +57,5 @@ modules = ["dist/patra.cyr"]
 
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
-tag = "2.6.2"
+tag = "2.7.1"
 modules = ["dist/libro.cyr"]

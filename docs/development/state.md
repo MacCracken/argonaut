@@ -6,7 +6,33 @@
 
 ## Version
 
-**1.8.0** (UNRELEASED — toolchain pin bump to cyrius
+**1.8.1** (UNRELEASED — toolchain pin bump to cyrius **6.0.53** + the
+long-deferred **libro 2.6.2 → 2.7.1** bump, now unblocked. `cyrius.cyml`
++ `qemu/helpers/cyrius.cyml` both bumped 6.0.26 → 6.0.53, clearing the
+`pins 6.0.26 but cycc is 6.0.53` drift warning. **libro 2.7.1** —
+deferred since 1.7.1 because libro 2.6.3 tripped a `cycc` 6.0.14 single
+compilation-unit limit (silent abort, exit 0); under **6.0.53** the
+enlarged unit compiles clean. Pulls newer transitive crypto deps
+(**sigil 3.0.1 → 3.6.0**, **agnosys 1.0.4 → 1.3.2**; sakshi held 2.2.3,
+patra held 1.10.3 — already latest). Two stdlib modules added to the
+manifest — **`slice`** (agnosys 1.3.2 lowers `s[i]` to `_slice_idx_get_W`
+helpers) and **`thread_local`** (sigil 3.6.0 / `thread.cyr` reference
+`thread_local_{init,get,set}`); without them the build fails. **`ct_eq`
+compat shim RETIRED** — `src/compat.cyr` + the `[deps.argonaut_compat]`
+self-dep deleted: libro 2.7.1 migrated to `ct_eq_bytes_lens`, which now
+lives in the stdlib `ct` module (not sigil's mutable dist), so the
+tag-mutation churn UPSTREAM-1 insulated against can no longer occur;
+sigil 3.6.0 ships no `ct_eq`, and the long-standing `duplicate fn
+'ct_eq'` warning is gone. **x86_64 DCE build** clean (**1,297,744
+bytes**, **+253,304 / +24.3 %** from 1.8.0 — entirely upstream: sigil
+3.6.0's crypto-bank static buffers (~159 KB `.bss`, new `large static
+data` note) + larger sigil/agnosys code footprint; no argonaut-side
+bloat, accepted as the cost of the latest crypto surface); 2,634 dead
+fns NOPed (795,348 bytes reclaimed); 28 .tcyr suites / 743 assertions
+green; benches neutral-to-win vs the 1.8.1 baseline. `cyrius.lock`:
+**45 verified, 0 failed** (was 38). Lint / fmt / vet clean.)
+
+**1.8.0** (shipped 2026-06-01 — toolchain pin bump to cyrius
 **6.0.26** + 1.7.x closeout refactor. `cyrius.cyml` +
 `qemu/helpers/cyrius.cyml` both bumped 6.0.14 → 6.0.26, clearing the
 `pins 6.0.14 but cycc is 6.0.26` drift warning. **Closeout refactor**
@@ -194,9 +220,11 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Toolchain
 
-- `cyrius = "6.0.26"` pinned in `cyrius.cyml [package]` (was 6.0.14 at
-  1.7.1; bumped to 6.0.26 at 1.8.0 to match the installed wrapper and
-  clear the pin-drift warning. First 6.x adoption was 1.7.1 — drafted
+- `cyrius = "6.0.53"` pinned in `cyrius.cyml [package]` (was 6.0.26 at
+  1.8.0, 6.0.14 at 1.7.1; bumped to 6.0.53 at 1.8.1 to match the
+  installed wrapper and clear the pin-drift warning — and, critically,
+  6.0.53 raises/clears the `cycc` single-unit limit that blocked the
+  libro 2.6.3+ bump under 6.0.14. First 6.x adoption was 1.7.1 — drafted
   on 6.0.1, shipped on 6.0.14 once the `cycc_aarch64` cross-build fix
   landed; was 5.10.44 at 1.7.0)
 - Compiler renamed `cc5` → `cycc` at Cyrius 6.0 (`cc5_aarch64` →
@@ -216,10 +244,10 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **x86_64: ~1.04 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, **1,044,440 bytes at 1.8.0** under cyrius 6.0.26; −704 from 1.7.1's 1,045,144 — the `/child.marker` debug-block removal in `fork_exec_service` + the six-site `HealthCheckResult` consolidation into `health_result_new`). 2,090 unreachable fns NOPed (629,474 bytes reclaimed).
+- **x86_64: ~1.30 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, **1,297,744 bytes at 1.8.1** under cyrius 6.0.53; **+253,304 / +24.3 %** from 1.8.0's 1,044,440). The growth is entirely upstream-transitive — sigil 3.6.0's crypto-bank static buffers (`var buf[32768]` + multiple 4 KB SIGIL_CRYPTO_BANKS slots, ~159 KB of `.bss` flagged by the new `large static data (159616 bytes)` build note) plus the larger sigil 3.6.0 / agnosys 1.3.2 code footprint. No argonaut-side bloat; accepted as the cost of the latest crypto surface. 2,634 unreachable fns NOPed (795,348 bytes reclaimed). (Was 1,044,440 at 1.8.0 under 6.0.26.)
 - **L3 helper: 11936 bytes** static cyrius ELF (`qemu/helpers/l3-helper`); bundled into the qemu harness initramfs as `/bin/l3-helper`. **Committed binary held at the 6.0.14 build** — under 6.0.26 a fresh `cyrius build` emits a 14,592-byte helper (codegen drift), but the helper's syscall ABI is unchanged and the qemu harness only greps its `/l3.marker` output, so the bundled fixture was not re-cut at 1.8.0 to avoid churning the vendored `qemu/helpers/lib/` snapshot. Re-cut it the next time the harness itself changes.
 - **aarch64: 1,166,336 bytes** statically linked ARM ELF (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`), **RESTORED under cyrius 6.0.14**. The 6.0.1 `cycc_aarch64` regression (hang > 5 min, or silent ~21 KB stub on `src/main.cyr`) is fixed; the CI / release 6.x-major gate is removed, leaving only the `cycc_aarch64`-presence check. The +121 KB delta vs x86_64 tracks aarch64's fixed-width instruction encoding. (Last green before the 6.0.1 regression: ~1.14 MB at 1.6.3 under `cc5_aarch64` 5.10.44.)
-- Dead-code floor: **2,090 unreachable functions NOPed** under DCE at 1.8.0 / 6.0.26 (629,474 bytes reclaimed). +4 vs 1.7.1's 2,086 — the closeout removed the inline `/child.marker` block and folded six `HealthCheckResult` sites into one helper, so a few previously-reachable paths fell out of the live set. Not a public-surface change.
+- Dead-code floor: **2,634 unreachable functions NOPed** under DCE at 1.8.1 / 6.0.53 (795,348 bytes reclaimed). +544 vs 1.8.0's 2,090 — the newer sigil 3.6.0 / agnosys 1.3.2 dists ship a much larger surface, most of which argonaut never reaches, so DCE NOPs far more. Not a public-surface change. (Was 2,090 at 1.8.0 / 6.0.26.)
 - Was 378 KB at 1.2.0, 641 KB at 1.3.0, 650 KB at 1.4.0, 652 KB at
   1.5.0, ~990 KB at 1.5.1, ~995 KB at 1.5.2; +5 KB at 1.5.3 for
   the `src/audit_ext.cyr` wrapper module + new ArgonautInit slot
@@ -229,23 +257,23 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Suites
 
-- **Native x86_64: 28 .tcyr suites / 743 assertions** (0 failures on cyrius 6.0.26). +2 over 1.6.3 for the 1.7.0 BOOT_MINIMAL shape additions (`svcs_has_name` in `types_b.tcyr`, `steps_has_stage` in `types_a2.tcyr`); 1.7.1 and the 1.8.0 closeout refactor (behavior-preserving) left the test surface untouched.
+- **Native x86_64: 28 .tcyr suites / 743 assertions** (0 failures on cyrius 6.0.53). +2 over 1.6.3 for the 1.7.0 BOOT_MINIMAL shape additions (`svcs_has_name` in `types_b.tcyr`, `steps_has_stage` in `types_a2.tcyr`); 1.7.1, the 1.8.0 closeout refactor, and the 1.8.1 toolchain/dep bump (incl. the `ct_eq` shim retirement) all left the test surface untouched.
 - **qemu harness:** `qemu/pid1-harness-test.sh` covers M3 + L3 end-to-end under real PID 1 (KVM + `+invtsc`); `qemu/boot-test.sh` covers the supervisor-loop smoke. Both ~0.5 s wall time on local KVM.
 - **aarch64 (qemu-user): unblocked under cyrius 6.0.14** — the `cycc_aarch64` cross-build works again, so the sweep can run. Last green sweep: **26 of 28** at 1.6.3 under `cc5_aarch64` 5.10.44 (2 suites in the documented known-failure budget — qemu emulation limits + upstream sigil Ed25519 quirk — see `docs/architecture/001-cross-arch-aarch64.md`). A fresh 6.0.14 sweep is pending a host with `qemu-aarch64` installed (absent on the current dev host); CI runs it.
 - **2 .bcyr binaries** (`tests/bcyr/argonaut.bcyr`, `tests/bcyr/api.bcyr`)
 - **37 benchmarks** wired into `src/bench_main.cyr`; history in `bench-history.csv`
 
-### Bench snapshot (1.8.0-closeout, 2026-06-01)
+### Bench snapshot (1.8.1-libro-2.7.1, 2026-06-03)
 
-**1.8.0 verdict: neutral — no regression.** The `1.8.0-closeout` label
-(cyrius 6.0.26) is statistically indistinguishable from the
-`1.8.0-baseline` taken at the start of the release: a same-binary
-control re-run swung up to **21 µs** run-to-run on the heaviest micros
-(`resolve_waves_chain_20`: 75 → 91 across identical binaries), which
-exceeds every apparent baseline→closeout delta. The spread is
-system-load variance on the dev host, not code — the DRY refactor sits
-on cold, non-benched health paths and touches no benchmarked function.
-Full series (`1.8.0-baseline`, `1.8.0-closeout`) in `bench-history.csv`.
+**1.8.1 verdict: neutral-to-win — no regression.** The
+`1.8.1-libro-2.7.1` label (cyrius 6.0.53 + libro 2.7.1) sits at-or-below
+the `1.8.1-baseline` taken before the bump on every micro — all deltas
+within the ±2 µs run-to-run noise floor, with the heaviest chain micros
+a touch faster: `resolve_order_chain_100` 215 → 209 µs,
+`resolve_order_chain_50` 89 → 85, `resolve_waves_chain_20` 65 → 61. The
++253 KB binary growth is pure static `.bss` / code from the newer crypto
+deps (see Binary) — it does not touch any benchmarked hot path. Full
+series (`1.8.1-baseline`, `1.8.1-libro-2.7.1`) in `bench-history.csv`.
 
 The 1.7.1 codegen wins below still hold (vs `1.6.3-post-audit`); the
 table is retained as the standing reference micro-by-micro. The shipped
@@ -272,11 +300,11 @@ table is retained as the standing reference micro-by-micro. The shipped
 
 ## Dependencies
 
-- **stdlib (23 modules)**: `string fmt alloc vec str syscalls io fs process hashmap tagged args json fnptr freelist bigint chrono ct keccak thread random assert bench` (sakshi + sigil dropped — promoted upstream from stdlib to external git pins; thread + random added — libro 2.6.2's dist depends on both)
-- **libro 2.6.2** — single-module dist (`lib/libro.cyr`) via `[deps.libro] tag = "2.6.2" modules = ["dist/libro.cyr"]`. **Held at 2.6.2**: libro 2.6.3 (latest) makes `cycc` 6.0.14 abort silently (no output, exit 0 — over a unit limit). Bump deferred; see In-flight.
-- **patra 1.10.3** — explicit dep (bumped from 1.9.3 at 1.7.1), was transitive of libro 2.0. Builds clean under 6.0.14.
-- **sakshi 2.2.3 + sigil 3.0.1 + agnosys 1.0.4** — transitive via libro 2.6.2 (sakshi also via patra 1.10.3); resolved into `lib/` by `cyrius deps`. **`src/compat.cyr` `ct_eq` shim is live** — re-installed at 1.5.5 (`UPSTREAM-1`) as insurance against sigil dropping `ct_eq`; the current sigil 3.0.1 dist ships `ct_eq` again, so the build emits a harmless `duplicate fn 'ct_eq' (last definition wins)` warning (not a cyrlint finding). Wired via `[deps.argonaut_compat] path = "." modules = ["src/compat.cyr"]`. libro 2.6.3 retires it (migrates to `ct_eq_bytes_lens`) but doesn't build — retirement rides with the deferred libro bump.
-- **`cyrius.lock`** — was a committed empty file; 6.0.14's `cyrius deps` now populates it with per-file SHA-256 hashes for all 38 resolved `lib/*.cyr` units (`cyrius deps --verify` → `38 verified, 0 failed`), making the CI verify gate meaningful.
+- **stdlib (25 modules)**: `string fmt alloc vec str slice syscalls io fs process hashmap tagged args json fnptr freelist bigint chrono ct keccak thread thread_local random assert bench` (sakshi + sigil dropped — promoted upstream from stdlib to external git pins; thread + random added at 1.5.1 for libro; **`slice` + `thread_local` added at 1.8.1** — agnosys 1.3.2 lowers `s[i]` subscripts to `_slice_idx_get_W` helpers (`lib/slice.cyr`), and sigil 3.6.0 / `thread.cyr` reference `thread_local_{init,get,set}` (`lib/thread_local.cyr`); without them the build fails)
+- **libro 2.7.1** — single-module dist (`lib/libro.cyr`) via `[deps.libro] tag = "2.7.1" modules = ["dist/libro.cyr"]`. **Bumped 2.6.2 → 2.7.1 at 1.8.1**, the bump deferred since 1.7.1 (libro 2.6.3 made `cycc` 6.0.14 abort silently over a single-unit limit). Compiles clean under 6.0.53.
+- **patra 1.10.3** — explicit dep (bumped from 1.9.3 at 1.7.1), was transitive of libro 2.0. Already the latest tag; held at 1.10.3. Builds clean under 6.0.53.
+- **sakshi 2.2.3 + sigil 3.6.0 + agnosys 1.3.2** — transitive via libro 2.7.1 (sakshi also via patra 1.10.3); resolved into `lib/` by `cyrius deps`. sigil **3.0.1 → 3.6.0** and agnosys **1.0.4 → 1.3.2** at 1.8.1 (sakshi unchanged). **The `ct_eq` compat shim is RETIRED** (`src/compat.cyr` + `[deps.argonaut_compat]` deleted): libro 2.7.1 calls `ct_eq_bytes_lens` directly, that symbol now lives in the stdlib `ct` module (`lib/ct.cyr`) rather than sigil's mutable dist, and sigil 3.6.0 ships no `ct_eq` — so the `UPSTREAM-1` tag-mutation risk is structurally gone and the `duplicate fn 'ct_eq'` warning with it. (sigil 3.6.0's larger crypto-bank dist is the source of the +253 KB binary growth — see Binary.)
+- **`cyrius.lock`** — 6.0.53's `cyrius deps` populates per-file SHA-256 hashes for all **45** resolved `lib/*.cyr` units (`cyrius deps --verify` → `45 verified, 0 failed`); was 38 at 1.7.1/1.8.0 — newer sigil/agnosys split into more files, minus the dropped `argonaut_compat_compat.cyr`.
 
 ## In-flight
 
@@ -321,25 +349,26 @@ table is retained as the standing reference micro-by-micro. The shipped
   1,166,336-byte ARM ELF. The 6.x-major CI / release gate added at
   the 1.7.1 draft is removed. (Was: hang > 5 min or silent ~21 KB
   stub under 6.0.1.) Kept here for one release as the why-trail.
-- **Deferred — libro 2.6.3 over `cycc` 6.0.14 unit limit.** Latest
-  libro (+ transitive sigil 3.5.7 / agnosys 1.2.8) makes `cycc`
-  6.0.14 abort silently — exits 0 but emits no output, driver reports
-  `compile failed (exit0)`. The enlarged single compilation unit
-  appears to trip a `cycc` internal limit (functions / fixups). libro
-  held at 2.6.2 for 1.7.1; patra 1.10.3 ships. The `src/compat.cyr`
-  `ct_eq` shim retirement rides with this bump (libro 2.6.3 migrates
-  to `ct_eq_bytes_lens`). File upstream against MacCracken/cyrius
-  (silent abort on large units); re-attempt the libro bump once the
-  unit limit is raised or libro's footprint shrinks.
+- **RESOLVED (1.8.1) — libro 2.6.3+ over `cycc` 6.0.14 unit limit.**
+  The silent-abort-on-large-unit blocker (libro 2.6.3 + transitive
+  sigil/agnosys made `cycc` 6.0.14 exit 0 with no output) is cleared
+  under **cyrius 6.0.53**: **libro 2.7.1** (+ sigil 3.6.0 / agnosys
+  1.3.2) compiles clean. The `src/compat.cyr` `ct_eq` shim rode out
+  with this bump as predicted — libro 2.7.1 migrated to
+  `ct_eq_bytes_lens` (now a stdlib `ct` symbol). Kept here for one
+  release as the why-trail. Cost: +253 KB binary (sigil 3.6.0 crypto
+  banks — see Binary), accepted.
 - Stale `src/test_*.cyr` stub cleanup (predate `tests/tcyr/`).
 - Patra `json_build/6` namespace upstream — file an issue against
   patra rather than continue working around it.
 
 ## Pending release (unreleased)
 
-- **1.8.0** (UNRELEASED — staged in the working tree, not yet tagged) — toolchain pin bump to cyrius **6.0.26** + 1.7.x closeout refactor. Cleared the 6.0.14→6.0.26 pin-drift warning (`cyrius.cyml` + `qemu/helpers/cyrius.cyml`). Removed a leftover `/child.marker` debug write from `fork_exec_service` (1.6.2 harness artifact, wrote to root FS on every spawn, referenced nowhere); consolidated six `HealthCheckResult` allocations into `health_result_new`; fixed a stale `cyrius.toml`→`cyrius.cyml` comment. Added a **mandatory benchmark gate** to CLAUDE.md (release-blocking on unexplained regression). Clean x86_64 DCE build (**1,044,440 bytes**, −704; 2,090 dead-fns NOPed); 28 / 743 green; benches neutral vs the 1.8.0 baseline. patra 1.10.3, libro held at 2.6.2. Broad `0 - N`→`-N` cleanup (74 sites) deferred to a standalone patch.
+- **1.8.1** (UNRELEASED — staged in the working tree, not yet tagged) — toolchain pin bump to cyrius **6.0.53** + the long-deferred **libro 2.6.2 → 2.7.1** bump, now unblocked. Cleared the 6.0.26→6.0.53 pin-drift warning (`cyrius.cyml` + `qemu/helpers/cyrius.cyml`). libro 2.6.3+ no longer trips the `cycc` single-unit limit under 6.0.53; 2.7.1 pulls sigil 3.0.1→3.6.0 + agnosys 1.0.4→1.3.2 (sakshi 2.2.3, patra 1.10.3 held). Added stdlib `slice` + `thread_local` (required by agnosys 1.3.2 / sigil 3.6.0). **Retired the `ct_eq` compat shim** (`src/compat.cyr` + `[deps.argonaut_compat]` deleted — libro migrated to `ct_eq_bytes_lens`, now a stdlib `ct` symbol; sigil 3.6.0 ships no `ct_eq`; dup-fn warning gone). Clean x86_64 DCE build (**1,297,744 bytes**, +253,304/+24.3% — entirely sigil 3.6.0 crypto-bank static data + larger code, no argonaut-side bloat; 2,634 dead-fns NOPed); 28 / 743 green; benches neutral-to-win vs the 1.8.1 baseline; lockfile 45 verified / 0 failed; lint/fmt/vet clean.
 
 ## Recent shipped
+
+- **1.8.0** (2026-06-01 — committed, untagged; superseded by 1.8.1) — toolchain pin bump to cyrius **6.0.26** + 1.7.x closeout refactor. Cleared the 6.0.14→6.0.26 pin-drift warning. Removed a leftover `/child.marker` debug write from `fork_exec_service`; consolidated six `HealthCheckResult` allocations into `health_result_new`; fixed a stale `cyrius.toml`→`cyrius.cyml` comment. Added a **mandatory benchmark gate** to CLAUDE.md (release-blocking on unexplained regression). Clean x86_64 DCE build (1,044,440 bytes, −704; 2,090 dead-fns NOPed); 28 / 743 green; benches neutral. patra 1.10.3, libro held at 2.6.2.
 
 - **1.7.1** (2026-05-28) — toolchain pin bump to cyrius **6.0.14** + **aarch64 cross-build restored** (6.0.1 `cycc_aarch64` hang/stub fixed upstream; CI / release 6.x gate removed; real 1,166,336-byte ARM ELF). patra 1.9.3 → 1.10.3 (libro held at 2.6.2 — 2.6.3 trips a `cycc` 6.0.14 unit limit, deferred). Clean x86_64 DCE build (1,045,144 bytes, 2,086 dead-fns NOPed); 28 / 743 green; benches flat vs the 6.0.1 draft. `cyrius.lock` populated with per-file SHA-256s (was empty). Known harmless `ct_eq` duplicate-fn warning (sigil 3.0.1 dist ships `ct_eq`, collides with the live 1.5.5 compat shim).
 - **1.7.0** (2026-05-11) — boot-to-shell MVP: `BOOT_MINIMAL` adds agnoshi as a console shell (no Wayland dep); service count 1 → 2, step count 6 → 7; breaking for callers asserting the pre-1.7.0 shape (kybernet ≤1.2.0); BOOT_SERVER/DESKTOP/EDGE/RECOVERY unchanged. Unblocks the AGNOS closed-beta MVP path.
