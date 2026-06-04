@@ -7,7 +7,30 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [1.8.1] — Unreleased
+## [1.8.2] — 2026-06-03
+
+**Toolchain pin alignment to cyrius 6.0.56.** Moves the cyrius pin
+6.0.53 → **6.0.56** so argonaut sits on the same toolchain as the rest
+of the agnos boot pack (agnos 1.41.4 / agnoshi 1.3.5 / kybernet 1.3.3)
+after 6.0.55/6.0.56 landed the `CYRIUS_TARGET_AGNOS` stdlib peer that
+unblocked boot-to-agnsh. No `src/` changes, no sibling-dep version
+changes — pin + regenerated `lib/` snapshot + lock only. Builds clean
+on both arches; the test suite (28 programs) passes 0-fail.
+
+### Changed
+
+- **`[cyrius]` pin 6.0.53 → 6.0.56.** `cyrius update` regenerated the
+  vendored `lib/` stdlib snapshot against the 6.0.56 toolchain; the only
+  `cyrius.lock` movement is `lib/*.cyr` content hashes (the 6.0.54–56
+  arc). Git-tagged sibling deps (sigil 3.6.0, libro 2.7.1, agnosys 1.3.2,
+  sakshi 2.2.3) unchanged from 1.8.1.
+
+### Validated
+
+- `tests/test.sh` — 28 test programs (advanced / api / audit / modules /
+  security / serde / lifecycle / …), **0 failures** (`TOTAL_FAIL=0`).
+
+## [1.8.1] — 2026-06-03
 
 **Toolchain pin bump to cyrius 6.0.53 + the long-deferred libro 2.7.1
 bump, now unblocked.** Aligns the manifest pin with the installed
