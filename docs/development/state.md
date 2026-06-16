@@ -6,6 +6,33 @@
 
 ## Version
 
+**1.8.3** (toolchain pin bump to cyrius **6.2.11** + dependency refresh
+to latest tags, with `lib/` deleted and repopulated from scratch.
+`cyrius.cyml` + `qemu/helpers/cyrius.cyml` pin **6.0.56 → 6.2.11**;
+**patra 1.10.3 → 1.11.2**, **libro 2.7.1 → 2.7.4** (latest), transitive
+**sigil 3.6.0 → 3.7.14**. The 6.2.x stdlib reorg forced consumer-side
+migrations: **`json` + `bigint` stdlib modules consolidated into
+`bayan`** (manifest stdlib list + 9 test/bench include sites migrated to
+`lib/bayan.cyr`); **libro sub-module includes collapsed to the single
+`dist/libro.cyr` bundle** across the test/bench headers (9 files, per
+libro `DEPS-PATTERN.md`); **`thread_local` now an explicit include ahead
+of sigil** — 6.2.x's manifest auto-resolver no longer pulls a stdlib
+module referenced only by a transitive git dep, and sigil 3.7.x's banked
+crypto scratch calls `thread_local_*`, so without it the audit-hash path
+SIGILLs. **Benchmark harness ported off the `alloc_reset()`+`alloc_init()`
+fresh-chunk idiom** (cyrius 6.1.23 made `alloc_init` idempotent → the old
+per-iteration reset SIGSEGV'd); replaced with a heap high-water-mark
+rewind, sakshi span tracing silenced via a null emit hook. **x86_64 DCE
+build** clean (**1,629,880 bytes**, **+332,136 / +25.6 %** from 1.8.1 —
+entirely upstream: sigil 3.7.14 + patra 1.11.2 + libro 2.7.4 + bayan
+under 6.2.11; no argonaut-side bloat); 2,970 dead fns NOPed (892,878
+bytes). 28 `.tcyr` suites / 0 failures. `cyrius.lock`: **49 verified, 0
+failed** (was 45). Lint / fmt clean. Mandatory bench gate recorded as
+`1.8.3-cyrius-6.2.11` — net favorable vs `1.8.1-libro-2.7.1`; the five
+small dependency-resolution regressions are toolchain + bench-harness-port
+artifacts, not argonaut-side logic changes — see Bench snapshot /
+`bench-history.csv`.)
+
 **1.8.1** (UNRELEASED — toolchain pin bump to cyrius **6.0.53** + the
 long-deferred **libro 2.6.2 → 2.7.1** bump, now unblocked. `cyrius.cyml`
 + `qemu/helpers/cyrius.cyml` both bumped 6.0.26 → 6.0.53, clearing the
@@ -220,13 +247,14 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Toolchain
 
-- `cyrius = "6.0.53"` pinned in `cyrius.cyml [package]` (was 6.0.26 at
-  1.8.0, 6.0.14 at 1.7.1; bumped to 6.0.53 at 1.8.1 to match the
-  installed wrapper and clear the pin-drift warning — and, critically,
-  6.0.53 raises/clears the `cycc` single-unit limit that blocked the
-  libro 2.6.3+ bump under 6.0.14. First 6.x adoption was 1.7.1 — drafted
-  on 6.0.1, shipped on 6.0.14 once the `cycc_aarch64` cross-build fix
-  landed; was 5.10.44 at 1.7.0)
+- `cyrius = "6.2.11"` pinned in `cyrius.cyml [package]` (was 6.0.56 at
+  1.8.2, 6.0.53 at 1.8.1, 6.0.26 at 1.8.0, 6.0.14 at 1.7.1; bumped to
+  6.2.11 at 1.8.3 to sit on the current toolchain. 6.2.x consolidated the
+  `json`/`bigint` stdlib modules into **`bayan`**, made `alloc_init()`
+  idempotent (6.1.23 — see Bench notes), and tightened the manifest
+  `stdlib` auto-resolver to skip a module referenced only by a transitive
+  git dep — hence `thread_local` is now an explicit include ahead of
+  sigil. First 6.x adoption was 1.7.1; was 5.10.44 at 1.7.0.)
 - Compiler renamed `cc5` → `cycc` at Cyrius 6.0 (`cc5_aarch64` →
   `cycc_aarch64` follows). The `cyrius build`/`test`/`bench` driver
   is the stable surface — call sites in CI / scripts / dev loops use
@@ -244,10 +272,10 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **x86_64: ~1.30 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, **1,297,744 bytes at 1.8.1** under cyrius 6.0.53; **+253,304 / +24.3 %** from 1.8.0's 1,044,440). The growth is entirely upstream-transitive — sigil 3.6.0's crypto-bank static buffers (`var buf[32768]` + multiple 4 KB SIGIL_CRYPTO_BANKS slots, ~159 KB of `.bss` flagged by the new `large static data (159616 bytes)` build note) plus the larger sigil 3.6.0 / agnosys 1.3.2 code footprint. No argonaut-side bloat; accepted as the cost of the latest crypto surface. 2,634 unreachable fns NOPed (795,348 bytes reclaimed). (Was 1,044,440 at 1.8.0 under 6.0.26.)
+- **x86_64: ~1.63 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, **1,629,880 bytes at 1.8.3** under cyrius 6.2.11; **+332,136 / +25.6 %** from 1.8.1's 1,297,744). The growth is entirely upstream-transitive — sigil 3.7.14 + patra 1.11.2 + libro 2.7.4 + the `bayan` consolidation under 6.2.11. No argonaut-side bloat; accepted as the cost of the latest crypto surface. 2,970 unreachable fns NOPed (892,878 bytes reclaimed). (Was 1,297,744 at 1.8.1 under 6.0.53; 1,044,440 at 1.8.0 under 6.0.26.)
 - **L3 helper: 11936 bytes** static cyrius ELF (`qemu/helpers/l3-helper`); bundled into the qemu harness initramfs as `/bin/l3-helper`. **Committed binary held at the 6.0.14 build** — under 6.0.26 a fresh `cyrius build` emits a 14,592-byte helper (codegen drift), but the helper's syscall ABI is unchanged and the qemu harness only greps its `/l3.marker` output, so the bundled fixture was not re-cut at 1.8.0 to avoid churning the vendored `qemu/helpers/lib/` snapshot. Re-cut it the next time the harness itself changes.
 - **aarch64: 1,166,336 bytes** statically linked ARM ELF (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`), **RESTORED under cyrius 6.0.14**. The 6.0.1 `cycc_aarch64` regression (hang > 5 min, or silent ~21 KB stub on `src/main.cyr`) is fixed; the CI / release 6.x-major gate is removed, leaving only the `cycc_aarch64`-presence check. The +121 KB delta vs x86_64 tracks aarch64's fixed-width instruction encoding. (Last green before the 6.0.1 regression: ~1.14 MB at 1.6.3 under `cc5_aarch64` 5.10.44.)
-- Dead-code floor: **2,634 unreachable functions NOPed** under DCE at 1.8.1 / 6.0.53 (795,348 bytes reclaimed). +544 vs 1.8.0's 2,090 — the newer sigil 3.6.0 / agnosys 1.3.2 dists ship a much larger surface, most of which argonaut never reaches, so DCE NOPs far more. Not a public-surface change. (Was 2,090 at 1.8.0 / 6.0.26.)
+- Dead-code floor: **2,970 unreachable functions NOPed** under DCE at 1.8.3 / 6.2.11 (892,878 bytes reclaimed). +336 vs 1.8.1's 2,634 — the newer sigil 3.7.14 / libro 2.7.4 / patra 1.11.2 dists ship a larger surface, most of which argonaut never reaches, so DCE NOPs more. Not a public-surface change. (Was 2,634 at 1.8.1 / 6.0.53; 2,090 at 1.8.0 / 6.0.26.)
 - Was 378 KB at 1.2.0, 641 KB at 1.3.0, 650 KB at 1.4.0, 652 KB at
   1.5.0, ~990 KB at 1.5.1, ~995 KB at 1.5.2; +5 KB at 1.5.3 for
   the `src/audit_ext.cyr` wrapper module + new ArgonautInit slot

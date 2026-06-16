@@ -5,7 +5,7 @@ description = "Init system and service manager for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/argonaut"
 language = "cyrius"
-cyrius = "6.0.56"
+cyrius = "6.2.11"
 
 [build]
 entry = "src/main.cyr"
@@ -31,10 +31,9 @@ stdlib = [
     "hashmap",
     "tagged",
     "args",
-    "json",
+    "bayan",
     "fnptr",
     "freelist",
-    "bigint",
     "chrono",
     "ct",
     "keccak",
@@ -45,17 +44,23 @@ stdlib = [
     "bench",
 ]
 
-# UPSTREAM-1 RETIRED (1.8.1) — the `ct_eq` shim is gone. libro 2.7.1
-# migrated to `ct_eq_bytes_lens` directly, and that symbol now lives in
-# the stdlib `ct` module (not sigil's mutable dist), so the tag-mutation
-# churn the shim insulated against can no longer occur. sigil 3.6.0 no
-# longer ships its own `ct_eq`; nothing calls the bare symbol.
+# UPSTREAM-1 RETIRED (1.8.1) — the `ct_eq` shim is gone. libro migrated
+# to `ct_eq_bytes_lens` directly, and that symbol now lives in the stdlib
+# `ct` module (not sigil's mutable dist), so the tag-mutation churn the
+# shim insulated against can no longer occur. sigil (3.7.x) no longer
+# ships its own `ct_eq`; nothing calls the bare symbol.
+#
+# `bayan` (6.2.x) replaces the standalone `json` + `bigint` stdlib
+# modules it consolidates; `thread_local` is force-included in
+# src/main.cyr ahead of sigil (6.2.x won't auto-pull a stdlib module
+# referenced only by a transitive git dep). See
+# docs/architecture/003-cyrius-6.2-stdlib-resolution.md.
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.10.3"
+tag = "1.11.2"
 modules = ["dist/patra.cyr"]
 
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
-tag = "2.7.1"
+tag = "2.7.4"
 modules = ["dist/libro.cyr"]

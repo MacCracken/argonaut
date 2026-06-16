@@ -16,12 +16,12 @@ include "lib/io.cyr"
 include "lib/fs.cyr"
 include "lib/hashmap.cyr"
 include "lib/assert.cyr"
-include "lib/json.cyr"
+include "lib/bayan.cyr"
 include "lib/freelist.cyr"
 
 # Libro dependencies
-include "lib/bigint.cyr"
 include "lib/chrono.cyr"
+include "lib/thread_local.cyr"
 include "lib/sigil.cyr"
 
 # Sakshi stubs
@@ -35,22 +35,7 @@ fn sakshi_span_exit() { return 0; }
 fn sakshi_span_depth() { return 0; }
 
 # Libro — 16 of 19 modules (excludes file_store, patra_store, streaming)
-include "lib/error.cyr"
-include "lib/hasher.cyr"
-include "lib/entry.cyr"
-include "lib/verify.cyr"
-include "lib/query.cyr"
-include "lib/retention.cyr"
-include "lib/chain.cyr"
-include "lib/store.cyr"
-include "lib/export.cyr"
-include "lib/review.cyr"
-include "lib/merkle.cyr"
-include "lib/signing.cyr"
-include "lib/anchoring.cyr"
-include "lib/timestamping.cyr"
-include "lib/proof.cyr"
-include "lib/kernel_audit.cyr"
+include "lib/libro.cyr"
 
 fn main() {
     alloc_init();

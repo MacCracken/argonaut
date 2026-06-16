@@ -12,22 +12,45 @@ include "lib/hashmap.cyr"
 include "lib/tagged.cyr"
 include "lib/args.cyr"
 include "lib/bench.cyr"
-include "lib/sakshi_full.cyr"
+include "lib/bayan.cyr"
+include "lib/freelist.cyr"
+
+# Sakshi stubs — avoid loading full sakshi (its span tracing prints to the
+# bench output and inflates timed sections). Mirrors tests/test_header.cyr.
+fn sakshi_info(msg, len) { return 0; }
+fn sakshi_warn(msg, len) { return 0; }
+fn sakshi_error(msg, len) { return 0; }
+fn sakshi_debug(msg, len) { return 0; }
+fn sakshi_trace(msg, len) { return 0; }
+fn sakshi_span_enter(name, len) { return 0; }
+fn sakshi_span_exit() { return 0; }
+fn sakshi_span_depth() { return 0; }
+
+# Audit chain stack (init_new builds an audit log)
+include "lib/chrono.cyr"
+include "lib/thread_local.cyr"
+include "lib/sigil.cyr"
+include "lib/libro.cyr"
 
 include "src/types.cyr"
 include "src/boot.cyr"
 include "src/services.cyr"
 include "src/process_mgmt.cyr"
+include "src/resolver.cyr"
 include "src/health.cyr"
 include "src/edge_boot.cyr"
 include "src/notify.cyr"
 include "src/security.cyr"
 include "src/systemd.cyr"
 include "src/tmpfiles.cyr"
+include "src/audit.cyr"
+include "src/audit_ext.cyr"
 include "src/init.cyr"
 
+# Per-iteration heap high-water mark (see src/bench_main.cyr).
+var _bm = 0;
+
 fn main() {
-    alloc_init();
     println("=== API + Resource Benchmarks ===\n");
 
     var iters = 10000;
@@ -35,8 +58,10 @@ fn main() {
     var init = argonaut_init_new(argonaut_config_default());
 
     var b1 = bench_new("api_list_svcs");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b1);
+        _heap_ptr = _bm;
         init_list_services(init);
         bench_stop(b1);
     }
@@ -44,8 +69,10 @@ fn main() {
     vec_push(benches, b1);
 
     var b2 = bench_new("api_sys_status");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b2);
+        _heap_ptr = _bm;
         init_system_status(init);
         bench_stop(b2);
     }
@@ -53,8 +80,10 @@ fn main() {
     vec_push(benches, b2);
 
     var b3 = bench_new("api_sys_metrics");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b3);
+        _heap_ptr = _bm;
         init_system_metrics(init);
         bench_stop(b3);
     }
@@ -62,8 +91,10 @@ fn main() {
     vec_push(benches, b3);
 
     var b4 = bench_new("api_boot_log");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b4);
+        _heap_ptr = _bm;
         init_boot_log(init);
         bench_stop(b4);
     }
@@ -76,8 +107,10 @@ fn main() {
     store64(rl + 16, 512);
     store64(rl + 24, 0);
     var b5 = bench_new("prlimit_cmds");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b5);
+        _heap_ptr = _bm;
         to_prlimit_commands(rl, 42);
         bench_stop(b5);
     }
@@ -85,8 +118,10 @@ fn main() {
     vec_push(benches, b5);
 
     var b6 = bench_new("boot_exec_plan");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b6);
+        _heap_ptr = _bm;
         init_boot_execution_plan(init);
         bench_stop(b6);
     }
@@ -94,8 +129,10 @@ fn main() {
     vec_push(benches, b6);
 
     var b7 = bench_new("boot_exec_waves");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b7);
+        _heap_ptr = _bm;
         init_boot_execution_plan_waves(init);
         bench_stop(b7);
     }
@@ -106,8 +143,10 @@ fn main() {
     safe_cmd_add_arg(dcmd, str_from("--port"));
     safe_cmd_add_arg(dcmd, str_from("8080"));
     var b8 = bench_new("safe_cmd_disp");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b8);
+        _heap_ptr = _bm;
         safe_cmd_display(dcmd);
         bench_stop(b8);
     }

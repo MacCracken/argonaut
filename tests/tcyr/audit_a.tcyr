@@ -11,12 +11,12 @@ include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/hashmap.cyr"
 include "lib/assert.cyr"
-include "lib/json.cyr"
+include "lib/bayan.cyr"
 include "lib/freelist.cyr"
 
 # Libro dependencies
-include "lib/bigint.cyr"
 include "lib/chrono.cyr"
+include "lib/thread_local.cyr"
 include "lib/sigil.cyr"
 
 # Sakshi stubs for tests
@@ -30,14 +30,7 @@ fn sakshi_span_exit() { return 0; }
 fn sakshi_span_depth() { return 0; }
 
 # Libro core chain modules
-include "lib/error.cyr"
-include "lib/hasher.cyr"
-include "lib/entry.cyr"
-include "lib/verify.cyr"
-include "lib/query.cyr"
-include "lib/retention.cyr"
-include "lib/chain.cyr"
-include "lib/export.cyr"
+include "lib/libro.cyr"
 
 # Argonaut audit bridge
 include "src/audit.cyr"

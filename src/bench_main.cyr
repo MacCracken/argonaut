@@ -18,28 +18,22 @@ include "lib/hashmap.cyr"
 include "lib/tagged.cyr"
 include "lib/args.cyr"
 include "lib/bench.cyr"
-include "lib/json.cyr"
+include "lib/bayan.cyr"
 include "lib/freelist.cyr"
 
 # Libro dependencies
-include "lib/bigint.cyr"
 include "lib/chrono.cyr"
+include "lib/thread_local.cyr"
 include "lib/sigil.cyr"
 
 # Libro core chain modules
-include "lib/error.cyr"
-include "lib/hasher.cyr"
-include "lib/entry.cyr"
-include "lib/verify.cyr"
-include "lib/query.cyr"
-include "lib/retention.cyr"
-include "lib/chain.cyr"
-include "lib/export.cyr"
+include "lib/libro.cyr"
 
 include "src/types.cyr"
 include "src/boot.cyr"
 include "src/services.cyr"
 include "src/process_mgmt.cyr"
+include "src/resolver.cyr"
 include "src/health.cyr"
 include "src/edge_boot.cyr"
 include "src/notify.cyr"
@@ -47,6 +41,7 @@ include "src/security.cyr"
 include "src/systemd.cyr"
 include "src/tmpfiles.cyr"
 include "src/audit.cyr"
+include "src/audit_ext.cyr"
 include "src/init.cyr"
 
 # =========================================================================
@@ -82,8 +77,19 @@ fn make_chain(n) {
 # Benchmarks
 # =========================================================================
 
+# Per-iteration heap high-water mark: rewind point preserving long-lived
+# bench bookkeeping (benches vec + bN) while freeing each iteration's
+# transient allocations. Replaces the pre-6.2.x alloc_reset()+alloc_init()
+# idiom, which relied on alloc_init re-mmapping a fresh chunk (made
+# idempotent in cyrius 6.1.23).
+var _bm = 0;
+
 fn main() {
-    alloc_init();
+    # Silence sakshi tracing (default target is stderr): a null emit hook
+    # routes every event to the SK_OUT_HOOK branch, which is a no-op when the
+    # hook pointer is 0. Keeps span tracing from flooding the bench output and
+    # inflating the timed init sections — zero per-call overhead.
+    sakshi_set_emit_hook(0);
     println("=== Argonaut Benchmarks ===\n");
 
     var iters = 10000;
@@ -93,10 +99,10 @@ fn main() {
 
     println("Boot sequence construction:");
     var b1 = bench_new("build_boot_seq_desktop");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b1);
-        alloc_reset();
-        alloc_init();
+        _heap_ptr = _bm;
         build_boot_sequence(BOOT_DESKTOP);
         bench_stop(b1);
     }
@@ -104,10 +110,10 @@ fn main() {
     vec_push(benches, b1);
 
     var b2 = bench_new("build_boot_seq_server");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b2);
-        alloc_reset();
-        alloc_init();
+        _heap_ptr = _bm;
         build_boot_sequence(BOOT_SERVER);
         bench_stop(b2);
     }
@@ -115,10 +121,10 @@ fn main() {
     vec_push(benches, b2);
 
     var b3 = bench_new("build_boot_seq_minimal");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b3);
-        alloc_reset();
-        alloc_init();
+        _heap_ptr = _bm;
         build_boot_sequence(BOOT_MINIMAL);
         bench_stop(b3);
     }
@@ -126,10 +132,10 @@ fn main() {
     vec_push(benches, b3);
 
     var b4 = bench_new("build_boot_seq_edge");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b4);
-        alloc_reset();
-        alloc_init();
+        _heap_ptr = _bm;
         build_boot_sequence(BOOT_EDGE);
         bench_stop(b4);
     }
@@ -140,10 +146,10 @@ fn main() {
 
     println("\nInit construction:");
     var b5 = bench_new("init_new_desktop");
+    _bm = _heap_ptr;
     for (var i = 0; i < 1000; i = i + 1) {
         bench_start(b5);
-        alloc_reset();
-        alloc_init();
+        _heap_ptr = _bm;
         var cfg = argonaut_config_default();
         argonaut_init_new(cfg);
         bench_stop(b5);
@@ -152,10 +158,10 @@ fn main() {
     vec_push(benches, b5);
 
     var b6 = bench_new("init_new_minimal");
+    _bm = _heap_ptr;
     for (var i = 0; i < 1000; i = i + 1) {
         bench_start(b6);
-        alloc_reset();
-        alloc_init();
+        _heap_ptr = _bm;
         var cfg = argonaut_config_default();
         store64(cfg, BOOT_MINIMAL);
         argonaut_init_new(cfg);
@@ -165,10 +171,10 @@ fn main() {
     vec_push(benches, b6);
 
     var b7 = bench_new("init_new_edge");
+    _bm = _heap_ptr;
     for (var i = 0; i < 1000; i = i + 1) {
         bench_start(b7);
-        alloc_reset();
-        alloc_init();
+        _heap_ptr = _bm;
         var cfg = argonaut_config_default();
         store64(cfg, BOOT_EDGE);
         argonaut_init_new(cfg);
@@ -182,8 +188,10 @@ fn main() {
     println("\nDependency resolution:");
     var chain10 = make_chain(10);
     var b8 = bench_new("resolve_order_chain_10");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b8);
+        _heap_ptr = _bm;
         resolve_service_order(chain10);
         bench_stop(b8);
     }
@@ -192,8 +200,10 @@ fn main() {
 
     var chain50 = make_chain(50);
     var b9 = bench_new("resolve_order_chain_50");
+    _bm = _heap_ptr;
     for (var i = 0; i < 1000; i = i + 1) {
         bench_start(b9);
+        _heap_ptr = _bm;
         resolve_service_order(chain50);
         bench_stop(b9);
     }
@@ -202,8 +212,10 @@ fn main() {
 
     var chain100 = make_chain(100);
     var b10 = bench_new("resolve_order_chain_100");
+    _bm = _heap_ptr;
     for (var i = 0; i < 500; i = i + 1) {
         bench_start(b10);
+        _heap_ptr = _bm;
         resolve_service_order(chain100);
         bench_stop(b10);
     }
@@ -212,8 +224,10 @@ fn main() {
 
     var b11 = bench_new("resolve_waves_desktop");
     var dsk_svcs = default_services(BOOT_DESKTOP);
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b11);
+        _heap_ptr = _bm;
         resolve_service_waves(dsk_svcs);
         bench_stop(b11);
     }
@@ -223,12 +237,12 @@ fn main() {
     # --- Shutdown planning ---
 
     println("\nShutdown planning:");
-    alloc_reset();
-    alloc_init();
     var dinit = argonaut_init_new(argonaut_config_default());
     var b12 = bench_new("plan_shutdown_reboot");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b12);
+        _heap_ptr = _bm;
         init_plan_shutdown(dinit, SHUTDOWN_REBOOT);
         bench_stop(b12);
     }
@@ -240,8 +254,10 @@ fn main() {
     println("\nHealth tracking:");
     var b13 = bench_new("health_tracker_record");
     var tracker = health_tracker_new();
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b13);
+        _heap_ptr = _bm;
         health_tracker_record(tracker, "svc-bench", i % 2, 3);
         bench_stop(b13);
     }
@@ -251,8 +267,10 @@ fn main() {
     var b14 = bench_new("health_history_record");
     var hh = health_history_new(100);
     var mock_result = alloc(48);
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b14);
+        _heap_ptr = _bm;
         store64(mock_result + 16, i % 2);
         health_history_record(hh, mock_result, 3);
         bench_stop(b14);
@@ -264,8 +282,10 @@ fn main() {
 
     println("\nState transitions:");
     var b15 = bench_new("state_transition_check");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b15);
+        _heap_ptr = _bm;
         valid_transition(STATE_STOPPED, STATE_STARTING);
         valid_transition(STATE_STARTING, STATE_RUNNING);
         valid_transition(STATE_RUNNING, STATE_STOPPING);
@@ -281,8 +301,10 @@ fn main() {
     println("\nBackoff computation:");
     var rc = restart_config_default();
     var b16 = bench_new("backoff_delay_compute");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b16);
+        _heap_ptr = _bm;
         backoff_delay(rc, 0);
         backoff_delay(rc, 1);
         backoff_delay(rc, 2);
@@ -298,16 +320,16 @@ fn main() {
 
     println("\nSystemd unit generation:");
     var b17 = bench_new("generate_unit");
-    alloc_reset();
-    alloc_init();
     var svc = svc_def_new(str_from("bench-svc"), str_from("Benchmark service"), str_from("/usr/bin/bench"));
     vec_push(svc_def_args(svc), str_from("--port"));
     vec_push(svc_def_args(svc), str_from("8080"));
     vec_push(svc_def_deps(svc), str_from("postgres"));
     vec_push(svc_def_modes(svc), BOOT_SERVER);
     store64(svc + 72, health_check_new(HC_HTTP_GET, str_from("http://127.0.0.1:8080/health"), 0, 10000, 2000, 3));
+    _bm = _heap_ptr;
     for (var i = 0; i < 1000; i = i + 1) {
         bench_start(b17);
+        _heap_ptr = _bm;
         generate_unit(svc);
         bench_stop(b17);
     }
@@ -317,14 +339,14 @@ fn main() {
     # --- Crash action determination ---
 
     println("\nCrash action:");
-    alloc_reset();
-    alloc_init();
     var minit = argonaut_init_new(argonaut_config_default());
     store64(argonaut_config_default(), BOOT_MINIMAL);
     var ms = init_get_service(minit, "daimon");
     var b18 = bench_new("on_service_crash");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b18);
+        _heap_ptr = _bm;
         on_service_crash(ms, 1);
         bench_stop(b18);
     }
@@ -336,8 +358,10 @@ fn main() {
     println("\nDependency resolution (desktop):");
     var dsk_order_svcs = default_services(BOOT_DESKTOP);
     var b19 = bench_new("resolve_order_desktop");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b19);
+        _heap_ptr = _bm;
         resolve_service_order(dsk_order_svcs);
         bench_stop(b19);
     }
@@ -348,8 +372,10 @@ fn main() {
 
     var chain20 = make_chain(20);
     var b20 = bench_new("resolve_waves_chain_20");
+    _bm = _heap_ptr;
     for (var i = 0; i < 1000; i = i + 1) {
         bench_start(b20);
+        _heap_ptr = _bm;
         resolve_service_waves(chain20);
         bench_stop(b20);
     }
@@ -371,8 +397,10 @@ fn main() {
         vec_push(wide, wsd);
     }
     var b21 = bench_new("resolve_waves_wide_20");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b21);
+        _heap_ptr = _bm;
         resolve_service_waves(wide);
         bench_stop(b21);
     }
@@ -382,12 +410,12 @@ fn main() {
     # --- Shutdown planning: poweroff ---
 
     println("\nShutdown planning (poweroff):");
-    alloc_reset();
-    alloc_init();
     var pinit = argonaut_init_new(argonaut_config_default());
     var b22 = bench_new("plan_shutdown_poweroff");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b22);
+        _heap_ptr = _bm;
         init_plan_shutdown(pinit, SHUTDOWN_POWEROFF);
         bench_stop(b22);
     }
@@ -398,8 +426,10 @@ fn main() {
 
     println("\nEdge boot:");
     var b23 = bench_new("configure_readonly_rootfs");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b23);
+        _heap_ptr = _bm;
         configure_readonly_rootfs();
         bench_stop(b23);
     }
@@ -408,8 +438,10 @@ fn main() {
 
     var b24 = bench_new("verify_rootfs_integrity");
     var rhash = str_from("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b24);
+        _heap_ptr = _bm;
         verify_rootfs_integrity(str_from("/dev/sda1"), str_from("/dev/sda2"), rhash);
         bench_stop(b24);
     }
@@ -419,8 +451,6 @@ fn main() {
     # --- Stats collection ---
 
     println("\nStats collection:");
-    alloc_reset();
-    alloc_init();
     var sinit = argonaut_init_new(argonaut_config_default());
     # Mark all steps complete for realistic stats
     var ssteps = load64(sinit + 8);
@@ -429,8 +459,10 @@ fn main() {
         store64(step + 32, STEP_COMPLETE);
     }
     var b25 = bench_new("stats_desktop");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b25);
+        _heap_ptr = _bm;
         init_stats(sinit);
         bench_stop(b25);
     }
@@ -458,8 +490,10 @@ fn main() {
         vec_push(tmp_entries, te);
     }
     var b26 = bench_new("generate_tmpfile_cmds_20");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b26);
+        _heap_ptr = _bm;
         generate_tmpfile_commands(tmp_entries);
         bench_stop(b26);
     }
@@ -469,13 +503,13 @@ fn main() {
     # --- Runlevel switching ---
 
     println("\nRunlevel switching:");
-    alloc_reset();
-    alloc_init();
     var rlinit = argonaut_init_new(argonaut_config_default());
     var targets = default_targets();
     var b27 = bench_new("plan_runlevel_switch");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b27);
+        _heap_ptr = _bm;
         init_plan_runlevel_switch(rlinit, RL_GRAPHICAL, targets);
         bench_stop(b27);
     }
@@ -486,10 +520,10 @@ fn main() {
 
     println("\nBoot step marking:");
     var b28 = bench_new("mark_all_steps_complete");
+    _bm = _heap_ptr;
     for (var i = 0; i < 1000; i = i + 1) {
         bench_start(b28);
-        alloc_reset();
-        alloc_init();
+        _heap_ptr = _bm;
         var bsinit = argonaut_init_new(argonaut_config_default());
         var bssteps = load64(bsinit + 8);
         for (var j = 0; j < vec_len(bssteps); j = j + 1) {
@@ -506,8 +540,10 @@ fn main() {
     println("\nAudit logging:");
     var alog = argonaut_audit_log_new();
     var b29 = bench_new("audit_log_record");
+    _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {
         bench_start(b29);
+        _heap_ptr = _bm;
         audit_log_record(alog, "daimon", EVT_STARTING);
         bench_stop(b29);
     }

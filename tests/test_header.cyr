@@ -15,13 +15,13 @@ include "lib/hashmap.cyr"
 include "lib/tagged.cyr"
 include "lib/args.cyr"
 include "lib/assert.cyr"
-include "lib/json.cyr"
+include "lib/bayan.cyr"
 include "lib/fnptr.cyr"
 
 # Libro dependencies (for audit.cyr which init.cyr now requires)
 include "lib/freelist.cyr"
-include "lib/bigint.cyr"
 include "lib/chrono.cyr"
+include "lib/thread_local.cyr"
 include "lib/sigil.cyr"
 
 # Sakshi stubs for tests — avoids loading full sakshi (saves string buffer)
@@ -35,14 +35,7 @@ fn sakshi_span_exit() { return 0; }
 fn sakshi_span_depth() { return 0; }
 
 # Libro core chain modules
-include "lib/error.cyr"
-include "lib/hasher.cyr"
-include "lib/entry.cyr"
-include "lib/verify.cyr"
-include "lib/query.cyr"
-include "lib/retention.cyr"
-include "lib/chain.cyr"
-include "lib/export.cyr"
+include "lib/libro.cyr"
 
 # Argonaut modules (audit before init — init depends on audit;
 # resolver before health — health.cyr consumes resolve_host_ipv4)

@@ -7,6 +7,102 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.8.3] — 2026-06-15
+
+**Toolchain pin bump to cyrius 6.2.11 + dependency refresh to the latest
+tags, with the `lib/` snapshot deleted and repopulated from scratch.**
+Moves the cyrius pin **6.0.56 → 6.2.11** (`cyrius.cyml` +
+`qemu/helpers/cyrius.cyml`, the latter also catching up from its stale
+6.0.53), and the git-pinned siblings to latest: **patra 1.10.3 → 1.11.2**,
+**libro 2.7.1 → 2.7.4** (pulling **sigil 3.6.0 → 3.7.14** and newer
+transitive crypto). `lib/` was removed and rebuilt via `cyrius update` +
+`cyrius deps`; `cyrius.lock` is now **49 verified, 0 failed** (was 45).
+
+The 6.2.x stdlib reorganization required several consumer-side migrations
+(the binary built clean once these landed; the full 28-suite test sweep
+passes 0-fail):
+
+### Changed
+
+- **`[package].cyrius` pin `6.0.56` → `6.2.11`** in `cyrius.cyml` and
+  `qemu/helpers/cyrius.cyml`.
+- **`[deps.patra]` `1.10.3` → `1.11.2`; `[deps.libro]` `2.7.1` → `2.7.4`**
+  (both latest). Transitive crypto advanced (sigil **3.6.0 → 3.7.14**).
+- **`json` + `bigint` stdlib modules consolidated into `bayan`.** Cyrius
+  6.2.x no longer ships standalone `lib/json.cyr` / `lib/bigint.cyr`; the
+  consolidated **`bayan`** module bundles base64 + json + bigint and
+  re-exports the legacy `json_*` / `bigint_*` shims. The manifest `[deps]
+  stdlib` list drops `json` and `bigint` for **`bayan`**, and every test/
+  bench that hand-included `lib/json.cyr` / `lib/bigint.cyr` now includes
+  `lib/bayan.cyr` (9 files).
+- **libro sub-module includes collapsed to the `dist/libro.cyr` bundle.**
+  Test/bench headers that included libro's pre-bundle source modules
+  (`error.cyr`, `hasher.cyr`, `entry.cyr`, `verify.cyr`, `query.cyr`,
+  `retention.cyr`, `chain.cyr`, `export.cyr`, plus the extended
+  `store`/`merkle`/`signing`/… set) now include the single bundled
+  `lib/libro.cyr`, per libro's `DEPS-PATTERN.md` contract (the bundle is
+  the sole distribution artifact). 9 files.
+- **`thread_local` made an explicit include ahead of sigil.** sigil
+  3.7.x's banked crypto scratch (`cbank`/`crypto_tls_main_init`) calls
+  `thread_local_{init,get,set}`; under cyrius 6.2.x the manifest
+  `stdlib` auto-resolver no longer pulls a module referenced **only** by
+  a transitive git dep, so `lib/thread_local.cyr` is now included
+  explicitly before sigil in `src/main.cyr`, `src/bench_main.cyr`,
+  `tests/test_header.cyr`, and the standalone audit/bench suites. Without
+  it the audit-hash path SIGILLs (exit 132). Documented as
+  architecture quirk.
+- **Benchmark harness ported off the `alloc_reset()` + `alloc_init()`
+  fresh-chunk idiom.** cyrius 6.1.23 made `alloc_init()` idempotent, so
+  the old per-iteration "reset then re-mmap a fresh chunk" no longer
+  isolated transient allocations from the long-lived bench bookkeeping
+  (the `benches` vec + `bN` timers) — every section SIGSEGV'd (exit 139).
+  Replaced with a heap high-water-mark rewind (`_heap_ptr = _bm`)
+  captured after each section's fixtures, which frees per-iteration
+  garbage while preserving bookkeeping and bounding memory. Sakshi span
+  tracing (default stderr target, no level gate) is silenced via a null
+  emit hook so it neither floods bench output nor inflates timed init
+  sections.
+
+### Fixed
+
+- **`src/bench_main.cyr` and the `.bcyr` benches were missing
+  `src/resolver.cyr` and `src/audit_ext.cyr` includes** — `init_new`'s
+  audit chain and `health.cyr`'s resolver consumer referenced undefined
+  functions (`resolve_host_ipv4`, `audit_log_*_persistent`, `pal_chain`).
+  Added in the documented order (resolver before health, audit_ext before
+  init).
+- **Stale `lib/sakshi_full.cyr` include** in `tests/tcyr/cc3_ptr_regression.tcyr`
+  and `tests/bcyr/api.bcyr` → `lib/sakshi.cyr`.
+- **Stale `src/compat.cyr` / `ct_eq`-shim comment** in `src/main.cyr`
+  removed (the shim was retired in 1.8.1).
+
+### Performance
+
+- **Mandatory benchmark gate** run as `1.8.3-cyrius-6.2.11` vs the prior
+  `1.8.1-libro-2.7.1` label in `bench-history.csv`. Net favorable:
+  notable wins (`build_boot_seq_*` −2/−3 µs, `init_new_edge` −5 µs,
+  `init_new_minimal` −4 µs, `mark_all_steps_complete` −14 µs) against five
+  small regressions concentrated in dependency resolution
+  (`resolve_order_chain_50` +14, `resolve_order_chain_100` +16,
+  `resolve_waves_chain_20` +6, `resolve_order_chain_10` +3) and
+  `generate_tmpfile_cmds_20` (+12). **argonaut's source logic is
+  unchanged** in this release; the deltas are attributable to the cyrius
+  6.0.x → 6.2.x codegen change and the necessary bench-harness alloc-port
+  (not argonaut-side regressions). Accepted.
+
+### Build
+
+- **x86_64 DCE build clean: 1,629,880 bytes** (`CYRIUS_DCE=1`),
+  **+332,136 / +25.6 %** from 1.8.1's 1,297,744 — entirely
+  upstream-transitive (sigil 3.7.14 + patra 1.11.2 + libro 2.7.4 + the
+  `bayan` consolidation under 6.2.11); no argonaut-side bloat. 2,970 dead
+  fns NOPed (892,878 bytes). ELF magic verified.
+
+### Validated
+
+- 28 `.tcyr` suites, **0 failures**. `cyrius.lock` 49 verified / 0 failed.
+  Lint / fmt clean on the changed surface.
+
 ## [1.8.2] — 2026-06-03
 
 **Toolchain pin alignment to cyrius 6.0.56.** Moves the cyrius pin
