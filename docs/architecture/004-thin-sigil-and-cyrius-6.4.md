@@ -84,4 +84,35 @@ Fix (1.8.4): the parser normalizes every token to microseconds
 `bench-history.csv` stores decimal µs; the historical integer rows remain
 numerically comparable (a pre-6.4.x `1` and a 6.4.x `1.4` differ mostly by
 the rounding the old format threw away — worth remembering when reading
-sub-µs "regressions" on 1 µs-scale micros).
+sub-µs "regressions" on 1 µs-scale micros). The awk emit is `LC_ALL=C`-pinned
+so a comma-radix locale can't write decimal commas into the CSV.
+
+## 4. `sakshi` must be an explicit `[deps.sakshi]` git block
+
+Cyrius does **not** recursively resolve transitive git deps (patra's README
+states this outright). A dep's *own* `[deps.X]` git block is pulled one level,
+but a git-provided module a dep lists in its **`[deps] stdlib`** is not —
+cyrius looks for it in the *toolchain* stdlib and errors if absent.
+
+libro 2.8.0 lists **`sakshi`** in its `[deps] stdlib` (sakshi is structured
+logging, an external git crate — not a cyrius stdlib module). So a clean,
+single-pass `cyrius deps` — exactly what CI runs — fails:
+
+```
+error: cannot read ./lib/sakshi.cyr
+error: dep libro requires 'sakshi' but it is not in the cyrius stdlib
+4 deps resolved, 1 errors
+```
+
+(A *second* `cyrius deps` appears to succeed only because patra's own
+`[deps.sakshi]` wrote `lib/sakshi.cyr` on the first pass *after* libro's
+stdlib check already failed — a two-pass accident, not a fix. CI runs once.)
+
+Fix (1.8.4): argonaut declares **`[deps.sakshi]` explicitly** in `cyrius.cyml`
+(git, tag `2.4.2`, tracking patra 1.12.9's pin), so sakshi resolves as a
+first-class dep before libro's stdlib validation runs. `sigil` needs no such
+block — it rides libro's own `[deps.sigil]` git block, which cyrius does pull.
+
+Rule of thumb: when a git dep lists another git crate in *its* stdlib, the
+top-level consumer must replicate that `[deps.*]` block. Keep the tag in sync
+with the provider (patra) on every dep bump.

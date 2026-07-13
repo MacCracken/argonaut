@@ -84,11 +84,22 @@ sweep passes 0-fail; benches are a net win with no regressions):
   (`2.389us`, `min=908ns`, `max=10.200ms`); the old integer-`Nus` regex
   matched nothing, silently appending **zero rows**. The parser now
   normalizes every token to microseconds (ns/us/ms/s) with 3-decimal
-  precision, keeping the whole `bench-history.csv` history comparable.
+  precision (`LC_ALL=C`-pinned so a comma-radix locale can't corrupt the CSV),
+  keeping the whole `bench-history.csv` history comparable.
+- **`[deps.sakshi]` now declared explicitly in `cyrius.cyml`** — fixes a
+  clean-checkout CI failure. libro 2.8.0 lists `sakshi` (an external git
+  crate) in its own `[deps] stdlib`, and cyrius does not recursively resolve a
+  git dep referenced that way, so a single-pass `cyrius deps` (what CI runs)
+  died with `dep libro requires 'sakshi' but it is not in the cyrius stdlib`
+  (a second local pass masked it — patra's transitive `[deps.sakshi]` wrote
+  `lib/sakshi.cyr` *after* libro's stdlib check already failed). argonaut now
+  replicates patra's `[deps.sakshi]` block (git, tag `2.4.2`) so the resolve
+  is deterministic in one pass. `sigil` needs no such block (it rides libro's
+  own `[deps.sigil]`). See `docs/architecture/004` §4.
 
 ### Performance
 
-- **x86_64 DCE binary: 1,629,880 → 786,760 bytes (−843,120 / −51.7 %)**,
+- **x86_64 DCE binary: 1,629,880 → 786,776 bytes (−843,104 / −51.7 %)**,
   entirely upstream — libro 2.8.0's thin sigil surface drops the ~13 MB
   x509/RSA/authenticode static the audit chain never linked. 1,683
   unreachable fns NOPed (was 2,970). No argonaut-side change.

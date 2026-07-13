@@ -11,11 +11,17 @@ cyrius = "6.4.62"
 entry = "src/main.cyr"
 output = "build/argonaut"
 
-# `sakshi` and `sigil` are NOT listed here — libro 2.5+ promoted
-# both to external git-pinned deps and patra 1.9+ pulls sakshi as
-# its own dep. They land in lib/ via `cyrius deps` (the transitive
-# resolve) and would otherwise duplicate-define against the
-# version-pinned stdlib copy.
+# `sigil` is NOT listed here — it resolves transitively via libro's own
+# `[deps.sigil]` git block (the thin sha256/ed25519/ML-DSA/hex sub-bundles),
+# which cyrius DOES pull. `sakshi`, however, MUST be declared explicitly as a
+# git dep below: libro 2.8.0 lists `sakshi` in its own `[deps] stdlib` (not as
+# a git dep), and cyrius does not recursively resolve a git dep referenced that
+# way. Without the explicit `[deps.sakshi]` block, a clean single-pass
+# `cyrius deps` (what CI runs) fails with
+#   `dep libro requires 'sakshi' but it is not in the cyrius stdlib`
+# — patra's README mandates exactly this ("Cyrius does not resolve transitive
+# deps, so downstream consumers must replicate this block"). Pin tracks patra
+# 1.12.9's `[deps.sakshi]` = 2.4.2. See docs/architecture/004.
 [deps]
 stdlib = [
     "string",
@@ -55,6 +61,15 @@ stdlib = [
 # src/main.cyr ahead of sigil (6.2.x won't auto-pull a stdlib module
 # referenced only by a transitive git dep). See
 # docs/architecture/003-cyrius-6.2-stdlib-resolution.md.
+
+# Transitive-but-must-be-explicit (see the note above [deps]): libro lists
+# `sakshi` in its stdlib, so the consumer replicates the git block. Declared
+# first so it resolves before libro's stdlib validation runs.
+[deps.sakshi]
+git = "https://github.com/MacCracken/sakshi.git"
+tag = "2.4.2"
+modules = ["dist/sakshi.cyr"]
+
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
 tag = "1.12.9"
