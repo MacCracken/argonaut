@@ -5,7 +5,7 @@ description = "Init system and service manager for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/argonaut"
 language = "cyrius"
-cyrius = "6.2.11"
+cyrius = "6.4.62"
 
 [build]
 entry = "src/main.cyr"
@@ -57,10 +57,10 @@ stdlib = [
 # docs/architecture/003-cyrius-6.2-stdlib-resolution.md.
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.11.2"
+tag = "1.12.9"
 modules = ["dist/patra.cyr"]
 
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
-tag = "2.7.4"
+tag = "2.8.0"
 modules = ["dist/libro.cyr"]

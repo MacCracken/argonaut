@@ -33,17 +33,32 @@ BENCH_OUTPUT=$(./build/argonaut_bench 2>&1 || true)
 echo "${BENCH_OUTPUT}"
 
 # Parse output lines like:
-#   bench_name: 4us avg (min=3us max=153us) [10000 iters]
-echo "${BENCH_OUTPUT}" | grep -E 'avg.*min=.*max=' | while IFS= read -r line; do
-    name=$(echo "${line}" | sed 's/:.*//' | xargs)
-    avg=$(echo "${line}" | sed -n 's/.*: \([0-9]*\)us avg.*/\1/p')
-    min=$(echo "${line}" | sed -n 's/.*min=\([0-9]*\)us.*/\1/p')
-    max=$(echo "${line}" | sed -n 's/.*max=\([0-9]*\)us.*/\1/p')
-
-    if [[ -n "${avg}" && -n "${name}" ]]; then
-        echo "${TIMESTAMP},${LABEL},${name},${avg},${min},${max}" >> "${CSV}"
-    fi
-done
+#   bench_name: 2.389us avg (min=908ns max=12.432us) [10000 iters]
+# Cyrius 6.4.x emits DECIMAL values with mixed units (ns/us/ms); older
+# toolchains emitted integer microseconds (4us). Normalize every token to
+# microseconds (avg_us/min_us/max_us) with 3-decimal precision so rows stay
+# comparable across the whole history regardless of the emitting toolchain.
+echo "${BENCH_OUTPUT}" | LC_ALL=C awk -v ts="${TIMESTAMP}" -v lbl="${LABEL}" '
+    function tous(tok,   v, u) {
+        if (!match(tok, /[0-9.]+/)) { return "" }
+        v = substr(tok, RSTART, RLENGTH) + 0
+        u = tok; gsub(/[0-9. \t]/, "", u)
+        if (u == "ns") { return v / 1000 }
+        if (u == "ms") { return v * 1000 }
+        if (u == "s")  { return v * 1000000 }
+        return v   # "us" or bare
+    }
+    /avg.*min=.*max=/ {
+        name = $0; sub(/:.*/, "", name); gsub(/^[ \t]+|[ \t]+$/, "", name)
+        a = $0; sub(/^.*:[ \t]*/, "", a);  sub(/[ \t]*avg.*/, "", a)
+        mn = $0; sub(/^.*min=/, "", mn);   sub(/[ \t].*/, "", mn)
+        mx = $0; sub(/^.*max=/, "", mx);   sub(/[)].*/, "", mx); gsub(/[ \t]/, "", mx)
+        av = tous(a); mnv = tous(mn); mxv = tous(mx)
+        if (name != "" && av != "" && mnv != "" && mxv != "") {
+            printf "%s,%s,%s,%.3f,%.3f,%.3f\n", ts, lbl, name, av, mnv, mxv
+        }
+    }
+' >> "${CSV}"
 
 echo ""
 echo "Results appended to ${CSV}"

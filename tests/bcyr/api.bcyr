@@ -29,7 +29,6 @@ fn sakshi_span_depth() { return 0; }
 # Audit chain stack (init_new builds an audit log)
 include "lib/chrono.cyr"
 include "lib/thread_local.cyr"
-include "lib/sigil.cyr"
 include "lib/libro.cyr"
 
 include "src/types.cyr"

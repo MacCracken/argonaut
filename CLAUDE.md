@@ -172,12 +172,13 @@ Rationale: argonaut is PID 1 — boot sequencing, dependency resolution, and hea
 - All struct fields are 8 bytes (`i64`), accessed via `load64` / `store64` with offset (or `#derive(accessors)` getters/setters where adopted)
 - Heap allocation via `fl_alloc()` / `fl_free()` (freelist) for data with individual lifetimes
 - Bump allocation via `alloc()` for long-lived data (vec, str internals)
-- Enum values for constants — don't consume `gvar_toks` slots (256 initialized globals limit)
+- Enum values for constants — don't consume `gvar_toks` slots (4,096 initialized globals limit)
 - Heap-allocate large buffers — `var buf[N]` inside a function is **static data** (not stack), bloats the binary, and consecutive calls clobber any returned Str/buf-borrowing values. The build's "large static data (N bytes)" warning is the upstream tell
 - 5.x stdlib lookup helpers (`toml_get`, `toml_get_sections`, …) take **cstr keys**; passing `str_from("…")` silently returns 0. JSON helpers (`json_get`) still take `Str`
 - `break` in while loops with `var` declarations is unreliable — flag + `continue`
 - `match` is reserved; `return;` without value is invalid (use `return 0;`); all `var` declarations are function-scoped
-- Per-compilation-unit limits: 4,096 variables, 1,024 functions, 256 initialized globals, 16,384 fixups (cc5 5.4.2+)
+- Per-compilation-unit limits: 4,096 variables, 1,024 functions, 4,096 initialized globals, 16,384 fixups (cc5 5.4.2+)
+- Counting rule: only a top-level `var NAME = <non-literal>;` (call / identifier / expression initializer) consumes an initialized-globals slot; a bare integer-literal init (`var x = 42;`) takes the static-init fast path and enum members are const-folded, so neither counts. See the cyrius guide's **Global Initializers** section (`docs/guides/cyrius-guide.md` in the cyrius repo)
 - **Patra `json_build/6` shadows stdlib `json_build/1`** — never call stdlib `json_build`; build flat JSON with `str_builder` directly
 
 ## CI / Release

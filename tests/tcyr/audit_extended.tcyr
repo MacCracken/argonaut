@@ -160,7 +160,7 @@ fn main() {
     assert_eq(init_audit_log_persistent(i_off), 0, "init: default config = in-memory only");
     assert(init_audit_log(i_off) != 0, "init: in-memory chain still attached");
     assert_eq(init_audit_flush(i_off), 0, "init: flush no-op when in-memory");
-    init_audit_record(i_off, str_from("svc-a"), EVT_STARTING);
+    init_audit_record(i_off, "svc-a", EVT_STARTING);
     assert_eq(chain_len(init_audit_log(i_off)), 1, "init: record went to chain");
 
     # Opt-in: audit_persist=1, audit_path=<tmp>.
@@ -172,8 +172,8 @@ fn main() {
     var i_on = argonaut_init_new(c_on);
     assert(init_audit_log_persistent(i_on) != 0, "init: persist=1 → wrapper attached");
     assert(init_audit_log(i_on) != 0, "init: chain still reachable via init_audit_log");
-    init_audit_record(i_on, str_from("svc-b"), EVT_STARTING);
-    init_audit_record(i_on, str_from("svc-b"), EVT_STARTED);
+    init_audit_record(i_on, "svc-b", EVT_STARTING);
+    init_audit_record(i_on, "svc-b", EVT_STARTED);
     assert_eq(chain_len(init_audit_log(i_on)), 2, "init: persistent records grow chain");
     init_audit_flush(i_on);
     audit_log_close_persistent(init_audit_log_persistent(i_on));

@@ -24,7 +24,6 @@ include "lib/freelist.cyr"
 # Libro dependencies
 include "lib/chrono.cyr"
 include "lib/thread_local.cyr"
-include "lib/sigil.cyr"
 
 # Libro core chain modules
 include "lib/libro.cyr"

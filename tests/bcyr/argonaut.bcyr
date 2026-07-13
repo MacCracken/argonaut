@@ -32,7 +32,6 @@ fn sakshi_span_depth() { return 0; }
 # Libro dependencies
 include "lib/chrono.cyr"
 include "lib/thread_local.cyr"
-include "lib/sigil.cyr"
 
 # Libro core chain modules
 include "lib/libro.cyr"
@@ -541,7 +540,7 @@ fn main() {
     # --- Audit logging ---
 
     println("\nAudit logging:");
-    var alog = audit_log_new();
+    var alog = argonaut_audit_log_new();
     var b29 = bench_new("audit_log_record");
     _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {

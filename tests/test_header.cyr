@@ -22,7 +22,6 @@ include "lib/fnptr.cyr"
 include "lib/freelist.cyr"
 include "lib/chrono.cyr"
 include "lib/thread_local.cyr"
-include "lib/sigil.cyr"
 
 # Sakshi stubs for tests — avoids loading full sakshi (saves string buffer)
 fn sakshi_info(msg, len) { return 0; }

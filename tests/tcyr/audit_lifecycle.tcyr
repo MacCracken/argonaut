@@ -22,7 +22,6 @@ include "lib/freelist.cyr"
 # Libro dependencies
 include "lib/chrono.cyr"
 include "lib/thread_local.cyr"
-include "lib/sigil.cyr"
 
 # Sakshi stubs
 fn sakshi_info(msg, len) { return 0; }
@@ -42,6 +41,7 @@ include "src/types.cyr"
 include "src/boot.cyr"
 include "src/services.cyr"
 include "src/process_mgmt.cyr"
+include "src/resolver.cyr"
 include "src/health.cyr"
 include "src/edge_boot.cyr"
 include "src/notify.cyr"
@@ -49,6 +49,7 @@ include "src/security.cyr"
 include "src/systemd.cyr"
 include "src/tmpfiles.cyr"
 include "src/audit.cyr"
+include "src/audit_ext.cyr"
 include "src/init.cyr"
 
 fn main() {

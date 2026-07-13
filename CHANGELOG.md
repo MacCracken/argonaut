@@ -7,6 +7,106 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.8.4] — 2026-07-13
+
+**Toolchain pin bump to cyrius 6.4.62 + dependency refresh to the latest
+tags, with the `lib/` snapshot deleted and repopulated from scratch.**
+Moves the cyrius pin **6.2.11 → 6.4.62** (`cyrius.cyml` +
+`qemu/helpers/cyrius.cyml`) and the git-pinned siblings to latest:
+**patra 1.11.2 → 1.12.9**, **libro 2.7.4 → 2.8.0**. libro 2.8.0 pulls a
+**thin sigil surface** (sha256 + ed25519 + ML-DSA + hex sub-bundles)
+instead of the monolithic `dist/sigil.cyr`, advancing **sigil 3.7.14 →
+3.11.1** and **sakshi 2.2.3 → 2.4.2** while **dropping agnosys** (1.3.2)
+from the dependency graph entirely. `lib/` was removed and rebuilt via
+`cyrius deps`; `cyrius.lock` is now **54 verified, 0 failed** (was 49).
+
+The dominant effect is a **51.7 % smaller binary** — the thin sigil surface
+drops sigil's x509/RSA/authenticode path (whose bignum tables carried a
+~13 MB static `.bss` footprint the audit chain never used). Several
+consumer-side migrations were required for the 6.4.62 toolchain and the new
+dep graph (the binary built clean once these landed; the full 28-suite test
+sweep passes 0-fail; benches are a net win with no regressions):
+
+### Changed
+
+- **`[package].cyrius` pin `6.2.11` → `6.4.62`** in `cyrius.cyml` and
+  `qemu/helpers/cyrius.cyml`, clearing the toolchain drift warning.
+- **`[deps.patra]` `1.11.2` → `1.12.9`; `[deps.libro]` `2.7.4` → `2.8.0`**
+  (both latest). libro 2.8.0 resolves the **thin sigil sub-bundles**
+  (`sigil_sha256` / `sigil_sha_ni` / `sigil-mldsa` / `sigil_hex`) rather
+  than the monolithic `dist/sigil.cyr`; transitive sigil advances
+  **3.7.14 → 3.11.1**, sakshi **2.2.3 → 2.4.2**, and **agnosys is no longer
+  in the graph** (its `ERR_IO`/`ERR_UNKNOWN` duplicate-symbol and
+  `run_capture` arity warnings are gone with it).
+- **Removed the monolithic `include "lib/sigil.cyr"` from 10 test/bench
+  files** — 6 self-contained suites (`audit_a`, `audit_b`, `audit_lifecycle`,
+  `cc3_ptr_regression`, `cc3_readfile_cap`, `parity`), both benches
+  (`argonaut.bcyr`, `api.bcyr`), the **shared `tests/test_header.cyr`** (used
+  by ~21 suites), and the bench-gate entry point **`src/bench_main.cyr`**
+  (built by `scripts/bench-history.sh`). None call `sigil_*` directly — sigil
+  is used only transitively via libro, whose manifest now resolves the thin
+  sub-bundles. The explicit monolith include dragged the ~13 MB static into
+  each test/bench binary and collided with the thin bundle (234 `duplicate fn`
+  warnings per file → 8 residual sakshi dups; large-static warning
+  eliminated). Notably it made the **bench-gate binary 14.3 MB** with a
+  last-wins duplicated crypto core; the thin binary is ~791 KB, so the
+  recorded 1.8.4 bench row now measures the same code the production `main.cyr`
+  binary runs.
+
+### Fixed
+
+- **Three test suites missing `src/resolver.cyr` + `src/audit_ext.cyr`
+  includes** (`audit_lifecycle`, `parity`, `cc3_ptr_regression`).
+  `health.cyr` (via `resolve_host_ipv4` / `write_ipv4_octets`) and
+  `init.cyr` (via `audit_log_*_persistent` / `pal_chain`) referenced those
+  modules, but the suites omitted them. Under 6.2.11 the call sites were
+  treated as unreachable (warnings); **cyrius 6.4.62's stricter
+  reachability analysis flags them as reachable → hard compile error**
+  (*refusing to emit binary with N reachable undefined functions*). Added
+  in the documented order (resolver before health, audit_ext after audit).
+- **`tests/tcyr/audit_extended.tcyr` passed a `Str` where a cstr was
+  expected.** `init_audit_record(init, service, event_type)` (and the
+  `audit_log_record[_persistent]` it dispatches to) take **service as a
+  cstr** — every production caller in `src/init.cyr` passes
+  `str_data(...)`. Three call sites wrapped the argument in `str_from(...)`,
+  yielding a `Str` pointer that `str_from` then re-read as a C string →
+  garbage service name. Latent since 1.5.3; **exposed by 6.4.62** when the
+  garbage bytes happened to include a `'`, producing a malformed
+  `INSERT … VALUES` and `PATRA_ERR_SYNTAX` (patra rejected the audit
+  write; reopen replayed 0 entries). Fixed to pass cstr literals.
+- **`tests/bcyr/argonaut.bcyr` called the pre-1.6.1 `audit_log_new()`.**
+  argonaut renamed its constructor to `argonaut_audit_log_new()` in 1.6.1;
+  the bench kept the old name, which silently resolved to a shadow symbol
+  in the sigil monolith. Removing the monolith exposed the undefined
+  reference — corrected to `argonaut_audit_log_new()`.
+- **`scripts/bench-history.sh` parser rewritten for the 6.4.x bench output
+  format.** Cyrius 6.4.x emits **decimal** values with **mixed units**
+  (`2.389us`, `min=908ns`, `max=10.200ms`); the old integer-`Nus` regex
+  matched nothing, silently appending **zero rows**. The parser now
+  normalizes every token to microseconds (ns/us/ms/s) with 3-decimal
+  precision, keeping the whole `bench-history.csv` history comparable.
+
+### Performance
+
+- **x86_64 DCE binary: 1,629,880 → 786,760 bytes (−843,120 / −51.7 %)**,
+  entirely upstream — libro 2.8.0's thin sigil surface drops the ~13 MB
+  x509/RSA/authenticode static the audit chain never linked. 1,683
+  unreachable fns NOPed (was 2,970). No argonaut-side change.
+- **Benchmark gate `1.8.4-cyrius-6.4.62` vs `1.8.3-cyrius-6.2.11`: net win,
+  no regressions.** Heavy micros improved materially:
+  `resolve_order_chain_100` 225 → 185 µs (−18 %),
+  `resolve_order_chain_50` 99 → 74 µs (−25 %),
+  `init_new_desktop` 35 → 25 µs (−29 %),
+  `generate_tmpfile_cmds_20` 31 → 14.5 µs (−53 %),
+  `resolve_waves_chain_20` 67 → 56 µs, `mark_all_steps_complete` 53 → 45 µs;
+  `audit_log_record` (sha256) 8 → 7.8 µs. The only upticks are sub-µs on
+  1 µs-scale micros (`health_tracker_record`, `backoff_delay_compute`,
+  `state_transition_check`, `on_service_crash`, `stats_desktop`) — within the
+  ±2 µs noise floor and partly an artifact of the historical integer-rounded
+  rows vs the new decimal precision — not regressions. The gate is measured on
+  the thin `src/bench_main.cyr` binary (~791 KB, matching production). See
+  `bench-history.csv`.
+
 ## [1.8.3] — 2026-06-15
 
 **Toolchain pin bump to cyrius 6.2.11 + dependency refresh to the latest

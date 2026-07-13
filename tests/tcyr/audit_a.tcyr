@@ -17,7 +17,6 @@ include "lib/freelist.cyr"
 # Libro dependencies
 include "lib/chrono.cyr"
 include "lib/thread_local.cyr"
-include "lib/sigil.cyr"
 
 # Sakshi stubs for tests
 fn sakshi_info(msg, len) { return 0; }
