@@ -15,9 +15,12 @@ fn main() {
     assert_eq(payload(restart_policy_parse(str_from("never"))), RESTART_NEVER, "rp never");
     # Round-trip through _str for every member — this is the property that
     # keeps the two directions from drifting apart.
-    assert_eq(payload(restart_policy_parse(str_from(restart_policy_str(RESTART_ALWAYS)))), RESTART_ALWAYS, "rp roundtrip always");
-    assert_eq(payload(restart_policy_parse(str_from(restart_policy_str(RESTART_ON_FAILURE)))), RESTART_ON_FAILURE, "rp roundtrip on-failure");
-    assert_eq(payload(restart_policy_parse(str_from(restart_policy_str(RESTART_NEVER)))), RESTART_NEVER, "rp roundtrip never");
+    var rt_a = restart_policy_parse(str_from(restart_policy_str(RESTART_ALWAYS)));
+    assert_eq(payload(rt_a), RESTART_ALWAYS, "rp roundtrip always");
+    var rt_f = restart_policy_parse(str_from(restart_policy_str(RESTART_ON_FAILURE)));
+    assert_eq(payload(rt_f), RESTART_ON_FAILURE, "rp roundtrip on-failure");
+    var rt_n = restart_policy_parse(str_from(restart_policy_str(RESTART_NEVER)));
+    assert_eq(payload(rt_n), RESTART_NEVER, "rp roundtrip never");
 
     # An unrecognised string must ERROR, not fall back to a default policy —
     # a typo in config has to surface, not silently become RESTART_ALWAYS.
@@ -79,7 +82,7 @@ fn main() {
 
     var i2 = argonaut_init_new(c2);
 
-    # Dependency not yet run: the dependent must be refused.
+    # Dependency has never run: the dependent must be refused.
     assert_eq(init_set_service_state(i2, "os-user", STATE_STARTING), 0, "dep: unstarted oneshot blocks");
 
     # Run the dependency to completion, then the dependent may start.
