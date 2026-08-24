@@ -23,6 +23,16 @@ fn boot_mode_str(mode) {
     return "unknown";
 }
 
+# Inverse of boot_mode_str. See restart_policy_parse for the rationale.
+fn boot_mode_parse(s) {
+    if (str_eq_cstr(s, "server") == 1)   { return Ok(BOOT_SERVER); }
+    if (str_eq_cstr(s, "desktop") == 1)  { return Ok(BOOT_DESKTOP); }
+    if (str_eq_cstr(s, "minimal") == 1)  { return Ok(BOOT_MINIMAL); }
+    if (str_eq_cstr(s, "edge") == 1)     { return Ok(BOOT_EDGE); }
+    if (str_eq_cstr(s, "recovery") == 1) { return Ok(BOOT_RECOVERY); }
+    return Err(EINVAL);
+}
+
 # =========================================================================
 # Boot stages
 # =========================================================================
@@ -122,6 +132,25 @@ fn restart_policy_str(p) {
     return "unknown";
 }
 
+# Inverse of restart_policy_str. Takes a Str, returns Ok(policy) or
+# Err(EINVAL).
+#
+# Every enum here had a `*_str` and no inverse, so each consumer that reads
+# a service definition out of config had to hand-roll its own string ->
+# enum mapping — which is how two components come to disagree about what
+# "on-failure" means. Same reasoning agnostik applied at its 1.4.0 F-018.
+#
+# Exact match, no coercion: no case-folding, no trimming, no aliases. An
+# unrecognised string is an error, not a silent fallback to a default
+# policy, so a typo in config surfaces instead of quietly becoming
+# RESTART_ALWAYS.
+fn restart_policy_parse(s) {
+    if (str_eq_cstr(s, "always") == 1)     { return Ok(RESTART_ALWAYS); }
+    if (str_eq_cstr(s, "on-failure") == 1) { return Ok(RESTART_ON_FAILURE); }
+    if (str_eq_cstr(s, "never") == 1)      { return Ok(RESTART_NEVER); }
+    return Err(EINVAL);
+}
+
 # =========================================================================
 # Restart config
 # =========================================================================
@@ -189,6 +218,15 @@ fn health_check_type_str(t) {
     return "unknown";
 }
 
+# Inverse of health_check_type_str. See restart_policy_parse for rationale.
+fn health_check_type_parse(s) {
+    if (str_eq_cstr(s, "http") == 1)          { return Ok(HC_HTTP_GET); }
+    if (str_eq_cstr(s, "tcp") == 1)           { return Ok(HC_TCP_CONNECT); }
+    if (str_eq_cstr(s, "command") == 1)       { return Ok(HC_COMMAND); }
+    if (str_eq_cstr(s, "process-alive") == 1) { return Ok(HC_PROCESS_ALIVE); }
+    return Err(EINVAL);
+}
+
 # =========================================================================
 # Health check
 # =========================================================================
@@ -212,6 +250,25 @@ fn health_check_new(check_type, target, port, interval_ms, timeout_ms, retries) 
     store64(hc + 40, retries);
     return hc;
 }
+
+# HealthCheck accessors (1.10.0). argonaut read these fields by raw offset
+# (src/health.cyr:181-184) and exposed nothing, so a consumer building or
+# inspecting a health check had to hardcode the layout too. Same reasoning
+# as the svc_def_set_* setters.
+#
+# ⚠ Prefixed `svc_hc_`, NOT `hc_`. agnostik already exports `hc_retries`,
+# `hc_timeout`, `hc_interval` etc. for its OWN health_check struct, which
+# has a different layout (its retries live at +24, argonaut's at +40).
+# Every consumer that links both — kybernet does — would get whichever
+# definition happened to come last in the include chain, silently reading
+# the wrong field. Same collision class as agnostik's namespaced
+# STIK_ERR_* errors.
+fn svc_hc_type(hc)        { return load64(hc); }
+fn svc_hc_target(hc)      { return load64(hc + 8); }
+fn svc_hc_port(hc)        { return load64(hc + 16); }
+fn svc_hc_interval_ms(hc) { return load64(hc + 24); }
+fn svc_hc_timeout_ms(hc)  { return load64(hc + 32); }
+fn svc_hc_retries(hc)     { return load64(hc + 40); }
 
 # =========================================================================
 # Ready check
@@ -252,6 +309,14 @@ fn service_type_str(t) {
     if (t == SVC_FORKING) { return "forking"; }
     if (t == SVC_ONESHOT) { return "oneshot"; }
     return "unknown";
+}
+
+# Inverse of service_type_str. See restart_policy_parse for the rationale.
+fn service_type_parse(s) {
+    if (str_eq_cstr(s, "simple") == 1)  { return Ok(SVC_SIMPLE); }
+    if (str_eq_cstr(s, "forking") == 1) { return Ok(SVC_FORKING); }
+    if (str_eq_cstr(s, "oneshot") == 1) { return Ok(SVC_ONESHOT); }
+    return Err(EINVAL);
 }
 
 # =========================================================================
@@ -688,6 +753,20 @@ fn svc_def_log_config(sd)    { return load64(sd + 128); }
 fn svc_def_seccomp(sd)       { return load64(sd + 144); }
 fn svc_def_landlock(sd)      { return load64(sd + 152); }
 fn svc_def_capabilities(sd)  { return load64(sd + 160); }
+
+# Field setters (1.10.0). Without these a consumer building a
+# ServiceDefinition from config had to write raw `store64(sd + 56, ...)`
+# offsets into its own source — which puts argonaut's struct layout into
+# every consumer and turns any future reordering into a silent
+# wrong-field write. kybernet's config parser uses these.
+fn svc_def_set_desc(sd, d)            { store64(sd + 8, d); return sd; }
+fn svc_def_set_binary(sd, b)          { store64(sd + 16, b); return sd; }
+fn svc_def_set_restart_policy(sd, p)  { store64(sd + 56, p); return sd; }
+fn svc_def_set_restart_config(sd, rc) { store64(sd + 64, rc); return sd; }
+fn svc_def_set_health_check(sd, hc)   { store64(sd + 72, hc); return sd; }
+fn svc_def_set_enabled(sd, on)        { store64(sd + 88, on); return sd; }
+fn svc_def_set_service_type(sd, t)    { store64(sd + 96, t); return sd; }
+fn svc_def_set_pid_file(sd, p)        { store64(sd + 112, p); return sd; }
 
 fn svc_def_set_seccomp(sd, cfg)      { store64(sd + 144, cfg); return sd; }
 fn svc_def_set_landlock(sd, cfg)     { store64(sd + 152, cfg); return sd; }

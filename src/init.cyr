@@ -233,14 +233,87 @@ fn init_failed_steps(init) {
 # Service state management
 # =========================================================================
 
+# ⚠ `name` here is a **cstr**, not a boxed Str. The service map is keyed by
+# `str_data(svc_def_name(sd))` (see argonaut_init_new), and every init_*
+# function that takes a service name inherits that: init_get_service,
+# init_start_service, init_restart_service, init_stop_service,
+# init_set_service_state.
+#
+# This matters because `resolve_service_waves` returns waves of **boxed
+# Str** (it pushes `str_from(key)`), so a consumer walking waves into
+# init_start_service MUST call `str_data()` on the way. Passing the Str box
+# straight through makes `map_get` miss silently and every start returns -1
+# — kybernet shipped exactly that latent bug until its 1.5.0. argonaut's own
+# call sites convert (see resolve_service_waves' own `str_data(vec_get(...))`).
 fn init_get_service(init, name) {
     return map_get(load64(init + 16), name);
+}
+
+# Every ServiceDefinition argonaut has registered — defaults for the boot
+# mode PLUS anything the config added — in registration order.
+#
+# Added 1.10.0. Without it a consumer could only see `config_services(cfg)`,
+# i.e. the config half, so resolving startup waves over that vec silently
+# omitted every default service. kybernet did exactly that: its
+# start_services called `resolve_service_waves(config_services(config))`,
+# which meant the defaults argonaut had just registered were never started.
+fn init_service_defs(init) {
+    var out = vec_new();
+    var svc_map = load64(init + 16);
+    if (svc_map == 0) { return out; }
+    var keys = map_keys(svc_map);
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        var ms = map_get(svc_map, vec_get(keys, i));
+        if (ms != 0) { vec_push(out, managed_svc_def(ms)); }
+    }
+    return out;
+}
+
+# The registered service names, as **cstrs** — safe to hand straight to
+# init_start_service and friends.
+fn init_service_names(init) {
+    var svc_map = load64(init + 16);
+    if (svc_map == 0) { return vec_new(); }
+    return map_keys(svc_map);
 }
 
 fn init_get_service_state(init, name) {
     var ms = init_get_service(init, name);
     if (ms == 0) { return 0 - 1; }
     return managed_svc_state(ms);
+}
+
+# Is dependency `dep_name` (a cstr) satisfied?
+#
+# A long-lived service satisfies a dependency by RUNNING. A **oneshot**
+# never will: init_start_oneshot waits for the process, then sets
+# STATE_STOPPED on exit 0 (STATE_FAILED otherwise). So before 1.10.0 the
+# check `dep_state != STATE_RUNNING` meant **nothing could ever depend on a
+# oneshot** — the dependent's transition to STARTING was refused forever
+# and init_start_service returned -1 with no diagnostic. Oneshots are the
+# natural way to express "run this migration//setup step before X", so this
+# made the whole depends_on feature unusable for the case it exists for.
+#
+# A oneshot counts as satisfied when it has actually run and exited
+# cleanly: STATE_STOPPED *and* started_at != 0. The started_at test is what
+# separates "completed successfully" from "never started" — both sit in
+# STATE_STOPPED. A failed oneshot lands in STATE_FAILED and is correctly
+# not satisfying. This matches systemd's RemainAfterExit semantics for
+# ordering.
+fn _dep_satisfied(init, dep_name) {
+    var dep_ms = init_get_service(init, dep_name);
+    if (dep_ms == 0) { return 0; }
+
+    var dep_state = managed_svc_state(dep_ms);
+    if (dep_state == STATE_RUNNING) { return 1; }
+
+    if (dep_state == STATE_STOPPED) {
+        var dep_sd = managed_svc_def(dep_ms);
+        if (svc_def_service_type(dep_sd) == SVC_ONESHOT) {
+            if (managed_svc_started(dep_ms) != 0) { return 1; }
+        }
+    }
+    return 0;
 }
 
 fn init_set_service_state(init, name, state) {
@@ -256,8 +329,7 @@ fn init_set_service_state(init, name, state) {
         var deps = svc_def_deps(sd);
         for (var i = 0; i < vec_len(deps); i = i + 1) {
             var dep_name = str_data(vec_get(deps, i));
-            var dep_state = init_get_service_state(init, dep_name);
-            if (dep_state != STATE_RUNNING) { return 0; }
+            if (_dep_satisfied(init, dep_name) == 0) { return 0; }
         }
     }
 

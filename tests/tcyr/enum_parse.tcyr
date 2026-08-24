@@ -1,0 +1,93 @@
+# enum_parse.tcyr — string -> enum inverses (1.10.0) + service-set accessors
+#
+# Every enum had a `*_str` and no inverse, so each consumer reading a
+# service definition out of config hand-rolled its own mapping. Same
+# reasoning agnostik applied at 1.4.0 F-018.
+include "tests/test_header.cyr"
+
+fn main() {
+    alloc_init();
+    test_group("enum-parse");
+
+    # --- restart policy round-trips ---
+    assert_eq(payload(restart_policy_parse(str_from("always"))), RESTART_ALWAYS, "rp always");
+    assert_eq(payload(restart_policy_parse(str_from("on-failure"))), RESTART_ON_FAILURE, "rp on-failure");
+    assert_eq(payload(restart_policy_parse(str_from("never"))), RESTART_NEVER, "rp never");
+    # Round-trip through _str for every member — this is the property that
+    # keeps the two directions from drifting apart.
+    assert_eq(payload(restart_policy_parse(str_from(restart_policy_str(RESTART_ALWAYS)))), RESTART_ALWAYS, "rp roundtrip always");
+    assert_eq(payload(restart_policy_parse(str_from(restart_policy_str(RESTART_ON_FAILURE)))), RESTART_ON_FAILURE, "rp roundtrip on-failure");
+    assert_eq(payload(restart_policy_parse(str_from(restart_policy_str(RESTART_NEVER)))), RESTART_NEVER, "rp roundtrip never");
+
+    # An unrecognised string must ERROR, not fall back to a default policy —
+    # a typo in config has to surface, not silently become RESTART_ALWAYS.
+    assert(is_err_result(restart_policy_parse(str_from("Always"))) == 1, "rp rejects case variant");
+    assert(is_err_result(restart_policy_parse(str_from("on_failure"))) == 1, "rp rejects underscore");
+    assert(is_err_result(restart_policy_parse(str_from(""))) == 1, "rp rejects empty");
+    assert(is_err_result(restart_policy_parse(str_from("unknown"))) == 1, "rp rejects _str fallback");
+
+    # --- service type ---
+    assert_eq(payload(service_type_parse(str_from("simple"))), SVC_SIMPLE, "st simple");
+    assert_eq(payload(service_type_parse(str_from("forking"))), SVC_FORKING, "st forking");
+    assert_eq(payload(service_type_parse(str_from("oneshot"))), SVC_ONESHOT, "st oneshot");
+    assert(is_err_result(service_type_parse(str_from("Simple"))) == 1, "st rejects case variant");
+
+    # --- boot mode ---
+    assert_eq(payload(boot_mode_parse(str_from("server"))), BOOT_SERVER, "bm server");
+    assert_eq(payload(boot_mode_parse(str_from("desktop"))), BOOT_DESKTOP, "bm desktop");
+    assert_eq(payload(boot_mode_parse(str_from("minimal"))), BOOT_MINIMAL, "bm minimal");
+    assert_eq(payload(boot_mode_parse(str_from("edge"))), BOOT_EDGE, "bm edge");
+    assert_eq(payload(boot_mode_parse(str_from("recovery"))), BOOT_RECOVERY, "bm recovery");
+    assert(is_err_result(boot_mode_parse(str_from("EDGE"))) == 1, "bm rejects case variant");
+
+    # --- health check type ---
+    assert_eq(payload(health_check_type_parse(str_from("http"))), HC_HTTP_GET, "hc http");
+    assert_eq(payload(health_check_type_parse(str_from("tcp"))), HC_TCP_CONNECT, "hc tcp");
+    assert_eq(payload(health_check_type_parse(str_from("command"))), HC_COMMAND, "hc command");
+    assert_eq(payload(health_check_type_parse(str_from("process-alive"))), HC_PROCESS_ALIVE, "hc process-alive");
+    assert(is_err_result(health_check_type_parse(str_from("https"))) == 1, "hc rejects unknown");
+
+    # --- registered-service accessors (1.10.0) ---
+    # init_service_defs must cover the DEFAULTS, not just config services —
+    # that gap is why kybernet's start_services never started anything.
+    var cfg = argonaut_config_default();
+    var init = argonaut_init_new(cfg);
+    var defs = init_service_defs(init);
+    var names = init_service_names(init);
+    assert_eq(vec_len(defs), vec_len(names), "defs and names agree in count");
+    assert(vec_len(defs) > 0, "defaults are registered and visible");
+
+    # And the names must be usable as-is against the cstr-keyed init_* API:
+    # a boxed Str here would miss the map and return 0.
+    var n0 = vec_get(names, 0);
+    assert(init_get_service(init, n0) != 0, "name from init_service_names resolves");
+
+    # --- a COMPLETED ONESHOT satisfies a dependency (1.10.0) ---
+    # Before 1.10.0 the dep check was `dep_state != STATE_RUNNING`, and a
+    # oneshot ends in STATE_STOPPED — so nothing could ever depend on one,
+    # and the dependent's start returned -1 with no diagnostic. Oneshots are
+    # exactly how you express "run this setup step before X", so depends_on
+    # was unusable for its main use case.
+    var c2 = argonaut_config_default();
+    var dep = svc_def_new(str_from("os-dep"), str_from("d"), str_from("/bin/true"));
+    svc_def_set_service_type(dep, SVC_ONESHOT);
+    var user = svc_def_new(str_from("os-user"), str_from("u"), str_from("/bin/true"));
+    svc_def_set_service_type(user, SVC_ONESHOT);
+    vec_push(svc_def_deps(user), str_from("os-dep"));
+    vec_push(config_services(c2), dep);
+    vec_push(config_services(c2), user);
+
+    var i2 = argonaut_init_new(c2);
+
+    # Dependency not yet run: the dependent must be refused.
+    assert_eq(init_set_service_state(i2, "os-user", STATE_STARTING), 0, "dep: unstarted oneshot blocks");
+
+    # Run the dependency to completion, then the dependent may start.
+    assert_eq(init_start_service(i2, "os-dep"), 0, "dep: oneshot completes (returns 0)");
+    assert_eq(init_get_service_state(i2, "os-dep"), STATE_STOPPED, "dep: oneshot ends STOPPED");
+    assert_eq(init_set_service_state(i2, "os-user", STATE_STARTING), 1, "dep: completed oneshot satisfies");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

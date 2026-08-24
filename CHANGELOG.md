@@ -7,6 +7,87 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.10.0] — 2026-08-24
+
+**Config-driven service definitions become usable from outside argonaut**,
+and two defects that only surface once a consumer actually starts services
+are fixed. Additive; no layout change. Suite 828 → 860 assertions across 30
+suites, 0 failures.
+
+Driven by kybernet 1.5.0, which is the first release to parse services out
+of JSON and therefore the first to execute argonaut's start path with
+non-default services at all.
+
+### Fixed — a completed oneshot could never satisfy a dependency
+
+`init_set_service_state(..., STATE_STARTING)` required every dependency to
+be `STATE_RUNNING`. A oneshot never is: `init_start_oneshot` waits for the
+process and then sets `STATE_STOPPED` on exit 0. So **nothing could ever
+depend on a oneshot** — the dependent's transition was refused, and
+`init_start_service` returned -1 with no diagnostic. Oneshots are precisely
+how you express "run this migration/setup step before X", so `depends_on`
+was unusable for the case it exists for.
+
+A oneshot now satisfies a dependency when it has actually run and exited
+cleanly: `STATE_STOPPED` **and** `started_at != 0`. The `started_at` test is
+what separates "completed successfully" from "never started" — both sit in
+`STATE_STOPPED`. A failed oneshot lands in `STATE_FAILED` and correctly does
+not satisfy. Matches systemd's `RemainAfterExit` ordering semantics.
+
+Found by kybernet's QEMU harness the first time it booted with a config
+service depending on a oneshot.
+
+### Added — enum `*_parse` inverses
+
+`restart_policy_parse`, `service_type_parse`, `boot_mode_parse`,
+`health_check_type_parse`. Every enum had a `*_str` and no inverse, so each
+consumer reading a service definition out of config hand-rolled its own
+string→enum mapping — which is how two components come to disagree about
+what `"on-failure"` means. Same reasoning agnostik applied at its 1.4.0
+F-018.
+
+Exact match, no coercion: no case-folding, no trimming, no aliases. An
+unrecognised string returns `Err(EINVAL)` rather than falling back to a
+default, so a typo in config surfaces instead of silently becoming
+`RESTART_ALWAYS`.
+
+### Added — service-set accessors
+
+- **`init_service_defs(init)`** — every registered `ServiceDefinition`: the
+  boot-mode defaults **plus** anything config added. Without it a consumer
+  could only see `config_services(cfg)`, i.e. the config half, so resolving
+  startup waves over that vec silently omitted every default service.
+  kybernet did exactly that, which is why its mode defaults were never
+  started.
+- **`init_service_names(init)`** — the registered names, as cstrs, safe to
+  hand straight to `init_start_service`.
+
+### Added — field accessors, so consumers stop hardcoding struct offsets
+
+- `svc_def_set_desc` / `_binary` / `_restart_policy` / `_restart_config` /
+  `_health_check` / `_enabled` / `_service_type` / `_pid_file`.
+- `svc_hc_type` / `_target` / `_port` / `_interval_ms` / `_timeout_ms` /
+  `_retries` for `HealthCheck`, which argonaut previously read by raw offset
+  (`src/health.cyr`) and exposed not at all.
+
+  ⚠ Prefixed **`svc_hc_`**, not `hc_`: agnostik already exports `hc_retries`,
+  `hc_timeout` and `hc_interval` for its *own* health_check struct, whose
+  layout differs (its retries live at +24, argonaut's at +40). A consumer
+  linking both — kybernet does — would otherwise get whichever definition
+  came last in the include chain and silently read the wrong field. Same
+  collision class as agnostik's namespaced `STIK_ERR_*`.
+
+### Documented
+
+`init_get_service` and friends take a **cstr**, because the service map is
+keyed by `str_data(svc_def_name(sd))` — while `resolve_service_waves`
+returns waves of boxed **Str**. A consumer walking waves into
+`init_start_service` must `str_data()` on the way; passing the box makes
+`map_get` miss silently and every start return -1. kybernet shipped exactly
+that latent bug until its 1.5.0.
+
+---
+
 ## [1.9.0] — 2026-08-24
 
 **Pre-exec hook + per-service security policy accessors.** Additive, no
