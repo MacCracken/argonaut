@@ -7,6 +7,39 @@ work only.
 
 ---
 
+## Security enforcement — filed by the 2026-08-24 P(-1) audit
+
+**seccomp / Landlock / capabilities are modelled but NOT enforced.**
+`src/security.cyr` contains zero syscalls: it renders description strings
+and builds one `setpriv` SafeCommand that nothing executes. `svc_def_new`
+stores `0` for all three fields and no spawn path reads them. Every service
+`fork_exec_service` starts inherits PID 1's full root privileges.
+`docs/architecture/feature-gaps.md` claimed this was "Implemented (v0.9.0)
+… + agnosys integration" until 1.8.6 corrected it — wrong twice over, since
+agnosys was dropped from the dependency graph at 1.8.4.
+
+### Scope
+
+- [ ] **`PR_SET_NO_NEW_PRIVS` + seccomp BPF filter** applied in the
+      `fork_exec_service` child between `reset_child_signal_mask()` and
+      `sys_execve`. Needs a BPF program assembler; `SeccompConfig` already
+      carries the allow/deny lists.
+- [ ] **Landlock ruleset** (`landlock_create_ruleset` /
+      `landlock_add_rule` / `landlock_restrict_self`) from the existing
+      `LandlockConfig`.
+- [ ] **Capability drop + uid/gid switch.** Note the ordering trap: setgid
+      and setgroups must precede setuid, or the drop is incomplete. There
+      is currently no uid/gid field on `ServiceDef` — it needs one.
+- [ ] **cgroup membership** as the PID-identity invariant, closing the
+      PID-reuse window that audit MEDIUM-9 only narrows. Prerequisite for
+      trusting a PID across a signal.
+- [ ] Regression tests per mechanism, plus a qemu-harness assertion that a
+      spawned service genuinely cannot perform a denied syscall.
+
+Until this lands, **do not describe argonaut as sandboxing services.**
+
+---
+
 ## Current — v1.6.3 (shipped 2026-05-11) — 1.6.x arc CLOSED
 
 L3 end-to-end lands via `qemu/helpers/l3-helper.cyr` — a 12 KB

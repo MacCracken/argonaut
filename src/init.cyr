@@ -492,7 +492,12 @@ fn init_reap_services(init) {
     # this catches anything reparented to us via PR_SET_CHILD_SUBREAPER
     # (or our PID-1 status, when graduated).
     proc_table_reap_orphans();
-    var results = vec_new();
+
+    # 2026-08-24 audit HIGH-2: allocate the results vec LAZILY. The PID-1
+    # supervisor loop calls this every 100 ms and discards the return, so an
+    # unconditional vec_new() here was pure bump-arena growth in a process
+    # that never exits. Idle ticks now allocate nothing.
+    var results = 0;
 
     for (var i = 0; i < vec_len(exited); i = i + 1) {
         var pair = vec_get(exited, i);
@@ -516,10 +521,12 @@ fn init_reap_services(init) {
             store64(result, load64(pair));
             store64(result + 8, code);
             store64(result + 16, action);
+            if (results == 0) { results = vec_new(); }
             vec_push(results, result);
         }
     }
 
+    if (results == 0) { return _reap_empty_vec(); }
     return results;
 }
 

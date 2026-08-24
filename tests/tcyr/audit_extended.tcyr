@@ -33,14 +33,20 @@ fn main() {
     assert(root != 0, "merkle: root non-null for non-empty chain");
     assert_eq(str_len(root), 64, "merkle: hex SHA-256 root is 64 chars");
 
-    # Inclusion proof for each entry verifies.
+    # Inclusion proof for each entry verifies against the chain's own root
+    # and the entry's own hash. (1.8.6: the verify wrappers take both
+    # bindings explicitly — see audit-2026-08-24-medium2 in
+    # tests/tcyr/audit_findings.tcyr for why the 1-arg form was unsound.)
+    var ents = chain_entries(chain);
     var proof0 = audit_log_inclusion_proof(chain, 0);
     assert(proof0 != 0, "merkle: inclusion proof for entry 0 builds");
-    assert_eq(audit_log_verify_inclusion(proof0), 1, "merkle: inclusion 0 verifies");
+    assert_eq(audit_log_verify_inclusion(proof0, root, entry_hash(vec_get(ents, 0))), 1,
+      "merkle: inclusion 0 verifies");
 
     var proof3 = audit_log_inclusion_proof(chain, 3);
     assert(proof3 != 0, "merkle: inclusion proof for entry 3 builds");
-    assert_eq(audit_log_verify_inclusion(proof3), 1, "merkle: inclusion 3 verifies");
+    assert_eq(audit_log_verify_inclusion(proof3, root, entry_hash(vec_get(ents, 3))), 1,
+      "merkle: inclusion 3 verifies");
 
     # Out-of-range index returns 0.
     assert_eq(audit_log_inclusion_proof(chain, 100), 0, "merkle: oob index = 0");
@@ -56,7 +62,7 @@ fn main() {
     # verify against the current 4-entry chain.
     var cp = audit_log_consistency_proof(chain, 2);
     assert(cp != 0, "merkle: consistency proof builds");
-    assert_eq(audit_log_verify_consistency(cp), 1, "merkle: consistency 2→4 verifies");
+    assert_eq(audit_log_verify_consistency(cp, root), 1, "merkle: consistency 2→4 verifies");
 
     # Consistency oob: old_size > current size → 0.
     assert_eq(audit_log_consistency_proof(chain, 99), 0, "merkle: cp oob = 0");

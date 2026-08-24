@@ -424,6 +424,371 @@ fn main() {
     assert_eq(sigset_has(post_set, SIGTERM), 0, "M1: SIGTERM unblocked after reset");
     assert_eq(sigset_has(post_set, SIGINT),  0, "M1: SIGINT unblocked after reset");
 
+    # =====================================================================
+    # 2026-08-24 P(-1) audit findings (1.8.6)
+    # =====================================================================
+
+    test_group("audit-2026-08-24-medium1-notify-fields-key");
+
+    # MEDIUM-1: notify_parse stored its `fields` map keys as a RAW POINTER
+    # into the shared receive buffer via `map_set(fields, str_data(key), val)`.
+    # The map is cstr-keyed, so hashing walks to the next NUL byte — but a
+    # datagram delivered by sys_read() is NOT NUL-terminated, so the walk ran
+    # past the intended key, through the rest of the datagram, and off the end
+    # of the allocation. Measured before the fix: a "READY" key hashed with
+    # strlen 65 against a 64-byte buffer, and the fields map was entirely
+    # unusable (map_get for every real key returned 0).
+    #
+    # Two properties are asserted here:
+    #   1. the map resolves the keys it claims to store, and
+    #   2. the stored key length equals the key, not the rest of the datagram
+    #      — which is what proves the read is bounded.
+    var nf_payload = "READY=1\nSTATUS=running";
+    var nf_len = strlen(nf_payload);
+    var nf_buf = alloc(64);
+    memcpy(nf_buf, nf_payload, nf_len);
+    # Fill the tail with non-NUL bytes so an unbounded cstr walk would run on.
+    for (var nfi = nf_len; nfi < 64; nfi = nfi + 1) { store8(nf_buf + nfi, 65); }
+
+    var nf_msg = notify_parse(nf_buf, nf_len);
+    assert_eq(load64(nf_msg), 1, "notify: READY=1 still parses");
+    var nf_fields = load64(nf_msg + 48);
+    assert_eq(map_count(nf_fields), 2, "notify: two fields recorded");
+
+    var nf_ready = map_get(nf_fields, str_from("READY"));
+    assert(nf_ready != 0, "notify: fields map resolves READY");
+    assert(str_eq(nf_ready, str_from("1")), "notify: READY value is 1");
+    var nf_status = map_get(nf_fields, str_from("STATUS"));
+    assert(nf_status != 0, "notify: fields map resolves STATUS");
+    assert(str_eq(nf_status, str_from("running")), "notify: STATUS value is running");
+
+    var nf_keys = map_keys(nf_fields);
+    assert_eq(vec_len(nf_keys), 2, "notify: two keys");
+    var nf_k0 = vec_get(nf_keys, 0);
+    assert_eq(str_len(nf_k0), 5, "notify: first key is 5 bytes (READY), not the whole datagram");
+
+    # The parsed values must not alias the caller's buffer — overwrite it and
+    # re-read. Before the fix these Strs pointed straight into nf_buf.
+    for (var nfj = 0; nfj < 64; nfj = nfj + 1) { store8(nf_buf + nfj, 90); }
+    assert(str_eq(nf_status, str_from("running")),
+      "notify: STATUS survives caller-buffer reuse (no aliasing)");
+
+    test_group("audit-2026-08-24-high1-health-null-result");
+
+    # HIGH-1: execute_health_check returned a bare 0 — a NULL pointer — when
+    # an HC_HTTP_GET target did not begin with "http://", while every other
+    # path returns a HealthCheckResult struct. Both callers dereference the
+    # result immediately (`load64(result + 16)` at src/health.cyr:468 and
+    # src/init.cyr:676), so a service configured with an https:// URL, an
+    # uppercase HTTP:// URL, or a bare host:port made argonaut read address
+    # 0x10 during the health pass. Under PID 1 that is
+    # "kernel panic - not syncing: Attempted to kill init".
+    #
+    # An unsupported scheme is a health check that FAILS, not one that
+    # returns nothing.
+    var hn_cases = vec_new();
+    vec_push(hn_cases, str_from("https://svc.local/healthz"));
+    vec_push(hn_cases, str_from("HTTP://svc.local/healthz"));
+    vec_push(hn_cases, str_from("svc.local:8080/healthz"));
+    vec_push(hn_cases, str_from(""));
+    vec_push(hn_cases, str_from("http:/svc.local"));
+
+    for (var hni = 0; hni < vec_len(hn_cases); hni = hni + 1) {
+        var hn_hc = alloc(sizeof(HealthCheck));
+        store64(hn_hc,      HC_HTTP_GET);
+        store64(hn_hc + 8,  vec_get(hn_cases, hni));
+        store64(hn_hc + 16, 0);
+        store64(hn_hc + 24, 0);
+        store64(hn_hc + 32, 100);
+        store64(hn_hc + 40, 0);
+        var hn_r = execute_health_check(str_from("svc"), hn_hc, 0);
+        assert(hn_r != 0, "health: unsupported scheme returns a result, never NULL");
+        assert_eq(load64(hn_r + 16), 0, "health: unsupported scheme is a FAILED check");
+        var hn_msg = load64(hn_r + 32);
+        assert(hn_msg != 0, "health: unsupported scheme carries a message");
+    }
+
+    test_group("audit-2026-08-24-medium4-tmpfiles-devtype-aliasing");
+
+    # MEDIUM-4: generate_tmpfile_commands built the mknod device-type
+    # argument from `var type_buf[2]`. A function-local fixed-size var in
+    # Cyrius is STATIC storage, not stack, and `str_from(&type_buf)` BORROWS
+    # that pointer rather than copying — so every device entry in one call
+    # handed back a Str aliasing the same two bytes. With two or more device
+    # nodes the last entry's type character won for all of them.
+    #
+    # Concretely: a config creating a CHARACTER device followed by a BLOCK
+    # device produced `mknod <path> b ...` for both — argonaut creates the
+    # character device with the wrong node type at boot.
+    var td_entries = vec_new();
+
+    var td_c = alloc(72);
+    store64(td_c,      TMP_DEVICE);
+    store64(td_c + 8,  str_from("/dev/testchar"));
+    store64(td_c + 24, 384);
+    store64(td_c + 32, 0);
+    store64(td_c + 40, 0);
+    store64(td_c + 48, 99);        # 'c'
+    store64(td_c + 56, 1);
+    store64(td_c + 64, 3);
+    vec_push(td_entries, td_c);
+
+    var td_b = alloc(72);
+    store64(td_b,      TMP_DEVICE);
+    store64(td_b + 8,  str_from("/dev/testblock"));
+    store64(td_b + 24, 384);
+    store64(td_b + 32, 0);
+    store64(td_b + 40, 0);
+    store64(td_b + 48, 98);        # 'b'
+    store64(td_b + 56, 7);
+    store64(td_b + 64, 0);
+    vec_push(td_entries, td_b);
+
+    var td_cmds = generate_tmpfile_commands(td_entries);
+    # Each device entry emits mknod + chmod, so the two mknods are at 0 and 2.
+    var td_mknod_c = vec_get(td_cmds, 0);
+    var td_mknod_b = vec_get(td_cmds, 2);
+    var td_type_c = vec_get(safe_cmd_args(td_mknod_c), 1);
+    var td_type_b = vec_get(safe_cmd_args(td_mknod_b), 1);
+
+    assert(str_eq(td_type_c, str_from("c")),
+      "tmpfiles: char device keeps type 'c' after a later block device");
+    assert(str_eq(td_type_b, str_from("b")),
+      "tmpfiles: block device has type 'b'");
+    assert(str_eq(td_type_c, td_type_b) == 0,
+      "tmpfiles: the two device-type args are not the same aliased buffer");
+
+    test_group("audit-2026-08-24-medium5-health-null-target");
+
+    # MEDIUM-5: every check type except HC_PROCESS_ALIVE dereferences the
+    # HealthCheck's `target` Str — resolve_host_ipv4(target) for TCP,
+    # check_command(target, ...) for COMMAND, str_data(target) for HTTP.
+    # A HealthCheck built with target = 0 (the natural mistake when copying
+    # the HC_PROCESS_ALIVE idiom, which legitimately has no target) read
+    # address 0x8 during the health pass — another way to panic PID 1.
+    var hnt_types = vec_new();
+    vec_push(hnt_types, HC_TCP_CONNECT);
+    vec_push(hnt_types, HC_COMMAND);
+    vec_push(hnt_types, HC_HTTP_GET);
+
+    for (var hti = 0; hti < vec_len(hnt_types); hti = hti + 1) {
+        var ht_hc = alloc(sizeof(HealthCheck));
+        store64(ht_hc,      vec_get(hnt_types, hti));
+        store64(ht_hc + 8,  0);          # NULL target
+        store64(ht_hc + 16, 80);
+        store64(ht_hc + 24, 0);
+        store64(ht_hc + 32, 100);
+        store64(ht_hc + 40, 0);
+        var ht_r = execute_health_check(str_from("svc"), ht_hc, 0);
+        assert(ht_r != 0, "health: NULL target returns a result, never NULL");
+        assert_eq(load64(ht_r + 16), 0, "health: NULL target is a FAILED check");
+    }
+
+    # HC_PROCESS_ALIVE legitimately has no target and must still work.
+    var ht_pa = alloc(sizeof(HealthCheck));
+    store64(ht_pa,      HC_PROCESS_ALIVE);
+    store64(ht_pa + 8,  0);
+    store64(ht_pa + 16, 0);
+    store64(ht_pa + 24, 0);
+    store64(ht_pa + 32, 100);
+    store64(ht_pa + 40, 0);
+    var ht_rpa = execute_health_check(str_from("self"), ht_pa, sys_getpid());
+    assert(ht_rpa != 0, "health: PROCESS_ALIVE with no target still returns a result");
+    assert_eq(load64(ht_rpa + 16), 1, "health: PROCESS_ALIVE on self still passes");
+
+    test_group("audit-2026-08-24-high2-pid1-idle-arena-growth");
+
+    # HIGH-2: the PID-1 supervisor loop in src/main.cyr calls
+    # init_reap_services() every 100 ms, forever. Each call allocated from
+    # the BUMP arena unconditionally — map_keys() inside proc_table_reap,
+    # plus two vec_new()s — and bump memory is never individually freed.
+    # Measured before the fix: 456 bytes per idle tick = ~375 MB/day,
+    # ~11 GB/month. PID 1 cannot be restarted, so the arena grows until
+    # allocation fails and the kernel panics on init's death.
+    #
+    # The idle path — nothing exited, which is the overwhelmingly common
+    # case — must now allocate NOTHING. This asserts that directly rather
+    # than asserting a threshold, because any per-tick allocation at all is
+    # unbounded over the life of PID 1.
+    var pl_init = argonaut_init_new(argonaut_config_default());
+    # Warm-up: let first-call lazy singletons settle before sampling.
+    for (var plw = 0; plw < 10; plw = plw + 1) { init_reap_services(pl_init); }
+
+    var pl_before = _heap_ptr;
+    for (var pli = 0; pli < 500; pli = pli + 1) { init_reap_services(pl_init); }
+    var pl_growth = _heap_ptr - pl_before;
+    assert_eq(pl_growth, 0, "pid1: 500 idle reap ticks allocate zero bump memory");
+
+    # The contract still holds: callers get a vec they can measure.
+    var pl_res = init_reap_services(pl_init);
+    assert(pl_res != 0, "pid1: reap still returns a vec");
+    assert_eq(vec_len(pl_res), 0, "pid1: idle reap reports no exits");
+
+    test_group("audit-2026-08-24-medium7-systemd-unit-injection");
+
+    # MEDIUM-7: generate_unit sanitized the Description but added
+    # dependency names to After= / Requires= RAW, and generate_unit_filename
+    # used the service name raw. A dependency carrying a newline injected
+    # arbitrary directives into the [Unit] section of a unit file that
+    # systemd then executes as root; a service name carrying '/' or '..'
+    # escaped the unit directory.
+    var ui_svc = svc_def_new(str_from("victim"),
+      str_from("desc"), str_from("/usr/bin/true"));
+    var ui_deps = svc_def_deps(ui_svc);
+    vec_push(ui_deps, str_from("net\n[Service]\nExecStart=/bin/sh -c evil"));
+    var ui_unit = generate_unit(ui_svc);
+
+    # The property that matters is that the injected text cannot become its
+    # OWN directive line. sanitize_unit_value folds the newline to a space,
+    # so the bytes survive as inert text on the After= line — but never at
+    # the start of a line, which is the only place systemd reads a directive.
+    assert(str_contains(ui_unit, str_from("\nExecStart=/bin/sh -c evil")) == 0,
+      "systemd: injected ExecStart never begins a line");
+    # Positive form: the payload survives FOLDED onto the After= line, which
+    # is what proves the newline was neutralised rather than dropped. (The
+    # unit legitimately contains a real "[Service]" section of its own, so
+    # simply searching for that string proves nothing.)
+    assert(str_contains(ui_unit, str_from("After=net [Service] ExecStart=/bin/sh -c evil.service")),
+      "systemd: dependency newline is folded to a space, staying on After=");
+
+    # Unit filename must stay a single path component.
+    var uf_svc = svc_def_new(str_from("../../etc/systemd/system/evil"),
+      str_from("desc"), str_from("/usr/bin/true"));
+    var uf_name = generate_unit_filename(uf_svc);
+    # A traversal needs a path SEPARATOR. With '/' gone the result is one
+    # path component, and a leading '.' is rewritten so the name can never
+    # be "." or ".." themselves; ".." embedded in a longer component is
+    # inert.
+    assert(str_contains(uf_name, str_from("/")) == 0,
+      "systemd: unit filename contains no path separator");
+    assert(str_eq(uf_name, str_from("...service")) == 0,
+      "systemd: unit filename is not a bare dot-name");
+    var uf_dd = svc_def_new(str_from(".."), str_from("d"), str_from("/usr/bin/true"));
+    assert(str_eq(generate_unit_filename(uf_dd), str_from("_..service")),
+      "systemd: a bare '..' name is rewritten, not preserved");
+
+    # A well-formed name is left alone.
+    var ok_svc = svc_def_new(str_from("postgres"),
+      str_from("desc"), str_from("/usr/bin/true"));
+    assert(str_eq(generate_unit_filename(ok_svc), str_from("postgres.service")),
+      "systemd: ordinary service name is unchanged");
+
+    test_group("audit-2026-08-24-medium6-forking-pidfile-owner");
+
+    # MEDIUM-6 (CVE-2018-16888 class): a forking service's PID file is read
+    # to learn the daemon's real PID, which argonaut then tracks and later
+    # signals. `read_pid_file_safe` already implements the ownership and
+    # writability checks — added for the M4 work — but the one production
+    # call site (src/init.cyr:415) went through `read_pid_file`, which
+    # passes -1 to SKIP the ownership check. A service whose PID file lives
+    # in an attacker-writable directory could therefore hand argonaut an
+    # arbitrary PID to adopt and later kill.
+    #
+    # systemd's fix for the same bug is "trust a PID file only when it is
+    # root-owned". argonaut generalises that to "owned by the uid argonaut
+    # itself runs as" — uid 0 under PID 1, and whatever the developer is
+    # under a test sweep, which is why this test asks the kernel rather
+    # than hardcoding 0.
+    var pf_ok = str_from("/tmp/argonaut_pf_ok.pid");
+    var pf_bad = str_from("/tmp/argonaut_pf_bad.pid");
+    syscall(87, str_data(pf_ok));
+    syscall(87, str_data(pf_bad));
+
+    var pf_self = sys_getpid();
+    var pf_sb = str_builder_new();
+    str_builder_add_int(pf_sb, pf_self);
+    var pf_txt = str_builder_build(pf_sb);
+
+    # A 0600 own-uid file naming a live pid is accepted.
+    var pf_fd = sys_open(str_data(pf_ok), 65, 384);   # O_WRONLY|O_CREAT, 0600
+    sys_write(pf_fd, str_data(pf_txt), str_len(pf_txt));
+    sys_close(pf_fd);
+    assert_eq(read_pid_file_safe(pf_ok, sys_getuid()), pf_self,
+      "pidfile: own-uid 0600 pid file is accepted");
+
+    # The same content, but group/other-writable, must be rejected.
+    var pf_fd2 = sys_open(str_data(pf_bad), 65, 438);  # 0666
+    sys_write(pf_fd2, str_data(pf_txt), str_len(pf_txt));
+    sys_close(pf_fd2);
+    syscall(90, str_data(pf_bad), 438);                # chmod 0666
+    assert_eq(read_pid_file_safe(pf_bad, sys_getuid()), 0 - 1,
+      "pidfile: world-writable pid file is rejected");
+
+    # And the production wrapper must apply the check, not skip it.
+    assert_eq(read_pid_file(pf_bad), 0 - 1,
+      "pidfile: the production reader rejects a world-writable pid file");
+
+    syscall(87, str_data(pf_ok));
+    syscall(87, str_data(pf_bad));
+
+    test_group("audit-2026-08-24-medium2-merkle-proof-binding");
+
+    # MEDIUM-2: audit_log_verify_inclusion / audit_log_verify_consistency
+    # verified a proof against the root carried INSIDE that same proof, so a
+    # proof built over a completely different chain verified as valid. libro
+    # documents this as self-referential and ships root-binding variants.
+    # The wrappers now take the expected root (and, for inclusion, the entry
+    # hash) so the proof is tied to a chain the caller actually trusts.
+    var mb_a = chain_new();
+    chain_append(mb_a, SEV_INFO, str_from("argonaut"), str_from("Starting"), str_from("alpha"));
+    chain_append(mb_a, SEV_INFO, str_from("argonaut"), str_from("Started"), str_from("alpha"));
+    chain_append(mb_a, SEV_INFO, str_from("argonaut"), str_from("Starting"), str_from("beta"));
+    chain_append(mb_a, SEV_INFO, str_from("argonaut"), str_from("Started"), str_from("beta"));
+
+    var mb_b = chain_new();
+    chain_append(mb_b, SEV_WARNING, str_from("attacker"), str_from("Forged"), str_from("gamma"));
+    chain_append(mb_b, SEV_WARNING, str_from("attacker"), str_from("Forged"), str_from("delta"));
+
+    var mb_root_a = audit_log_merkle_root(mb_a);
+    var mb_root_b = audit_log_merkle_root(mb_b);
+    assert(mb_root_a != 0, "merkle: chain A root non-null");
+    assert(mb_root_b != 0, "merkle: chain B root non-null");
+    assert(str_eq(mb_root_a, mb_root_b) == 0, "merkle: the two chains have different roots");
+
+    var mb_entries_a = chain_entries(mb_a);
+    var mb_e0 = vec_get(mb_entries_a, 0);
+    var mb_p0 = audit_log_inclusion_proof(mb_a, 0);
+    assert(mb_p0 != 0, "merkle: chain A inclusion proof built");
+    assert_eq(audit_log_verify_inclusion(mb_p0, mb_root_a, entry_hash(mb_e0)), 1,
+      "merkle: proof verifies against its OWN chain root");
+    assert_eq(audit_log_verify_inclusion(mb_p0, mb_root_b, entry_hash(mb_e0)), 0,
+      "merkle: proof is REJECTED against a foreign chain root");
+
+    var mb_e1 = vec_get(mb_entries_a, 1);
+    assert_eq(audit_log_verify_inclusion(mb_p0, mb_root_a, entry_hash(mb_e1)), 0,
+      "merkle: proof is REJECTED for an entry it does not cover");
+
+    var mb_cp = audit_log_consistency_proof(mb_a, 2);
+    assert(mb_cp != 0, "merkle: consistency proof built");
+    assert_eq(audit_log_verify_consistency(mb_cp, mb_root_a), 1,
+      "merkle: consistency verifies against the real new root");
+    assert_eq(audit_log_verify_consistency(mb_cp, mb_root_b), 0,
+      "merkle: consistency REJECTED against a foreign new root");
+
+    test_group("audit-2026-08-24-medium3-emergency-auth-fail-closed");
+
+    # MEDIUM-3: verify_emergency_auth returned 1 (GRANT) when require_auth was
+    # set but no password hash was configured — a fail-OPEN on misconfiguration
+    # that handed out an emergency root shell with no credential. It now denies.
+    # EmergencyShellConfig layout: +24 require_auth, +32 auth_password_hash.
+    var ea = emergency_shell_default();
+    store64(ea + 24, 1);   # require_auth = true
+    store64(ea + 32, 0);   # ...but no hash configured
+    assert_eq(verify_emergency_auth(ea, str_from("")), 0,
+      "emergency: require_auth with NO hash configured is DENIED");
+    assert_eq(verify_emergency_auth(ea, str_from("anything")), 0,
+      "emergency: require_auth with no hash denies any password");
+
+    store64(ea + 32, password_hash("hunter2", 7));
+    assert_eq(verify_emergency_auth(ea, str_from("hunter2")), 1,
+      "emergency: correct password still accepted");
+    assert_eq(verify_emergency_auth(ea, str_from("hunter3")), 0,
+      "emergency: wrong password rejected");
+
+    store64(ea + 24, 0);   # require_auth = false
+    assert_eq(verify_emergency_auth(ea, str_from("")), 1,
+      "emergency: auth not required stays open");
+
     test_group("libro-2.8.7-persist-oversize-field");
 
     # 1.8.5 dep-bump regression. libro 2.8.7 made `patrastore_append`

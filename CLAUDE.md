@@ -6,13 +6,14 @@
 
 ## Project Identity
 
-**Argonaut** (Greek: sailors of the Argo — one letter off from AGNOS) — Init system and service manager for AGNOS: boot sequencing, service lifecycle (simple/forking/oneshot), dependency resolution (Kahn's algorithm), health checks (HTTP/TCP/command/process-alive), watchdog enforcement, shutdown orchestration, runlevel switching, edge boot (dm-verity/LUKS/read-only rootfs), security enforcement (seccomp/Landlock/capabilities), sd_notify protocol, systemd unit generation, tmpfiles setup, cryptographic audit chain.
+**Argonaut** (Greek: sailors of the Argo — one letter off from AGNOS) — Init system and service manager for AGNOS: boot sequencing, service lifecycle (simple/forking/oneshot), dependency resolution (Kahn's algorithm), health checks (HTTP/TCP/command/process-alive), watchdog enforcement, shutdown orchestration, runlevel switching, edge boot (dm-verity/LUKS/read-only rootfs), security *policy modelling* (seccomp/Landlock/capabilities — see below), sd_notify protocol, systemd unit generation, tmpfiles setup, cryptographic audit chain.
 
 - **Type**: Cyrius application (ported from a Rust crate; rust-old removed at v0.96.1)
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (toolchain pinned in `cyrius.cyml [package].cyrius`)
 - **Version**: `VERSION` at the project root is the source of truth — do not inline the number here
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
+- **Not yet enforced**: seccomp / Landlock / capability configs are **modelled and rendered, not applied** — `src/security.cyr` has no syscalls and nothing in the spawn path reads those fields, so services run with PID 1's full root privileges. Corrected at 1.8.6 (audit DOC-1); do not describe argonaut as sandboxing services until this is real.
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md) · [First-Party Documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
 - **Shared crates**: [shared-crates.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/shared-crates.md)

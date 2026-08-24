@@ -96,12 +96,19 @@ fn tcp_connect_ip(ip, port, timeout_ms) {
             var revents = load16(&pollfd + 6);
             if (revents & 4) {  # POLLOUT
                 # Verify connection succeeded via SO_ERROR
+                # 2026-08-24 audit LOW-5: zero the buffer AND check the
+                # getsockopt return. `so_err` is static storage, so a failed
+                # getsockopt left the previous call's value in place — and a
+                # stale 0 reports a REFUSED connection as a successful one,
+                # which is precisely the "misleading green badge" this
+                # module exists to prevent. Fail closed instead.
                 var so_err[8];
                 var so_len[8];
+                store64(&so_err, 0);
                 store64(&so_len, 4);
                 # getsockopt(fd, SOL_SOCKET=1, SO_ERROR=4, &val, &len)
-                syscall(55, fd, 1, 4, &so_err, &so_len);
-                if (load32(&so_err) == 0) {
+                var so_ret = syscall(55, fd, 1, 4, &so_err, &so_len);
+                if (so_ret == 0 && load32(&so_err) == 0) {
                     sys_close(fd);
                     return 1;
                 }
@@ -179,6 +186,21 @@ fn execute_health_check(service_name, hc, pid) {
     var passed = 0;
     var message = 0;
 
+    # 2026-08-24 audit MEDIUM-5: every check type except HC_PROCESS_ALIVE
+    # dereferences `target` — resolve_host_ipv4(target) for TCP,
+    # check_command(target, …) for COMMAND, str_data(target) for HTTP. A
+    # HealthCheck built with target = 0 (the natural mistake when copying
+    # the HC_PROCESS_ALIVE idiom, which legitimately has none) read address
+    # 0x8 during the health pass and took PID 1 down with it. A missing
+    # target is a check that FAILS.
+    if (check_type != HC_PROCESS_ALIVE) {
+        if (target == 0) {
+            return health_result_new(service_name,
+              str_from(health_check_type_str(check_type)), 0, 0,
+              str_from("health check: no target configured"));
+        }
+    }
+
     if (check_type == HC_TCP_CONNECT) {
         # H1 (closed 1.5.2): resolve the configured host via
         # `resolve_host_ipv4` rather than silently probing 127.0.0.1.
@@ -214,9 +236,20 @@ fn execute_health_check(service_name, hc, pid) {
         # HTTP GET: connect, send GET request, validate status line
         var url_data = str_data(target);
         var url_len = str_len(target);
-        # Require http:// — reject https and other schemes
+        # Require http:// — reject https and other schemes.
+        #
+        # 2026-08-24 audit HIGH-1: this used to `return 0` — a NULL pointer —
+        # while every other path in this function returns a
+        # HealthCheckResult. Both callers dereference immediately
+        # (`load64(result + 16)` at :468 below and src/init.cyr:676), so an
+        # https:// / HTTP:// / bare host:port target read address 0x10 during
+        # the health pass. Under PID 1 that is a kernel panic. An
+        # unsupported scheme is a check that FAILS, not one that returns
+        # nothing.
         if (str_starts_with(target, "http://") == 0) {
-            return 0;
+            return health_result_new(service_name,
+              str_from(health_check_type_str(check_type)), 0, 0,
+              str_from("HTTP check: unsupported scheme (only http:// is supported)"));
         }
         var offset = 7;
         # Parse host and port
@@ -313,7 +346,16 @@ fn execute_health_check(service_name, hc, pid) {
                 var req = str_builder_build(req_sb);
                 var req_data = str_data(req);
                 var req_len = str_len(req);
-                syscall(1, fd, req_data, req_len);  # write
+                # 2026-08-24 audit LOW-3: check the write. A short or failed
+                # write used to fall through to the poll below and surface as
+                # "HTTP response timeout", blaming the peer for a local error.
+                var wrote = syscall(1, fd, req_data, req_len);  # write
+                if (wrote != req_len) {
+                    message = str_from("HTTP request write failed");
+                    sys_close(fd);
+                    return health_result_new(service_name,
+                      str_from(health_check_type_str(check_type)), 0, 0, message);
+                }
 
                 # Read response (just need status line)
                 var resp[512];
@@ -324,7 +366,35 @@ fn execute_health_check(service_name, hc, pid) {
                 store16(&pfd + 6, 0);
                 var poll_ret = syscall(7, &pfd, 1, timeout);
                 if (poll_ret > 0) {
-                    var n = syscall(0, fd, &resp, 511);  # read
+                    # 2026-08-24 audit LOW-3: a single read() assumed the whole
+                    # status line arrived in one segment. A server that splits
+                    # "HTTP/1.1 200 OK" across TCP segments returned n < 12 and
+                    # was reported as an "invalid HTTP response" — a FALSE
+                    # negative that restarts a healthy service under PID 1.
+                    # Keep reading until the status line is complete (CR/LF
+                    # seen, or enough bytes to hold a code), the peer closes,
+                    # or the poll budget is spent.
+                    var n = 0;
+                    var reading = 1;
+                    while (reading == 1) {
+                        var got = syscall(0, fd, &resp + n, 511 - n);  # read
+                        if (got <= 0) { reading = 0; }
+                        else {
+                            n = n + got;
+                            if (n >= 511) { reading = 0; }
+                            else {
+                                var saw_eol = 0;
+                                for (var ri = 0; ri < n; ri = ri + 1) {
+                                    if (load8(&resp + ri) == 10) { saw_eol = 1; }
+                                }
+                                if (saw_eol == 1) { reading = 0; }
+                                else {
+                                    var pr = syscall(7, &pfd, 1, timeout);
+                                    if (pr <= 0) { reading = 0; }
+                                }
+                            }
+                        }
+                    }
                     if (n > 0) {
                         store8(&resp + n, 0);
                         # L5: parse status by finding the first space

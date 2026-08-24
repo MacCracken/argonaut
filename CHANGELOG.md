@@ -7,6 +7,198 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.8.6] — 2026-08-24
+
+**P(-1) security / correctness / hardening pass — the fourth, and the
+first since 2026-05-11.** Full report in
+[`docs/audit/2026-08-24-audit.md`](docs/audit/2026-08-24-audit.md).
+
+**0 CRITICAL / 0 HIGH / 9 MEDIUM / 6 LOW / 1 DOC**, all closed. Every
+MEDIUM+ earned a regression test that was **observed failing against the
+unfixed tree** before its fix landed, per the CLAUDE.md rule; several
+produced measurements, which are quoted below rather than asserted. Suite
+**748 → 810 assertions**, 28 suites, 0 failures.
+
+Six findings were originally filed at HIGH by the sweep. An adversarial
+verification pass refuted four outright and corrected both survivors down
+to MEDIUM. Nothing in this release is HIGH — that is the honest result for
+a codebase on its fourth pass, and the four dismissals are recorded in the
+audit report so they are not re-filed next time.
+
+### Security
+
+- **MEDIUM-1 — `notify_parse` read past the end of the receive buffer.**
+  The sd_notify `fields` map was **cstr-keyed**, so hashing walked to the
+  next NUL — but a datagram from `sys_read` has no terminator. Measured on
+  the unfixed tree: a `READY` key hashed with **strlen 65 against a 64-byte
+  allocation**, and `map_get` for every real key returned 0 (the map had
+  never worked). An unbounded read driven entirely by attacker-controlled
+  datagram content; a fault there is a PID-1 kernel panic. Fixed with a
+  **Str-keyed** map (length-based hashing) plus `str_clone` on key and
+  value — which also closes a second latent bug, where `notify_drain`
+  returned N messages whose strings all aliased the last datagram.
+- **MEDIUM-2 / MEDIUM-7 — two NULL-pointer dereferences in the PID-1
+  health loop.** `execute_health_check` returned a bare `0` for a
+  non-`http://` target, and dereferenced `target` with no null check for
+  every type except `HC_PROCESS_ALIVE`. Both callers
+  (`src/health.cyr`, `src/init.cyr`) immediately do `load64(result + 16)`.
+  Both regression tests **crashed the test binary outright** before the
+  fix. A service configured with an `https://` URL — a natural choice for a
+  TLS endpoint — panicked init. Both now return a failed
+  `HealthCheckResult` with an explicit message.
+- **MEDIUM-4 — merkle proof verification was self-referential
+  (BREAKING).** `audit_log_verify_inclusion` / `audit_log_verify_consistency`
+  checked a proof against the root carried *inside that same proof*, so a
+  proof built over a fabricated chain verified. For a tamper-evident audit
+  chain that is the entire mechanism. See **Breaking** below.
+- **MEDIUM-5 — `verify_emergency_auth` failed OPEN.** With `require_auth`
+  set but no password hash configured it returned 1 (grant), handing out an
+  unauthenticated emergency root shell on a misconfiguration. Now denies.
+- **MEDIUM-8 — systemd unit injection and unit-filename traversal.**
+  `Description=` was sanitised but dependency names were added to
+  `After=` / `Requires=` **raw**, so a dep carrying a newline closed the
+  line and injected arbitrary directives — including a second
+  `ExecStart=` — into a unit systemd runs as root. Separately
+  `generate_unit_filename` interpolated the service name raw, so `/` or
+  `..` escaped the unit directory. Dependency names now go through
+  `sanitize_unit_value`; the new `sanitize_unit_name` reduces a service
+  name to a single safe path component that can never be `.` or `..`.
+- **MEDIUM-9 — forking-service PID file adopted without the ownership
+  check (CVE-2018-16888 class).** `read_pid_file_safe` already implemented
+  the ownership and writability checks — added for the earlier
+  CVE-2025-4598 work — but the wrapper the one production call site uses
+  passed `-1`, the sentinel that **skips** them. The mitigation existed and
+  was not connected. A service whose PID file sits in an attacker-writable
+  location could hand argonaut an arbitrary PID to adopt and later signal.
+  Now passes `sys_getuid()`, matching systemd's "trust a PID file only when
+  it is root-owned".
+- **LOW-5 / LOW-6 — two fail-open paths closed.** `SO_ERROR` was read from
+  an uninitialised static buffer with `getsockopt`'s return ignored, so a
+  stale `0` reported a **refused** connection as successful — the
+  "misleading green badge" the health module exists to prevent.
+  `signalfd`'s return was unchecked while SIGTERM/SIGINT/SIGCHLD were
+  already blocked, which on failure left an **unkillable PID 1 that never
+  powers off**.
+
+### Fixed
+
+- **MEDIUM-3 — the PID-1 supervisor loop leaked bump arena on every
+  tick.** `init_reap_services()` runs every 100 ms forever and its result
+  is discarded, but it allocated unconditionally — `map_keys()` inside
+  `proc_table_reap` plus two `vec_new()`s — and bump memory is never
+  freed. **Measured: 456 bytes per idle tick ≈ 375 MB/day, ~11 GB/month.**
+  PID 1 cannot be restarted, so the arena grows until allocation fails and
+  init dying panics the kernel. No attacker required — it is a timer.
+  Fixed by iterating the proc table **in place** via `map_entries` /
+  `map_cap` instead of materialising a key vec, and allocating the result
+  vecs **lazily**. The public contract is unchanged (a shared, never-mutated
+  empty vec is returned when nothing exited). **Post-fix: 0 bytes/tick**,
+  asserted directly by the regression test rather than against a threshold.
+- **MEDIUM-6 — tmpfiles device-type argument aliased one static buffer.**
+  The mknod type came from a function-local `var type_buf[2]` handed out
+  via `str_from(&type_buf)`. A fixed-size local in Cyrius is **static
+  storage, not stack**, and `str_from` borrows — so a config creating a
+  character device followed by a block device emitted `mknod <path> b …`
+  for **both**, creating the character device with the wrong node type at
+  boot.
+- **LOW-1 — `/etc/hosts` silently truncated at 8 KB.** `file_read_all`
+  gives the caller no way to distinguish "exactly 8192 bytes" from "more,
+  clipped", so entries past the cap became unresolvable and their health
+  checks reported the service DOWN — restarting a service that was fine.
+  Now reads one byte past the cap to detect the overflow, warns, and clips
+  the scan to the last complete line so a record severed mid-token is never
+  parsed.
+- **LOW-2 — `backoff_delay` overflowed to a negative delay.** `shift`
+  saturates at 1e9, so an unvalidated `base_delay_ms` overflowed i64 in
+  `base * shift` and sailed past the `delay > cap` clamp.
+- **LOW-3 — HTTP health check misreported local errors and split
+  responses.** An unchecked `write()` surfaced as "HTTP response timeout",
+  blaming the peer; and a single `read()` reported a status line split
+  across TCP segments as an "invalid HTTP response" — a false negative that
+  restarts a healthy service. The write is now checked and the read loops
+  to a line terminator.
+- **LOW-4 — `FleetRegistration.kernel_ver` aliased the shared read
+  buffer.** The machine-id and hostname reads clone; the `/proc/version`
+  one did not, so the returned struct pointed into a static buffer the next
+  call rewrites. The in-source comment claiming "buf is on stack" was
+  wrong — it is static — and is corrected.
+
+### Breaking
+
+- **`audit_log_verify_inclusion` and `audit_log_verify_consistency` now
+  take the trusted root explicitly** (audit MEDIUM-4):
+  - `audit_log_verify_inclusion(proof)` → `audit_log_verify_inclusion(proof, expected_root, entry_h)`
+  - `audit_log_verify_consistency(cp)` → `audit_log_verify_consistency(cp, expected_new_root)`
+
+  The 1-arg forms delegated to libro primitives that verify a proof against
+  the root embedded in that same proof — libro documents this itself as
+  *"an append-only proof that proves nothing about YOUR log is worse than
+  no proof, because pv_is_valid reports it as passing."* The old signatures
+  made the correct check structurally impossible.
+
+  **Migration is safe by construction:** cyrius 6.5.1 made a wrong-arity
+  call a hard compile error, so every stale call site fails loudly at build
+  time rather than silently keeping the old semantics. Pass the root you
+  independently trust (e.g. a pinned boot head) — **not** one read back out
+  of the proof, which reinstates the defect. For inclusion, the entry hash
+  is `entry_hash(e)`.
+
+### Changed
+
+- **Documentation corrected: seccomp / Landlock / capabilities are NOT
+  enforced** (audit DOC-1). `docs/architecture/feature-gaps.md` recorded
+  them as "Implemented (v0.9.0) … + agnosys integration", which was wrong
+  twice over: `src/security.cyr` contains **zero syscalls** — it builds
+  description strings and one `setpriv` command nothing executes — and
+  agnosys was dropped from the dependency graph at 1.8.4. Every service
+  `fork_exec_service` starts inherits PID 1's full root privileges. The
+  code never claimed otherwise; the docs did. CLAUDE.md's project
+  description now says *policy modelling* and carries an explicit
+  "not yet enforced" note. Real enforcement is filed as roadmap work — a
+  feature, not a patch-release fix.
+- **`read_pid_file(path)`** now applies the ownership check
+  (`sys_getuid()`) instead of skipping it. `read_pid_file_safe(path, uid)`
+  still accepts an explicit uid, and `-1` there still skips the check for a
+  caller that genuinely needs the legacy behaviour.
+
+### Added
+
+- **62 assertions** across seven new `test_group`s in
+  `tests/tcyr/audit_findings.tcyr`, one per MEDIUM finding. Each was
+  observed failing before its fix. Two of them assert *measurements* rather
+  than behaviour — the notify key length (5, not 65) and the PID-1 idle
+  tick allocation (exactly 0 bytes) — because the defect they cover is
+  quantitative.
+- **`sanitize_unit_name`** in `src/systemd.cyr`.
+
+### Performance
+
+**Mandatory benchmark gate: `1.8.6-p-minus-1-audit` vs
+`1.8.5-cyrius-6.5.35` — zero regressions** across all 29 micros; every
+delta is inside the ±2 µs noise band, and the heavier micros are broadly
+faster (`resolve_waves_chain_20` −1.70, `mark_all_steps_complete` −1.65,
+`resolve_order_chain_50` −0.81).
+
+**A correction worth recording, because the first reading of this gate was
+wrong.** An intermediate run (`1.8.6-post-audit`) showed `generate_unit` at
++0.506 µs (+10.4 %) and it was initially written up as the attributable
+cost of MEDIUM-8's dependency-name sanitization. Re-running the *same
+binary* under the release label gave 4.835 µs. Across the four labels the
+micro reads 4.911 / 4.860 / 4.835 / 5.366 — three clustered and one
+outlier — and the outlier run has the **lowest `min` of all four**
+(3.873 µs) with a 16.5 µs `max`, i.e. it was scheduling noise pulling up
+the mean, not the sanitizer. **The sanitization cost is not measurable at
+this resolution**; the earlier claim is withdrawn.
+
+MEDIUM-3's fix is the one unambiguous win, and it is not a micro — the
+PID-1 idle supervisor tick went from **456 bytes/tick to 0**, and
+`proc_table_reap` no longer materialises a key vec per call.
+
+x86_64 DCE binary **1,120,400 → 1,124,776 bytes** (+4,376) for the new
+guards and the unit-name sanitizer.
+
+---
+
 ## [1.8.5] — 2026-08-24
 
 **Toolchain pin bump to cyrius 6.5.35 + dependency refresh to the latest

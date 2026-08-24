@@ -154,6 +154,16 @@ fn main() {
         sigset_add(sigset, SIGCHLD);
         sys_sigprocmask(SIG_BLOCK, sigset, 0);
         var sfd = sys_signalfd(0 - 1, sigset, SFD_NONBLOCK);
+        # 2026-08-24 audit MEDIUM-6: check it. SIGTERM/SIGINT/SIGCHLD are
+        # already BLOCKED above, so if signalfd fails we would spin forever
+        # reading fd -1 with the shutdown signals masked — an unkillable PID 1
+        # that never powers off. Unblock and fail loudly instead of silently
+        # becoming unresponsive.
+        if (sfd < 0) {
+            println("argonaut: signalfd failed — cannot supervise; unblocking signals");
+            sys_sigprocmask(SIG_UNBLOCK, sigset, 0);
+            return 1;
+        }
 
         println("argonaut: pid1 loop ready");
 

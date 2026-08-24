@@ -120,11 +120,31 @@ fn _etc_hosts_buf_ptr() {
 
 fn lookup_etc_hosts(host) {
     if (_etc_hosts_buf == 0) {
-        _etc_hosts_buf = alloc(8192);
+        _etc_hosts_buf = alloc(8193);
     }
     var buf = _etc_hosts_buf;
-    var n = file_read_all("/etc/hosts", buf, 8192);
+    # 2026-08-24 audit MEDIUM-4: `file_read_all` fills the buffer and returns
+    # the byte count with NO truncation signal — a caller passing 8192 cannot
+    # tell "the file is exactly 8192 bytes" from "the file is larger and I
+    # only got the first 8192". A silently clipped /etc/hosts made every
+    # entry past the cap unresolvable, and a health check against such a host
+    # reports the service DOWN — which under PID 1 restarts a service that
+    # was fine.
+    #
+    # Read one byte past the cap so the overflow is detectable, then clip the
+    # scan back to the last complete LINE so a record severed mid-token is
+    # never parsed as though it were whole.
+    var n = file_read_all("/etc/hosts", buf, 8193);
     if (n <= 0) { return 0 - 1; }
+    if (n > 8192) {
+        sakshi_warn("resolver: /etc/hosts exceeds the 8 KB scan cap — entries past it are invisible", 78);
+        n = 8192;
+        var cut = n;
+        while (cut > 0 && load8(buf + cut - 1) != 10) { cut = cut - 1; }
+        # No newline at all in 8 KB: nothing complete to scan.
+        n = cut;
+        if (n == 0) { return 0 - 1; }
+    }
 
     var i = 0;
     while (i < n) {

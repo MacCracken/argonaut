@@ -148,6 +148,11 @@ fn backoff_delay(rc, restart_count) {
     if (base < 100) { base = 100; }
     if (cap < 100)  { cap = 100; }
     # 2^restart_count * base, saturating
+    # 2026-08-24 audit LOW-2: clamp `base` to `cap` BEFORE multiplying.
+    # `shift` saturates at 1e9, so an unvalidated base_delay_ms above
+    # ~9.2e9 overflowed i64 in `base * shift` and produced a NEGATIVE
+    # delay, which then sailed past the `delay > cap` clamp.
+    if (base > cap) { base = cap; }
     var shift = 1;
     for (var i = 0; i < restart_count; i = i + 1) {
         if (shift > 1000000000) { shift = 1000000000; break; }
@@ -155,6 +160,7 @@ fn backoff_delay(rc, restart_count) {
     }
     var delay = base * shift;
     if (delay > cap) { delay = cap; }
+    if (delay < 0)   { delay = cap; }
     return delay;
 }
 

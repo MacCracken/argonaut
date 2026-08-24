@@ -100,7 +100,19 @@ fn audit_log_open_persistent(path) {
     # Replay any prior entries — chain_from_entries preserves their
     # original prev_hash linkage; we do NOT call chain_append on each
     # (would recompute prev_hash and break verify).
-    var loaded = patrastore_load_all(store);
+    # 2026-08-24 audit LOW-1 (defense in depth): `patrastore_load_all` is a
+    # legacy wrapper that folds a failed query into an EMPTY vec, which this
+    # function then reads as "new store" — starting a fresh chain and
+    # skipping the MEDIUM-3 replay verification below entirely. Every
+    # corruption case reachable today is already caught earlier by
+    # `patrastore_open` or by `chain_verify`, so no concrete bypass was
+    # demonstrated; the `_or_err` form removes the gap rather than relying
+    # on those two to keep covering it.
+    var loaded = patrastore_load_all_or_err(store);
+    if (libro_is_error(loaded) == 1) {
+        patrastore_close(store);
+        return 0;
+    }
     var chain = 0;
     if (vec_len(loaded) == 0) {
         chain = chain_new();
@@ -219,9 +231,27 @@ fn audit_log_inclusion_proof(chain, index) {
     return merkle_inclusion_proof(tree, index);
 }
 
-fn audit_log_verify_inclusion(proof) {
+# audit_log_verify_inclusion(proof, expected_root, entry_h) — verify that
+# `entry_h` is in the tree whose root is `expected_root`.
+#
+# 2026-08-24 audit MEDIUM-2 (BREAKING, was 1-arg). The old form called
+# libro's `merkle_verify_proof(proof)`, which libro documents as
+# SELF-REFERENTIAL: it checks the proof path against the root carried
+# *inside that same proof*, so a proof built over an entirely different
+# chain verified as valid, and it never tied the proof to the entry the
+# caller cares about. Both bindings now come from the caller:
+# `merkle_verify_inclusion` compares the proof's root against
+# `expected_root` and its leaf against `merkle_leaf_hash(entry_h)`, both
+# in constant time.
+#
+# Callers pass the root they independently trust (e.g. a pinned boot
+# head), NOT one read back out of the proof — doing the latter restores
+# the original defect.
+fn audit_log_verify_inclusion(proof, expected_root, entry_h) {
     if (proof == 0) { return 0; }
-    return merkle_verify_proof(proof);
+    if (expected_root == 0) { return 0; }
+    if (entry_h == 0) { return 0; }
+    return merkle_verify_inclusion(proof, expected_root, entry_h);
 }
 
 # audit_log_consistency_proof(chain, old_size) — produce a
@@ -237,9 +267,18 @@ fn audit_log_consistency_proof(chain, old_size) {
     return merkle_consistency_proof(tree, old_size);
 }
 
-fn audit_log_verify_consistency(cp) {
+# audit_log_verify_consistency(cp, expected_new_root) — verify the chain
+# genuinely extends the pinned snapshot AND ends at the root the caller
+# trusts.
+#
+# 2026-08-24 audit MEDIUM-2 (BREAKING, was 1-arg). Same self-referential
+# defect as the inclusion wrapper above: `merkle_verify_consistency(cp)`
+# answers "is this bundle internally consistent", never "is this the log
+# you signed" — a proof relating two entirely unrelated trees verified.
+fn audit_log_verify_consistency(cp, expected_new_root) {
     if (cp == 0) { return 0; }
-    return merkle_verify_consistency(cp);
+    if (expected_new_root == 0) { return 0; }
+    return merkle_verify_consistency_against(cp, expected_new_root);
 }
 
 # =========================================================================

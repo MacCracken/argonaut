@@ -113,8 +113,13 @@ fn verify_emergency_auth(config, password_input) {
     var require_auth = load64(config + 24);  # EmergencyShellConfig.require_auth
     if (require_auth == 0) { return 1; }
 
+    # 2026-08-24 audit MEDIUM-3: FAIL CLOSED. This used to `return 1`
+    # (grant) when auth was required but no hash had been configured — a
+    # misconfiguration handed out an unauthenticated emergency root shell.
+    # require_auth is the operator's explicit intent; a missing credential
+    # means the check cannot be satisfied, not that it should be skipped.
     var stored_hash = load64(config + 32);   # auth_password_hash
-    if (stored_hash == 0) { return 1; }
+    if (stored_hash == 0) { return 0; }
 
     var input_data = str_data(password_input);
     var input_len = str_len(password_input);

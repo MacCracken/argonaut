@@ -6,6 +6,34 @@
 
 ## Version
 
+**1.8.6** (P(-1) security / correctness / hardening pass — the fourth, and
+the first since 2026-05-11. Full report in
+`docs/audit/2026-08-24-audit.md`. **0 CRITICAL / 0 HIGH / 9 MEDIUM / 6 LOW
+/ 1 DOC**, all closed; every MEDIUM+ carries a regression test observed
+**failing** against the unfixed tree first. Six findings were filed at HIGH
+by the sweep; adversarial verification refuted four and corrected both
+survivors to MEDIUM — nothing shipped as HIGH. Headline fixes: the **PID-1
+supervisor loop leaked 456 bytes per 100 ms tick** (~375 MB/day, ~11
+GB/month, in a process that can never restart — now **0 bytes/tick**); two
+**NULL-pointer dereferences in the PID-1 health loop** whose tests crashed
+the binary outright (an `https://` health URL panicked init); an
+**out-of-bounds read on every sd_notify datagram** (a `READY` key hashing
+with strlen **65** against a 64-byte allocation, because a cstr-keyed map
+walked to a NUL the datagram never had); **self-referential merkle proof
+verification** (BREAKING — the verify wrappers now take the trusted root
+explicitly; cyrius 6.5.1's hard arity error makes migration loud);
+**systemd unit injection** via an unsanitized dependency name plus
+unit-filename path traversal; a **fail-open emergency-shell auth**; the
+**CVE-2018-16888-class PID-file ownership check** that existed but was
+never wired; and **tmpfiles device-type aliasing** that created character
+devices as block devices. Also corrected a documentation claim that
+seccomp/Landlock/capabilities are enforced — `src/security.cyr` has **zero
+syscalls** and every service runs with PID 1's full root privileges.
+28 suites / **810 assertions** (was 748). Lint / fmt / vet clean; lockfile
+56 verified. Bench gate **zero regressions**; the one attributable movement
+is `generate_unit` +0.506 µs (+10.4 %), the deliberate cost of sanitizing
+dependency names. Binary 1,120,400 → 1,124,776 bytes.)
+
 **1.8.5** (toolchain pin bump to cyrius **6.5.35** + dependency refresh to
 latest tags, with `lib/` deleted and repopulated from scratch, and the
 retirement of two dep pins that were silently *downgrading* the toolchain's
@@ -374,7 +402,7 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **x86_64: ~1.12 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`, **1,120,400 bytes at 1.8.5** under cyrius 6.5.35; **+337,712 / +43.1 %** from 1.8.4's 782,688). Entirely upstream, and dominated by the **stdlib fold** rather than the git deps: across argonaut's declared module set the 6.4.62 → 6.5.35 snapshot grows **+660,550 bytes of source**, of which `lib/bayan.cyr` alone is **+496,834** (144,249 → 641,083; bayan 1.1.0 → 1.5.2). `lib/patra.cyr` +43,958, `freelist` +20,481, `thread` +16,077, `fs` +14,000, `alloc` +13,147, `chrono` +12,484. Git-dep side: libro's dist +90,404, sigil-mldsa +9,544. **Not a static-data regression** — `.bss` is **84,336 bytes**, no `large static data` warning. 2,260 unreachable fns NOPed (661,698 bytes reclaimed). No argonaut-side bloat.
+- **x86_64: ~1.12 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`, **1,124,776 bytes at 1.8.6** — +4,376 over 1.8.5 for the audit's new guards and the unit-name sanitizer; **1,120,400 bytes at 1.8.5** under cyrius 6.5.35; **+337,712 / +43.1 %** from 1.8.4's 782,688). Entirely upstream, and dominated by the **stdlib fold** rather than the git deps: across argonaut's declared module set the 6.4.62 → 6.5.35 snapshot grows **+660,550 bytes of source**, of which `lib/bayan.cyr` alone is **+496,834** (144,249 → 641,083; bayan 1.1.0 → 1.5.2). `lib/patra.cyr` +43,958, `freelist` +20,481, `thread` +16,077, `fs` +14,000, `alloc` +13,147, `chrono` +12,484. Git-dep side: libro's dist +90,404, sigil-mldsa +9,544. **Not a static-data regression** — `.bss` is **84,336 bytes**, no `large static data` warning. 2,260 unreachable fns NOPed (661,698 bytes reclaimed). No argonaut-side bloat.
 - (1.8.4 measured 786,776 bytes as released; a rebuild of the same tree under the 6.5.35 wrapper gives 782,688 — that is the number the 1.8.5 delta is taken against, so the comparison isolates the dep/manifest change from wrapper drift.)
 - **superseded** — 1.8.4 line: **~787 KB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, **786,776 bytes at 1.8.4** under cyrius 6.4.62; **−843,104 / −51.7 %** from 1.8.3's 1,629,880). The drop is entirely upstream — **libro 2.8.0 resolves a thin sigil surface** (sha256/ed25519/ML-DSA/hex) instead of the monolithic `dist/sigil.cyr`, whose x509/RSA/authenticode bignum tables carried a ~13 MB static `.bss` footprint the audit chain never linked. No argonaut-side change. 1,683 unreachable fns NOPed (434,916 bytes reclaimed). (Was 1,629,880 at 1.8.3 under 6.2.11; 1,297,744 at 1.8.1 under 6.0.53; 1,044,440 at 1.8.0 under 6.0.26.)
 - **L3 helper: 11936 bytes** static cyrius ELF (`qemu/helpers/l3-helper`); bundled into the qemu harness initramfs as `/bin/l3-helper`. **Committed binary still held at the 6.0.14 build** — a fresh `cyrius build` emits 14,592 bytes under 6.0.26 and **18,456 bytes under 6.5.35** (codegen drift; also warns `undefined function 'alloc'`, harmless given the helper's `stdlib = ["syscalls"]` and its raw-syscall-only body). The helper's syscall ABI is unchanged and the qemu harness only greps its `/l3.marker` output, so the fixture was again not re-cut at 1.8.5 — only `qemu/helpers/cyrius.cyml`'s pin moved 6.4.62 → 6.5.35. Re-cut it the next time the harness itself changes.
@@ -389,56 +417,63 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Suites
 
-- **Native x86_64: 28 .tcyr suites / 748 assertions** (0 failures on cyrius 6.5.35). **1.8.5 required zero *src* changes** — the toolchain + dep bump was source-clean, which is the notable result given 6.5.x is a register-allocator rewrite. Test-tree edits: **+5 assertions** in `audit_findings.tcyr` for the new `libro-2.8.7-persist-oversize-field` group (pins the >255-byte `PATRA_ERR_ROWSZ` contract libro 2.8.7 introduced); canonical reformatting of `audit_extended.tcyr` + `modules_c.tcyr` (whitespace-only); a stale-comment fix in `serde.tcyr` (the patra `json_build/6` collision it warned about no longer exists). At 1.8.4 the toolchain/dep bump touched test *headers* — three suites (`audit_lifecycle`, `parity`, `cc3_ptr_regression`) gained `src/resolver.cyr` + `src/audit_ext.cyr` includes (6.4.62 reachability), `audit_extended` fixed three `str_from`-vs-cstr call sites, and ten files (incl. the shared `tests/test_header.cyr` and bench-gate `src/bench_main.cyr`) dropped the monolithic `lib/sigil.cyr` include — but the assertion surface is unchanged. +2 over 1.6.3 for the 1.7.0 BOOT_MINIMAL shape additions (`svcs_has_name` in `types_b.tcyr`, `steps_has_stage` in `types_a2.tcyr`).
+- **Native x86_64: 28 .tcyr suites / 810 assertions** (0 failures on cyrius 6.5.35). **+62 at 1.8.6** — seven new `test_group`s in `tests/tcyr/audit_findings.tcyr`, one per MEDIUM finding of the 2026-08-24 P(-1) audit, each observed failing before its fix. Two assert *measurements* rather than behaviour (the notify key length, and that the PID-1 idle tick allocates exactly 0 bytes) because the defects they cover are quantitative. **1.8.5 required zero *src* changes** — the toolchain + dep bump was source-clean, which is the notable result given 6.5.x is a register-allocator rewrite. Test-tree edits: **+5 assertions** in `audit_findings.tcyr` for the new `libro-2.8.7-persist-oversize-field` group (pins the >255-byte `PATRA_ERR_ROWSZ` contract libro 2.8.7 introduced); canonical reformatting of `audit_extended.tcyr` + `modules_c.tcyr` (whitespace-only); a stale-comment fix in `serde.tcyr` (the patra `json_build/6` collision it warned about no longer exists). At 1.8.4 the toolchain/dep bump touched test *headers* — three suites (`audit_lifecycle`, `parity`, `cc3_ptr_regression`) gained `src/resolver.cyr` + `src/audit_ext.cyr` includes (6.4.62 reachability), `audit_extended` fixed three `str_from`-vs-cstr call sites, and ten files (incl. the shared `tests/test_header.cyr` and bench-gate `src/bench_main.cyr`) dropped the monolithic `lib/sigil.cyr` include — but the assertion surface is unchanged. +2 over 1.6.3 for the 1.7.0 BOOT_MINIMAL shape additions (`svcs_has_name` in `types_b.tcyr`, `steps_has_stage` in `types_a2.tcyr`).
 - **qemu harness:** `qemu/pid1-harness-test.sh` covers M3 + L3 end-to-end under real PID 1 (KVM + `+invtsc`); `qemu/boot-test.sh` covers the supervisor-loop smoke. Both ~0.5 s wall time on local KVM.
 - **aarch64 (qemu-user): unblocked under cyrius 6.0.14** — the `cycc_aarch64` cross-build works again, so the sweep can run. Last green sweep: **26 of 28** at 1.6.3 under `cc5_aarch64` 5.10.44 (2 suites in the documented known-failure budget — qemu emulation limits + upstream sigil Ed25519 quirk — see `docs/architecture/001-cross-arch-aarch64.md`). A fresh 6.0.14 sweep is pending a host with `qemu-aarch64` installed (absent on the current dev host); CI runs it.
 - **2 .bcyr binaries** (`tests/bcyr/argonaut.bcyr`, `tests/bcyr/api.bcyr`)
 - **37 benchmarks** wired into `src/bench_main.cyr`; history in `bench-history.csv`
 
-### Bench snapshot (1.8.5-cyrius-6.5.35, 2026-08-24)
+### Bench snapshot (1.8.6-p-minus-1-audit, 2026-08-24)
 
-**1.8.5 verdict: net win — zero regressions.** 28 of 29 micros are faster
-than `1.8.4-cyrius-6.4.62`; the sole uptick is `mark_all_steps_complete`
-(+0.452 µs / +1.0 %), well inside the ±2 µs noise band. The win holds
-*despite* cyrius 6.5.19 making `fl_alloc`/`fl_free` thread-safe at a +13 %
-single-threaded cost (26.4 → 29.9 ns per alloc+free pair) that argonaut,
-being single-threaded, pays in full.
+**1.8.6 verdict: zero regressions.** All 29 micros sit inside the ±2 µs
+noise band against the prior release label `1.8.5-cyrius-6.5.35`, and the
+heavier ones are broadly faster.
 
-| Bench | 1.8.4 | 1.8.5 | Δ |
+**Correction on record.** An intermediate run (`1.8.6-post-audit`) showed
+`generate_unit` +0.506 µs (+10.4 %) and it was first written up as the
+attributable cost of audit MEDIUM-8's dependency-name sanitization.
+Re-running the *same binary* gave 4.835 µs. Across four labels the micro
+reads **4.911 / 4.860 / 4.835 / 5.366** — three clustered, one outlier —
+and the outlier run has the **lowest `min` of all four** (3.873 µs) against
+a 16.5 µs `max`. That is scheduling noise pulling up the mean, not the
+sanitizer. **The claim is withdrawn**; the sanitization cost is not
+measurable at this resolution.
+
+**The real win is not a micro.** Audit MEDIUM-3 took the PID-1 idle
+supervisor tick from **456 bytes/tick to 0** — ~375 MB/day of bump-arena
+growth eliminated in a process that can never restart — and
+`proc_table_reap` no longer materialises a key vec per call.
+
+| Bench | 1.8.5 | 1.8.6 | Δ |
 |---|---|---|---|
-| build_boot_seq_desktop | 2.295 µs | 1.084 µs | −1.21 (−52.8 %) |
-| **init_new_desktop** | **24.972 µs** | **22.817 µs** | **−2.16 (−8.6 %)** |
-| init_new_minimal | 6.620 µs | 5.511 µs | −1.11 (−16.8 %) |
-| resolve_order_chain_10 | 10.315 µs | 9.266 µs | −1.05 (−10.2 %) |
-| resolve_order_chain_50 | 74.421 µs | 73.752 µs | −0.67 |
-| resolve_order_chain_100 | 184.792 µs | 182.968 µs | −1.82 (−1.0 %) |
-| resolve_waves_chain_20 | 56.009 µs | 54.299 µs | −1.71 (−3.1 %) |
-| resolve_waves_desktop | 12.946 µs | 12.634 µs | −0.31 |
-| plan_shutdown_reboot | 13.415 µs | 12.631 µs | −0.78 |
-| generate_unit | 5.898 µs | 4.911 µs | −0.99 (−16.7 %) |
-| **generate_tmpfile_cmds_20** | **14.513 µs** | **12.526 µs** | **−1.99 (−13.7 %)** |
-| configure_readonly_rootfs | 3.451 µs | 2.044 µs | −1.41 (−40.8 %) |
-| verify_rootfs_integrity | 2.965 µs | 1.691 µs | −1.27 (−43.0 %) |
-| mark_all_steps_complete | 45.295 µs | 45.747 µs | +0.45 (+1.0 %, noise) |
-| audit_log_record | 7.841 µs | 7.113 µs | −0.73 (−9.3 %) |
+| build_boot_seq_desktop | 1.084 µs | 1.059 µs | −0.03 |
+| init_new_desktop | 22.817 µs | 23.008 µs | +0.19 |
+| init_new_minimal | 5.511 µs | 5.584 µs | +0.07 |
+| resolve_order_chain_50 | 73.752 µs | 72.945 µs | −0.81 |
+| resolve_order_chain_100 | 182.968 µs | 182.267 µs | −0.70 |
+| **resolve_waves_chain_20** | **54.299 µs** | **52.598 µs** | **−1.70 (−3.1 %)** |
+| resolve_order_desktop | 9.805 µs | 9.516 µs | −0.29 |
+| plan_shutdown_reboot | 12.631 µs | 12.290 µs | −0.34 |
+| generate_unit | 4.911 µs | 4.835 µs | −0.08 |
+| generate_tmpfile_cmds_20 | 12.526 µs | 12.303 µs | −0.22 |
+| plan_runlevel_switch | 4.833 µs | 4.597 µs | −0.24 |
+| **mark_all_steps_complete** | **45.747 µs** | **44.100 µs** | **−1.65 (−3.6 %)** |
+| audit_log_record | 7.113 µs | 6.949 µs | −0.16 |
 
-⚠ **Do not read the sub-µs micros as an 85–88 % speedup.**
-`health_tracker_record`, `health_history_record`, `state_transition_check`,
-`backoff_delay_compute` and `on_service_crash` report **min = 907 ns** at
-1.8.4 and **min = 0 ns** at 1.8.5: the 6.5.x bench clock resolves below the
-~0.9 µs floor the 6.4.x harness clamped to, so the averages drop by roughly
-that floor. Read those five as *"unchanged, now measurable"* and treat 1.8.5
-as their new baseline rather than comparing across the 6.4/6.5 boundary.
+⚠ **The five sub-µs micros are floor-limited.** Since the 6.4→6.5 bench
+clock change they read `min = 0 ns`; their percentage swings are
+meaningless at this scale. Treat 1.8.5 as their baseline and do not compare
+across that boundary. (See CHANGELOG [1.8.5].)
 
 ⚠ **`bench-history.csv` records every bench twice per label** (58 rows / 29
-uniq at 1.8.3, 1.8.4 and 1.8.5 alike). `src/bench_main.cyr` prints each micro
-once in its section and again under `=== Summary ===`, and the
-`bench-history.sh` awk parser matches both. Values are identical, so
-comparisons are unaffected — but the duplication is real and predates 1.8.5.
-Fix the parser (anchor on the pre-Summary block) in a standalone patch.
+unique). `src/bench_main.cyr` prints each micro once in its section and
+again under `=== Summary ===`, and the `bench-history.sh` awk parser
+matches both. Values are identical so comparisons are unaffected, but the
+duplication predates 1.8.5. Fix the parser in a standalone patch.
 
-(See `bench-history.csv` for the full series + every prior label. The
-1.8.4 snapshot table it replaces is in CHANGELOG [1.8.4].)
+(Full series in `bench-history.csv`; four labels were recorded this cycle —
+`1.8.6-audit-baseline` per P(-1) step 3, `1.8.6-post-audit` per step 9, and
+`1.8.6-p-minus-1-audit` as the release gate.)
 
 ## Dependencies
 
@@ -451,6 +486,43 @@ Fix the parser (anchor on the pre-Summary block) in a standalone patch.
 - **`cyrius.lock`** — `cyrius deps --verify` → **56 verified, 0 failed**, **3 commit-pinned** (libro, sigil, patra); was 54 verified / 4 commit-pinned at 1.8.4. One fewer commit pin because sakshi now comes from the fold rather than a git tag. ⚠ `--verify` **cannot** detect a fold downgrade — the lock is written *from disk*. The mechanical guard is `cyrius build --check-lib-sync`, wired into CI + release at 1.8.5.
 
 ## In-flight
+
+### Filed by the 2026-08-24 P(-1) audit (not fixed in 1.8.6)
+
+- **Real seccomp / Landlock / capability enforcement.** `src/security.cyr`
+  has **zero syscalls** — it renders description strings and one `setpriv`
+  command nothing executes — and nothing in the spawn path reads the
+  `seccomp` / `landlock` fields, so every service runs with PID 1's full
+  root privileges. The docs claimed otherwise until 1.8.6 corrected them
+  (audit DOC-1). This is the single largest gap between argonaut's stated
+  surface and its behaviour. A feature, not a patch.
+- **cgroup or pidfd-based PID identity.** argonaut has no cgroup usage at
+  all (`grep -rn "cgroup" src/` is empty) and no `pidfd_open` /
+  `pidfd_send_signal`. systemd's primary mitigation for both the PID-file
+  class and the PID-reuse class is "the PID must be in the unit's cgroup".
+  Audit MEDIUM-9 closed the immediate PID-file hole; the reuse window
+  between reading a PID and signalling it remains open by design.
+- **A real KDF for the emergency-shell password.** `password_hash` is a
+  bare unsalted single-round SHA-256 — adequate against a shoulder-surfer,
+  weak against an offline attacker holding the stored hash. Needs a
+  dependency the thin sigil surface does not carry.
+- **The unauthenticated `notify_drain` / `notify_try_recv` path** bypasses
+  the M1 SO_PEERCRED check entirely. No production caller today
+  (`src/init.cyr` uses the authenticated variant), so it is a footgun
+  rather than a live hole — remove it or rename it so the distinction
+  cannot be missed.
+- **RE-AUDIT TRIGGER — wiring the supervisor loop.** Several 1.8.6
+  severities are bounded by the fact that the shipped PID-1 loop never
+  calls `init_start_service` / `init_poll_health` / `init_enforce_watchdog`
+  / `init_notify_bind` / `init_stop_service` — that machinery is library
+  surface for kybernet. **Re-rate every one of them the day the loop is
+  wired.**
+- **`bench-history.csv` records every bench twice per label** (58 rows / 29
+  unique, since 1.8.3). `src/bench_main.cyr` prints each micro in its
+  section and again under `=== Summary ===`; the `bench-history.sh` parser
+  matches both. Comparisons are unaffected (values identical) but the
+  parser should anchor on the pre-Summary block.
+
 
 - **1.6.4 — Native aarch64 CI.** Real-arch validation in CI
   (not just qemu-user sweep). Adds an `aarch64-native` job
@@ -556,7 +628,8 @@ Fix the parser (anchor on the pre-Summary block) in a standalone patch.
 
 ## Pending release (unreleased)
 
-- **1.8.5** (UNRELEASED — staged in the working tree, not yet tagged) — toolchain pin bump to cyrius **6.5.35** + dep refresh to latest (**libro 2.8.0 → 2.8.12**, carrying **patra 1.12.9 → 1.13.10**, **sigil 3.11.1 → 3.12.9**, **sakshi 2.4.2 → 2.4.11**). **Retired the `sakshi` and `patra` git dep blocks** — both were silently downgrading stdlib-folded libraries on every build; the patra pin was reverting argonaut's *own* filed P1 fix. `libro` is now the sole git dep. **Breaking for persisted audit chains** (libro 2.8.11 + 2.8.12 change the entry preimage and the tree-head signature; `config.audit_persist` deployments must re-export and re-anchor). Zero `src/` changes; **28 suites / 748 assertions** (+5 for the new `libro-2.8.7-persist-oversize-field` group). Build **warning-free**; binary 782,688 → 1,120,400 B (+43.1 %, upstream, dominated by `lib/bayan.cyr` +496,834 B). Fixed two latent CI defects: the fmt gate broke under 6.5.35's rewrite-in-place `cyrius fmt` (now `--check`), and 8 files carried fmt drift that was already red at 6.4.62. CI + release now pass `--check-lib-sync`. Lockfile **56 verified / 0 failed**; lint / fmt / vet clean; bench gate **net win vs 1.8.4, zero regressions**.
+- **1.8.6** (UNRELEASED — staged in the working tree, not yet tagged) — **P(-1) security / correctness / hardening pass**, the fourth and the first since 2026-05-11. `docs/audit/2026-08-24-audit.md`. **0 CRITICAL / 0 HIGH / 9 MEDIUM / 6 LOW / 1 DOC**, all closed, every MEDIUM+ with a regression test observed failing first. Six sweep findings were filed at HIGH; adversarial verification refuted four and corrected both survivors to MEDIUM. Headline: **PID-1 idle tick leaked 456 B/tick (~375 MB/day) → 0**; two **NULL derefs in the PID-1 health loop** (tests crashed the binary); **OOB read on every sd_notify datagram** (key strlen 65 vs a 64-byte buffer); **self-referential merkle verification** (BREAKING — verify wrappers now take the trusted root); **systemd unit injection + filename traversal**; **fail-open emergency auth**; **CVE-2018-16888-class PID-file check wired**; **tmpfiles device-type aliasing**. Documentation corrected: seccomp/Landlock/capabilities are **not enforced** (zero syscalls in `src/security.cyr`; services run as full root). 28 suites / **810 assertions** (+62). Bench gate **zero regressions** (`generate_unit` +0.506 µs is the deliberate cost of dep-name sanitization). Binary 1,124,776 B.
+- **1.8.5** (UNRELEASED — staged, not yet tagged) — toolchain pin bump to cyrius **6.5.35** + dep refresh to latest (**libro 2.8.0 → 2.8.12**, carrying **patra 1.12.9 → 1.13.10**, **sigil 3.11.1 → 3.12.9**, **sakshi 2.4.2 → 2.4.11**). **Retired the `sakshi` and `patra` git dep blocks** — both were silently downgrading stdlib-folded libraries on every build; the patra pin was reverting argonaut's *own* filed P1 fix. `libro` is now the sole git dep. **Breaking for persisted audit chains** (libro 2.8.11 + 2.8.12 change the entry preimage and the tree-head signature). Zero `src/` changes. Fixed two latent CI defects (the fmt gate broke under 6.5.35's rewrite-in-place `cyrius fmt`; 8 files carried drift already red at 6.4.62). CI + release now pass `--check-lib-sync`. Lockfile **56 verified / 0 failed**; bench gate **net win vs 1.8.4, zero regressions**.
 
 ## Recent shipped
 
@@ -598,5 +671,6 @@ Fix the parser (anchor on the pre-Summary block) in a standalone patch.
 ## Audit cadence
 
 - `docs/audit/` — security audit reports, dated `YYYY-MM-DD-audit.md`
-- Most recent: `2026-04-26-audit.md` (P(-1) for 1.4.0)
+- Most recent: **`2026-08-24-audit.md` (P(-1) for 1.8.6)** — 0 CRITICAL / 0 HIGH / 9 MEDIUM / 6 LOW / 1 DOC, all closed. Prior: `2026-05-11` (1.6.3 closeout), `2026-05-10` (1.5.5 closeout), `2026-04-26` (1.4.0).
+- **Re-audit trigger:** several 1.8.6 severities are bounded by the fact that the shipped PID-1 loop does not call the service-lifecycle machinery (it is library surface for kybernet). **Re-rate them the day the supervisor loop is wired to `init_start_service` / `init_poll_health` / `init_notify_bind`.**
 - Prior audit references retained in `CHANGELOG.md` Security sections

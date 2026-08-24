@@ -58,10 +58,17 @@ fn generate_tmpfile_commands(entries) {
             safe_cmd_add_arg(mknod_cmd, path);
 
             # dev_type: 'b' or 'c'
-            var type_buf[2];
-            store8(&type_buf, dev_type_char);
-            store8(&type_buf + 1, 0);
-            safe_cmd_add_arg(mknod_cmd, str_from(&type_buf));
+            #
+            # 2026-08-24 audit MEDIUM-4: this used a function-local
+            # `var type_buf[2]` + `str_from(&type_buf)`. A fixed-size local
+            # in Cyrius is STATIC storage, and `str_from` BORROWS the
+            # pointer — so every device entry in one call returned a Str
+            # aliasing the same two bytes and the last entry's type
+            # character won for all of them (a char device emitted
+            # `mknod <path> b`). Build a fresh Str per entry instead.
+            var type_sb = str_builder_new();
+            str_builder_putc(type_sb, dev_type_char);
+            safe_cmd_add_arg(mknod_cmd, str_builder_build(type_sb));
 
             safe_cmd_add_arg(mknod_cmd, str_from_int(dev_major));
             safe_cmd_add_arg(mknod_cmd, str_from_int(dev_minor));

@@ -24,7 +24,11 @@ fn notify_msg_new() {
     store64(msg + 24, 0);     # watchdog
     store64(msg + 32, 0);     # reloading
     store64(msg + 40, 0);     # stopping
-    store64(msg + 48, map_new());  # fields
+    # 2026-08-24 audit MEDIUM-1: Str-keyed, NOT cstr-keyed. A cstr map
+    # hashes by walking to the next NUL, and notify datagrams arrive from
+    # sys_read() with no terminator — so the walk ran off the end of the
+    # receive buffer. map_new_str hashes over the Str's length instead.
+    store64(msg + 48, map_new_str());  # fields
     return msg;
 }
 
@@ -50,10 +54,15 @@ fn notify_parse(data, len) {
                     }
                 }
                 if (eq_pos > line_start) {
-                    var key = str_new(data + line_start, eq_pos - line_start);
-                    var val = str_new(data + eq_pos + 1, i - eq_pos - 1);
+                    # 2026-08-24 audit MEDIUM-1: str_new BORROWS `data`, which
+                    # is the shared module-level receive buffer — every later
+                    # datagram overwrote the Strs handed back for earlier ones
+                    # (notify_drain returned N messages all aliasing the last
+                    # one). str_clone gives each message its own bytes.
+                    var key = str_clone(str_new(data + line_start, eq_pos - line_start));
+                    var val = str_clone(str_new(data + eq_pos + 1, i - eq_pos - 1));
 
-                    map_set(fields, str_data(key), val);
+                    map_set(fields, key, val);
 
                     # Match known keys
                     if (str_eq(key, str_from("READY"))) {

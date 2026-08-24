@@ -24,7 +24,7 @@ Based on research into s6, dinit, systemd, runit, OpenRC, and other production i
 | Log rotation | Current append-only log files will fill disks. Need rotation or ring buffer. | **Implemented** (v0.8.0) — `LogConfig`, size-based rotation |
 | Environment file loading | `/etc/argonaut/env.d/<service>` — every production init supports this. | **Implemented** (v0.8.0) — `load_environment_file`, implicit env.d |
 | tmpfiles.d equivalent | Create dirs, symlinks, device nodes at boot. Critical for `/run`, `/tmp`. | **Implemented** (v0.9.0) — `TmpfileEntry`, `generate_tmpfile_commands` |
-| Seccomp/Landlock per service | Boot stage exists but no implementation. Drop capabilities, apply filters. | **Implemented** (v0.9.0) — `SeccompConfig`, `LandlockConfig`, `CapabilityConfig` + agnosys integration |
+| Seccomp/Landlock per service | Boot stage exists but no implementation. Drop capabilities, apply filters. | **NOT IMPLEMENTED — descriptive only.** Corrected 1.8.6 (audit DOC-1); previously claimed "Implemented (v0.9.0) … + agnosys integration", which was wrong twice over. `src/security.cyr` contains **zero syscalls**: `seccomp_description` / `landlock_description` build human-readable strings and `capability_setpriv_cmd` builds a `setpriv` command nothing executes. `svc_def_new` stores `0` for all three fields and no spawn path reads them, so every service `fork_exec_service` starts inherits PID 1's **full root privileges**. agnosys, named as the integration, was dropped from the dependency graph at 1.8.4. `SeccompConfig` / `LandlockConfig` / `CapabilityConfig` are data + rendering only. Real enforcement is roadmap work. |
 
 ## P2 — Nice to Have
 

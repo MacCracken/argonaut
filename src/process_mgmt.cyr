@@ -427,27 +427,56 @@ fn proc_table_stop_all(timeout_ms) {
 
 # Reap any processes that have exited.
 # Returns vec of (name, exit_code) pairs.
-fn proc_table_reap() {
-    var exited = vec_new();
-    var keys = proc_table_keys();
+# 2026-08-24 audit HIGH-2 — shared empty result.
+#
+# The PID-1 supervisor loop reaps every 100 ms forever, and the bump
+# allocator never reclaims. Returning a fresh vec per tick grew the arena by
+# a measured 456 bytes/tick (~375 MB/day, ~11 GB/month) on an idle system;
+# PID 1 cannot be restarted, so that ends in an allocation failure and a
+# kernel panic. The idle path now allocates nothing.
+#
+# This vec is handed to callers as an empty result and is NEVER mutated —
+# `proc_table_reap` swaps to a freshly allocated vec the moment there is an
+# actual exit to report. Do not push into it.
+var _reap_empty = 0;
 
-    for (var i = 0; i < vec_len(keys); i = i + 1) {
-        var name = vec_get(keys, i);
-        var pid = map_get(g_proc_table, name);
-        if (pid > 0) {
-            var status_buf[8];
-            var ret = sys_waitpid(pid, &status_buf, WNOHANG);
-            if (ret > 0) {
-                var status = load64(&status_buf);
-                var code = 0 - 1;
-                if (WIFEXITED(status)) { code = WEXITSTATUS(status); }
-                var pair = alloc(16);
-                store64(pair, str_from(name));
-                store64(pair + 8, code);
-                vec_push(exited, pair);
+fn _reap_empty_vec() {
+    if (_reap_empty == 0) { _reap_empty = vec_new(); }
+    return _reap_empty;
+}
+
+fn proc_table_reap() {
+    # Iterate the proc table IN PLACE (entries stride 24: key, value,
+    # occupied) rather than via map_keys(), which allocated a fresh vec on
+    # every tick. `exited` is allocated lazily, only once something has
+    # actually exited.
+    var exited = 0;
+    var entries = map_entries(g_proc_table);
+    var cap = map_cap(g_proc_table);
+
+    for (var ki = 0; ki < cap; ki = ki + 1) {
+        var ep = entries + ki * 24;
+        if (load64(ep + 16) == 1) {
+            var name = load64(ep);
+            var pid = load64(ep + 8);
+            if (pid > 0) {
+                var status_buf[8];
+                var ret = sys_waitpid(pid, &status_buf, WNOHANG);
+                if (ret > 0) {
+                    var status = load64(&status_buf);
+                    var code = 0 - 1;
+                    if (WIFEXITED(status)) { code = WEXITSTATUS(status); }
+                    if (exited == 0) { exited = vec_new(); }
+                    var pair = alloc(16);
+                    store64(pair, str_from(name));
+                    store64(pair + 8, code);
+                    vec_push(exited, pair);
+                }
             }
         }
     }
+
+    if (exited == 0) { return _reap_empty_vec(); }
 
     # Remove reaped processes
     for (var i = 0; i < vec_len(exited); i = i + 1) {
@@ -483,8 +512,20 @@ fn proc_table_reap_orphans() {
 # PID file reading
 # =========================================================================
 
+# 2026-08-24 audit MEDIUM-6 (CVE-2018-16888 class): WIRE the ownership
+# check. This used to pass -1, which skips it — so the M4 hardening existed
+# but the one production call site (src/init.cyr, adopting a forking
+# service's PID file) opted out of it. A service whose PID file sits in an
+# attacker-writable location could hand argonaut an arbitrary PID to track
+# and later signal. systemd's fix for the identical bug is "trust a PID file
+# only when it is root-owned"; argonaut generalises that to the uid it is
+# itself running as — 0 under PID 1.
+#
+# Pass an explicit expected uid to read_pid_file_safe when a service is
+# known to drop privileges; -1 there still skips the check for a caller that
+# genuinely needs the legacy behaviour.
 fn read_pid_file(path) {
-    return read_pid_file_safe(path, 0 - 1);   # -1 owner = back-compat: skip ownership check
+    return read_pid_file_safe(path, sys_getuid());
 }
 
 # read_pid_file_safe — M4 (CVE-2025-4598 class).

@@ -292,7 +292,13 @@ fn validate_edge_profile(boot_result, max_memory_mb) {
 fn fleet_registration_from_system(boot_result) {
     var reg = alloc(sizeof(FleetRegistration));
 
-    # Read machine-id (clone to heap — buf is on stack)
+    # NOTE: `var buf[256]` is STATIC storage in Cyrius, not stack — it is
+    # shared across every call to this function. Any Str handed out from it
+    # MUST be cloned, or the next call silently rewrites a field of a
+    # FleetRegistration the caller is still holding. (2026-08-24 audit LOW-4
+    # corrected the comment, which said "on stack", and the one read below
+    # that was missing its clone.)
+    # Read machine-id (clone — the buffer is reused)
     var buf[256];
     var n = file_read_all("/etc/machine-id", &buf, 255);
     if (n > 0) {
@@ -302,7 +308,7 @@ fn fleet_registration_from_system(boot_result) {
         store64(reg, str_from(""));
     }
 
-    # Read hostname (clone to heap — buf is on stack)
+    # Read hostname (clone — the buffer is reused)
     n = file_read_all("/etc/hostname", &buf, 255);
     if (n > 0) {
         store8(&buf + n, 0);
@@ -322,7 +328,11 @@ fn fleet_registration_from_system(boot_result) {
         var ver = str_new(&buf, n);
         var parts = str_split(ver, str_from(" "));
         if (vec_len(parts) > 2) {
-            store64(reg + 40, vec_get(parts, 2));
+            # 2026-08-24 audit LOW-4: clone. The split parts slice into
+            # `buf`, so storing one directly left the returned registration's
+            # kernel_version aliasing the shared static buffer — unlike the
+            # machine-id and hostname reads above, which already cloned.
+            store64(reg + 40, str_clone(vec_get(parts, 2)));
         } else {
             store64(reg + 40, str_from("unknown"));
         }

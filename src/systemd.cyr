@@ -91,7 +91,12 @@ fn generate_unit(svc) {
         var dep_sb = str_builder_new();
         for (var i = 0; i < vec_len(deps); i = i + 1) {
             if (i > 0) { str_builder_add_cstr(dep_sb, " "); }
-            str_builder_add(dep_sb, vec_get(deps, i));
+            # 2026-08-24 audit MEDIUM-7: sanitize. The Description above
+            # already went through sanitize_unit_value, but dependency names
+            # were added raw — a dep carrying a newline closed the After=
+            # line and opened its own section, injecting arbitrary directives
+            # (e.g. a second ExecStart) into a unit systemd runs as root.
+            str_builder_add(dep_sb, sanitize_unit_value(vec_get(deps, i)));
             str_builder_add_cstr(dep_sb, ".service");
         }
         var dep_str = str_builder_build(dep_sb);
@@ -222,9 +227,36 @@ fn generate_unit(svc) {
     return str_builder_build(sb);
 }
 
+# sanitize_unit_name — reduce a service name to a single safe path
+# component for use as a unit FILENAME.
+#
+# 2026-08-24 audit MEDIUM-7: `generate_unit_filename` interpolated the
+# service name raw, so a name containing '/' or '..' escaped the unit
+# directory the caller writes into. Anything outside [A-Za-z0-9_.-] becomes
+# '_', and a leading '.' is replaced too so neither "." nor ".." can be
+# produced. Ordinary names are unchanged.
+fn sanitize_unit_name(name) {
+    var data = str_data(name);
+    var len = str_len(name);
+    var sb = str_builder_new();
+    if (len == 0) { return str_from("unnamed"); }
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(data + i);
+        var ok = 0;
+        if (c >= 48 && c <= 57)  { ok = 1; }       # 0-9
+        if (c >= 65 && c <= 90)  { ok = 1; }       # A-Z
+        if (c >= 97 && c <= 122) { ok = 1; }       # a-z
+        if (c == 45 || c == 95)  { ok = 1; }       # - _
+        if (c == 46 && i > 0)    { ok = 1; }       # '.' but never leading
+        if (ok == 1) { str_builder_putc(sb, c); }
+        else { str_builder_putc(sb, 95); }         # '_'
+    }
+    return str_builder_build(sb);
+}
+
 fn generate_unit_filename(svc) {
     var sb = str_builder_new();
-    str_builder_add(sb, svc_def_name(svc));
+    str_builder_add(sb, sanitize_unit_name(svc_def_name(svc)));
     str_builder_add_cstr(sb, ".service");
     return str_builder_build(sb);
 }
