@@ -669,6 +669,30 @@ fn svc_def_pid_file(sd)      { return load64(sd + 112); }
 fn svc_def_rlimits(sd)       { return load64(sd + 120); }
 fn svc_def_log_config(sd)    { return load64(sd + 128); }
 
+# Per-service security policy (1.9.0).
+#
+# These three fields have existed in ServiceDefinition since the struct was
+# written and have been zero-initialised by svc_def_new the whole time, but
+# had no accessors — so no consumer could read or set them, and argonaut's
+# fork/exec path had nothing to apply. That is the argonaut half of what
+# kybernet filed as its 2026-08-24 audit HIGH-1: the security stack could
+# not be reached, not because the policy was missing but because there was
+# no seam.
+#
+# Adding accessors is layout-neutral (offsets 144/152/160 are already
+# allocated and already zeroed), so this is additive for every consumer.
+# The values are OPAQUE to argonaut — it never interprets them. It hands
+# the whole ServiceDefinition to the pre-exec hook (see process_mgmt.cyr)
+# and the consumer decides what a "seccomp config" or "landlock config"
+# means. 0 means "no policy for this service", which is the default.
+fn svc_def_seccomp(sd)       { return load64(sd + 144); }
+fn svc_def_landlock(sd)      { return load64(sd + 152); }
+fn svc_def_capabilities(sd)  { return load64(sd + 160); }
+
+fn svc_def_set_seccomp(sd, cfg)      { store64(sd + 144, cfg); return sd; }
+fn svc_def_set_landlock(sd, cfg)     { store64(sd + 152, cfg); return sd; }
+fn svc_def_set_capabilities(sd, caps) { store64(sd + 160, caps); return sd; }
+
 # =========================================================================
 # Managed service — runtime state of a service
 # =========================================================================

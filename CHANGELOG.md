@@ -7,6 +7,64 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.9.0] — 2026-08-24
+
+**Pre-exec hook + per-service security policy accessors.** Additive, no
+layout change, no behaviour change for existing consumers. Suite 810 → 828
+assertions across 29 suites, 0 failures.
+
+This release exists to unblock a consumer. kybernet's 2026-08-24 P(-1) audit
+filed **HIGH-1** against 686 lines of seccomp / Landlock / privilege-dropping
+code — ~26 % of its source — that was reachable from **no production path**.
+The policy was not missing; the *seam* was. seccomp filters, Landlock rulesets
+and capability drops can only be installed in the window between `fork` and
+`exec`, argonaut owns that window, and it exposed nothing there.
+
+### Added
+
+- **`argonaut_set_pre_exec_hook(fp)` / `argonaut_pre_exec_hook()`**
+  (`src/process_mgmt.cyr`). Registers a callback invoked in the **child**,
+  after the signal-mask reset and immediately before `execve`, receiving the
+  service's `ServiceDefinition`. `argonaut_set_pre_exec_hook` returns the
+  previous hook so callers can chain or restore; pass 0 to clear.
+
+  **It fails closed.** A hook returning non-zero aborts the child with
+  **exit 126** and never execs — distinct from 127 ("exec failed") so a
+  supervisor can tell "sandbox could not be established" from "binary not
+  found". Running a service unsandboxed when its policy failed to apply is
+  the one outcome worse than not running it.
+
+  Placed after `reset_child_signal_mask()` deliberately: a hook installing a
+  seccomp filter would otherwise have to allowlist `rt_sigprocmask` purely to
+  let the reset run.
+
+  argonaut does **not** interpret the policy. It supplies the window and the
+  definition; the consumer owns the meaning. That keeps the security model out
+  of the service manager and in the component that has an opinion about it.
+
+- **Accessors for the three per-service security fields**
+  (`src/types.cyr`): `svc_def_seccomp` / `svc_def_landlock` /
+  `svc_def_capabilities` and their setters.
+
+  `seccomp`, `landlock` and `capabilities` have been in `ServiceDefinition`
+  since the struct was written (offsets 144/152/160) and zero-initialised by
+  `svc_def_new` the whole time — but had no accessors, so no consumer could
+  read or set them. Adding them is **layout-neutral and additive**: the
+  offsets were already allocated and already zeroed, so every existing
+  consumer is unaffected and `0` continues to mean "no policy".
+
+### Tests
+
+- New `tests/tcyr/pre_exec_hook.tcyr` (18 assertions): field defaults and
+  setter round-trips, neighbour fields provably undisturbed (an off-by-one in
+  the new offsets would surface here and nowhere else), hook registration
+  returning the prior value, the hook actually running in the child with the
+  exec still happening (child exits 0), the **fail-closed** path (denying hook
+  → child exits 126, binary never runs), and clearing the hook restoring
+  unhooked behaviour.
+
+---
+
 ## [1.8.6] — 2026-08-24
 
 **P(-1) security / correctness / hardening pass — the fourth, and the

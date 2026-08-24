@@ -1,0 +1,86 @@
+# pre_exec_hook.tcyr — per-service security policy fields + the pre-exec
+# hook seam (1.9.0).
+#
+# Covers the argonaut half of kybernet's 2026-08-24 audit HIGH-1: seccomp,
+# Landlock and capability drops can only be installed between fork and
+# exec, and without a hook there a consumer's entire security stack is
+# reachable from nothing.
+include "tests/test_header.cyr"
+
+# Hook that records it ran, then allows the exec.
+var _hook_ran = 0;
+var _hook_saw_sd = 0;
+fn _allow_hook(sd) {
+    _hook_ran = _hook_ran + 1;
+    _hook_saw_sd = sd;
+    return 0;
+}
+
+# Hook that refuses — the child must exit 126 and NOT exec.
+fn _deny_hook(sd) {
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+    test_group("pre-exec-hook");
+
+    # --- per-service policy fields default to 0 (no policy) ---
+    var sd = svc_def_new(str_from("hooked"), str_from("t"), str_from("/bin/true"));
+    assert_eq(svc_def_seccomp(sd), 0, "seccomp defaults 0");
+    assert_eq(svc_def_landlock(sd), 0, "landlock defaults 0");
+    assert_eq(svc_def_capabilities(sd), 0, "capabilities defaults 0");
+
+    # --- and round-trip through the setters ---
+    svc_def_set_seccomp(sd, 0x5ECC);
+    svc_def_set_landlock(sd, 0x11AD);
+    svc_def_set_capabilities(sd, 0xCAB5);
+    assert_eq(svc_def_seccomp(sd), 0x5ECC, "seccomp set");
+    assert_eq(svc_def_landlock(sd), 0x11AD, "landlock set");
+    assert_eq(svc_def_capabilities(sd), 0xCAB5, "capabilities set");
+
+    # Setting one must not disturb its neighbours — these three sit at
+    # +144/+152/+160, immediately past log_config, so an off-by-one in the
+    # offsets would show up here and nowhere else.
+    assert_eq(svc_def_log_config(sd), 0, "log_config untouched");
+    assert_eq(svc_def_rlimits(sd), 0, "rlimits untouched");
+
+    # --- hook registration round-trips, and returns the previous hook ---
+    assert_eq(argonaut_pre_exec_hook(), 0, "no hook by default");
+    var prev = argonaut_set_pre_exec_hook(&_allow_hook);
+    assert_eq(prev, 0, "set returns prior (0)");
+    assert_eq(argonaut_pre_exec_hook(), &_allow_hook, "hook registered");
+
+    # --- the hook actually runs in the child, and exec still happens ---
+    var sd2 = svc_def_new(str_from("hook-run"), str_from("t"), str_from("/bin/true"));
+    var pid = fork_exec_service(sd2);
+    assert(pid > 0, "allow: fork pid>0");
+    var wbuf[8];
+    sys_waitpid(pid, &wbuf, 0);
+    # /bin/true exec'd => exit 0. 126 would mean the hook denied, 127 that
+    # exec failed — both would prove the hook path is wired wrong.
+    assert_eq(WEXITSTATUS(load64(&wbuf)), 0, "allow: child exec'd (exit 0)");
+
+    # --- a refusing hook FAILS CLOSED: exit 126, binary never runs ---
+    argonaut_set_pre_exec_hook(&_deny_hook);
+    var sd3 = svc_def_new(str_from("hook-deny"), str_from("t"), str_from("/bin/true"));
+    var pid3 = fork_exec_service(sd3);
+    assert(pid3 > 0, "deny: fork pid>0");
+    var wbuf3[8];
+    sys_waitpid(pid3, &wbuf3, 0);
+    assert_eq(WEXITSTATUS(load64(&wbuf3)), 126, "deny: child exits 126, no exec");
+
+    # --- clearing the hook restores unhooked behaviour ---
+    argonaut_set_pre_exec_hook(0);
+    assert_eq(argonaut_pre_exec_hook(), 0, "hook cleared");
+    var sd4 = svc_def_new(str_from("unhooked"), str_from("t"), str_from("/bin/true"));
+    var pid4 = fork_exec_service(sd4);
+    assert(pid4 > 0, "cleared: fork pid>0");
+    var wbuf4[8];
+    sys_waitpid(pid4, &wbuf4, 0);
+    assert_eq(WEXITSTATUS(load64(&wbuf4)), 0, "cleared: child exec'd");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

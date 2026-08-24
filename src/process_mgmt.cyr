@@ -164,6 +164,48 @@ fn build_default_envp() {
     return v;
 }
 
+# =========================================================================
+# Pre-exec hook (1.9.0)
+# =========================================================================
+#
+# A consumer-supplied callback run in the CHILD, after fork and after the
+# signal-mask reset, immediately before execve. It receives the service's
+# ServiceDefinition and returns 0 to proceed with exec or non-zero to abort
+# the child.
+#
+# This exists because seccomp, Landlock and capability drops can ONLY be
+# installed between fork and exec, and argonaut owns that window. Without a
+# seam here a supervisor built on argonaut cannot sandbox its services at
+# all, no matter how much policy code it has — which is exactly the state
+# kybernet was in when its 2026-08-24 audit filed HIGH-1 against 686 lines
+# of seccomp/Landlock/privdrop that were reachable from nothing.
+#
+# argonaut deliberately does NOT interpret the policy. It supplies the
+# window and the ServiceDefinition (whose seccomp / landlock / capabilities
+# fields the consumer can read via the accessors in types.cyr); the
+# consumer owns the meaning. That keeps the security model out of the
+# service manager and in the thing that has an opinion about it.
+#
+# CONTRACT for hook implementors — this runs in a forked child of PID 1:
+#   * It must not allocate unboundedly, block, or fork.
+#   * A non-zero return aborts the child with exit 126 rather than execing,
+#     so a policy that cannot be applied FAILS CLOSED. Never return 0 on a
+#     failed restriction.
+#   * Ordering is the caller's problem, but the workable order is
+#     no_new_privs -> capability/uid/gid drop -> Landlock -> seccomp, since
+#     an installed seccomp filter will otherwise kill the drop syscalls.
+var _pre_exec_hook = 0;
+
+# Register the pre-exec callback. Pass 0 to clear. Returns the previous
+# hook so a caller can chain or restore.
+fn argonaut_set_pre_exec_hook(fp) {
+    var prev = _pre_exec_hook;
+    _pre_exec_hook = fp;
+    return prev;
+}
+
+fn argonaut_pre_exec_hook() { return _pre_exec_hook; }
+
 # Fork + exec a service, returning child PID.
 # Parent returns immediately; child execs the binary.
 fn fork_exec_service(svc_def) {
@@ -240,6 +282,22 @@ fn fork_exec_service(svc_def) {
         # before exec so the service can install its own handlers
         # and receive shutdown signals.
         reset_child_signal_mask();
+
+        # Pre-exec hook (1.9.0) — LAST thing before execve, so anything it
+        # installs (seccomp, Landlock, dropped capabilities) is in force for
+        # the exec'd image. Deliberately after the signal reset: a hook that
+        # installs a seccomp filter would otherwise have to allowlist
+        # rt_sigprocmask purely to let the reset run.
+        #
+        # Fails CLOSED. A hook that reports failure means the sandbox could
+        # not be established, and running the service unsandboxed is the one
+        # outcome worse than not running it — exit 126 (distinct from 127,
+        # "exec failed") so the supervisor can tell the two apart.
+        if (_pre_exec_hook != 0) {
+            if (fncall1(_pre_exec_hook, svc_def) != 0) {
+                sys_exit(126);
+            }
+        }
 
         sys_execve(str_data(binary), argv_buf, envp_buf);
         sys_exit(127);  # exec failed
