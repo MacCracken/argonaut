@@ -424,6 +424,52 @@ fn main() {
     assert_eq(sigset_has(post_set, SIGTERM), 0, "M1: SIGTERM unblocked after reset");
     assert_eq(sigset_has(post_set, SIGINT),  0, "M1: SIGINT unblocked after reset");
 
+    test_group("libro-2.8.7-persist-oversize-field");
+
+    # 1.8.5 dep-bump regression. libro 2.8.7 made `patrastore_append`
+    # REJECT any of its ten fields over 255 bytes with PATRA_ERR_ROWSZ
+    # (`_ps_field_too_long`), where it previously truncated silently.
+    # argonaut's only caller-controlled field is `details`, which is
+    # `str_from(service)` — so an over-long service name is now a new
+    # error path into the MEDIUM-2 disk-fail contract.
+    #
+    # This pins the contract rather than the libro internals: the
+    # persistent record must report failure (return 0) instead of
+    # writing a truncated row, and the in-memory chain — which
+    # `chain_append` has already extended by then — must keep growing
+    # so the divergence is observable rather than silent.
+    var os_path = str_from("/tmp/argonaut_libro287_oversize.patra");
+    syscall(87, str_data(os_path));
+    var os_pal = audit_log_open_persistent(os_path);
+    assert(os_pal != 0, "oversize: open succeeded for setup");
+
+    var os_ok = audit_log_record_persistent(os_pal, "svc-short", EVT_STARTING);
+    assert(os_ok != 0, "oversize: a short service name still persists");
+
+    # A 260-byte service name — over the 255-byte field cap. Built with
+    # str_builder and converted via str_cstr, because
+    # `audit_log_record_persistent` takes `service` as a NUL-terminated
+    # cstr and wraps it in `str_from` itself.
+    var os_sb = str_builder_new();
+    var os_i = 0;
+    while (os_i < 26) {
+        str_builder_add_cstr(os_sb, "0123456789");
+        os_i = os_i + 1;
+    }
+    var os_long = str_builder_build(os_sb);
+    assert_eq(str_len(os_long), 260, "oversize: built a 260-byte name");
+    var os_long_c = str_cstr(os_long);
+
+    var os_chain = load64(os_pal);
+    var os_before = chain_len(os_chain);
+    var os_res = audit_log_record_persistent(os_pal, os_long_c, EVT_STARTED);
+    assert_eq(os_res, 0, "oversize: over-cap details reports failure");
+    assert_eq(chain_len(os_chain), os_before + 1,
+      "oversize: in-memory chain still advanced (divergence observable)");
+
+    audit_log_close_persistent(os_pal);
+    syscall(87, str_data(os_path));
+
     test_group("closeout-medium2-fork-exec-envp-path");
 
     # MEDIUM-2: fork_exec_service must pass a usable PATH in envp,

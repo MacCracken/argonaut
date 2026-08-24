@@ -6,6 +6,53 @@
 
 ## Version
 
+**1.8.5** (toolchain pin bump to cyrius **6.5.35** + dependency refresh to
+latest tags, with `lib/` deleted and repopulated from scratch, and the
+retirement of two dep pins that were silently *downgrading* the toolchain's
+own bundled libraries. `cyrius.cyml` + `qemu/helpers/cyrius.cyml` pin
+**6.4.62 → 6.5.35**; **libro 2.8.0 → 2.8.12**, carrying **patra 1.12.9 →
+1.13.10**, **sigil 3.11.1 → 3.12.9** and **sakshi 2.4.2 → 2.4.11**
+transitively. The headline is not size — it is that the `sakshi` and `patra`
+git dep blocks were **reverting fixes on every build**. `lib/sakshi.cyr` and
+`lib/patra.cyr` have shipped in the cyrius stdlib fold since at least 6.0.1;
+`cyrius deps` overlays a git dep on top of that snapshot on *every*
+`cyrius build`, so the 1.12.9 patra pin overwrote the fold's 1.12.10 —
+**the release that fixed argonaut's own filed P1**, the `''` SQL-escaping
+bug in libro's `patrastore_append` — and the 2.4.2 sakshi pin overwrote the
+fold's 2.4.6. `deps --verify` cannot see this: the lock is written from
+disk, so it records the downgraded hash and agrees with itself. Both blocks
+retired; `"sakshi"` + `"patra"` named in the manifest's `stdlib` array
+instead; both now verified byte-identical to the 6.5.35 fold. **libro is the
+sole remaining git dep** — correctly, it is not folded. **Breaking for
+persisted audit chains**: libro 2.8.11 and 2.8.12 each change the entry
+preimage and 2.8.12 changes the tree-head signature, so chains written by
+≤2.8.10 will not verify (affects `config.audit_persist` deployments only;
+default off). **Zero argonaut `src/` change** was needed for the bump: all 28
+`.tcyr` suites pass, and the build is **warning-free** for the first time
+since 1.8.1. The only test addition is **+5 assertions** pinning a genuinely
+new error path — libro 2.8.7 makes `patrastore_append` *reject* an over-255-byte
+field with `PATRA_ERR_ROWSZ` where it previously truncated silently, and
+argonaut's `details` is `str_from(service)`, so an over-long service name now
+drops the persisted record while the in-memory chain still advances (**748
+assertions** total). Binary **782,688 →
+1,120,400 bytes (+43.1 %)**, entirely upstream and dominated by the *fold*
+rather than the git deps — `lib/bayan.cyr` alone grows +496,834 B (bayan
+1.1.0 → 1.5.2) of the +660,550 B stdlib delta. `.bss` is 84,336 B; no large
+static data warning. Two latent CI defects fixed: `cyrius fmt <file>`
+changed between 6.5.0 and 6.5.35 from print-to-stdout to **rewrite-in-place,
+print-nothing**, which made CI's `diff -q <(cyrius fmt …)` gate fail
+unconditionally *and* silently reformat the checkout — replaced with
+`fmt --check`; and 8 files carried real fmt drift that was **already red at
+6.4.62**, so 1.8.4's "fmt clean" claim was wrong (fixed; whitespace-only,
+`git diff -w` empty). CI + release builds now pass `--check-lib-sync`, the
+only automatic detector for the downgrade class. `cyrius.lock`: **56
+verified, 0 failed** (was 54). Lint / fmt / vet clean. Mandatory bench gate
+recorded as `1.8.5-cyrius-6.5.35` — **net win vs `1.8.4-cyrius-6.4.62`, zero
+regressions** — 28 of 29 micros faster, one uptick
+(`mark_all_steps_complete` +0.45 µs / +1.0 %, inside the ±2 µs band). The
+apparent 85–88 % wins on the five sub-µs micros are a bench-clock **floor**
+change, min 907 ns → 0 ns, not a speedup.)
+
 **1.8.4** (toolchain pin bump to cyrius **6.4.62** + dependency refresh to
 latest tags, with `lib/` deleted and repopulated from scratch. `cyrius.cyml`
 + `qemu/helpers/cyrius.cyml` pin **6.2.11 → 6.4.62**; **patra 1.11.2 →
@@ -279,7 +326,23 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Toolchain
 
-- `cyrius = "6.4.62"` pinned in `cyrius.cyml [package]` (was 6.2.11 at
+- `cyrius = "6.5.35"` pinned in `cyrius.cyml [package]` (bumped from 6.4.62
+  at 1.8.5). **6.5.x is a linear-scan register-allocator rewrite** — upstream
+  reports the prior behaviour failing 69 of 282 corpus tests with *wrong
+  answers rather than crashes*, which for PID 1 makes it the highest-risk
+  bump class: a clean build proves nothing, only the full sweep + bench gate
+  do. Five diagnostics became hard errors in the range (wrong argument count
+  6.5.1; integer literal to a `: cstring` param 6.5.2; syntax errors in
+  *uncalled* underscore-free functions 6.5.17; `cyrius lint` on an
+  unparseable file 6.5.19; `#derive` placement 6.5.30/31) — argonaut trips
+  none. `cyrius fmt <file>` now **rewrites in place and prints nothing**
+  (see the comment on the fmt gate in `.github/workflows/ci.yml`).
+  `freelist` became
+  thread-safe at 6.5.19 at a **+13 % single-threaded** alloc+free cost that
+  argonaut pays. Two coupled minimums: sigil ≥ 3.12.6 needs cyrius ≥ 6.5.14,
+  sigil ≥ 3.12.1 needs ≥ 6.4.65 — so the toolchain pin and the libro 2.8.12
+  pin move together.
+- (was 6.4.62 at 1.8.4, 6.2.11 at
   1.8.3, 6.0.56 at 1.8.2, 6.0.53 at 1.8.1, 6.0.26 at 1.8.0, 6.0.14 at
   1.7.1; bumped to 6.4.62 at 1.8.4 to sit on the current toolchain. 6.4.x
   tightened the **reachability analysis** — a call to an undefined function
@@ -311,8 +374,10 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **x86_64: ~787 KB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, **786,776 bytes at 1.8.4** under cyrius 6.4.62; **−843,104 / −51.7 %** from 1.8.3's 1,629,880). The drop is entirely upstream — **libro 2.8.0 resolves a thin sigil surface** (sha256/ed25519/ML-DSA/hex) instead of the monolithic `dist/sigil.cyr`, whose x509/RSA/authenticode bignum tables carried a ~13 MB static `.bss` footprint the audit chain never linked. No argonaut-side change. 1,683 unreachable fns NOPed (434,916 bytes reclaimed). (Was 1,629,880 at 1.8.3 under 6.2.11; 1,297,744 at 1.8.1 under 6.0.53; 1,044,440 at 1.8.0 under 6.0.26.)
-- **L3 helper: 11936 bytes** static cyrius ELF (`qemu/helpers/l3-helper`); bundled into the qemu harness initramfs as `/bin/l3-helper`. **Committed binary held at the 6.0.14 build** — under 6.0.26 a fresh `cyrius build` emits a 14,592-byte helper (codegen drift), but the helper's syscall ABI is unchanged and the qemu harness only greps its `/l3.marker` output, so the bundled fixture was not re-cut at 1.8.0 to avoid churning the vendored `qemu/helpers/lib/` snapshot. Re-cut it the next time the harness itself changes.
+- **x86_64: ~1.12 MB** statically linked ELF (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`, **1,120,400 bytes at 1.8.5** under cyrius 6.5.35; **+337,712 / +43.1 %** from 1.8.4's 782,688). Entirely upstream, and dominated by the **stdlib fold** rather than the git deps: across argonaut's declared module set the 6.4.62 → 6.5.35 snapshot grows **+660,550 bytes of source**, of which `lib/bayan.cyr` alone is **+496,834** (144,249 → 641,083; bayan 1.1.0 → 1.5.2). `lib/patra.cyr` +43,958, `freelist` +20,481, `thread` +16,077, `fs` +14,000, `alloc` +13,147, `chrono` +12,484. Git-dep side: libro's dist +90,404, sigil-mldsa +9,544. **Not a static-data regression** — `.bss` is **84,336 bytes**, no `large static data` warning. 2,260 unreachable fns NOPed (661,698 bytes reclaimed). No argonaut-side bloat.
+- (1.8.4 measured 786,776 bytes as released; a rebuild of the same tree under the 6.5.35 wrapper gives 782,688 — that is the number the 1.8.5 delta is taken against, so the comparison isolates the dep/manifest change from wrapper drift.)
+- **superseded** — 1.8.4 line: **~787 KB** statically linked ELF (`CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut`, **786,776 bytes at 1.8.4** under cyrius 6.4.62; **−843,104 / −51.7 %** from 1.8.3's 1,629,880). The drop is entirely upstream — **libro 2.8.0 resolves a thin sigil surface** (sha256/ed25519/ML-DSA/hex) instead of the monolithic `dist/sigil.cyr`, whose x509/RSA/authenticode bignum tables carried a ~13 MB static `.bss` footprint the audit chain never linked. No argonaut-side change. 1,683 unreachable fns NOPed (434,916 bytes reclaimed). (Was 1,629,880 at 1.8.3 under 6.2.11; 1,297,744 at 1.8.1 under 6.0.53; 1,044,440 at 1.8.0 under 6.0.26.)
+- **L3 helper: 11936 bytes** static cyrius ELF (`qemu/helpers/l3-helper`); bundled into the qemu harness initramfs as `/bin/l3-helper`. **Committed binary still held at the 6.0.14 build** — a fresh `cyrius build` emits 14,592 bytes under 6.0.26 and **18,456 bytes under 6.5.35** (codegen drift; also warns `undefined function 'alloc'`, harmless given the helper's `stdlib = ["syscalls"]` and its raw-syscall-only body). The helper's syscall ABI is unchanged and the qemu harness only greps its `/l3.marker` output, so the fixture was again not re-cut at 1.8.5 — only `qemu/helpers/cyrius.cyml`'s pin moved 6.4.62 → 6.5.35. Re-cut it the next time the harness itself changes.
 - **aarch64: 1,166,336 bytes** statically linked ARM ELF (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`), **RESTORED under cyrius 6.0.14**. The 6.0.1 `cycc_aarch64` regression (hang > 5 min, or silent ~21 KB stub on `src/main.cyr`) is fixed; the CI / release 6.x-major gate is removed, leaving only the `cycc_aarch64`-presence check. The +121 KB delta vs x86_64 tracks aarch64's fixed-width instruction encoding. (Last green before the 6.0.1 regression: ~1.14 MB at 1.6.3 under `cc5_aarch64` 5.10.44.)
 - Dead-code floor: **1,683 unreachable functions NOPed** under DCE at 1.8.4 / 6.4.62 (434,916 bytes reclaimed). −1,287 vs 1.8.3's 2,970 — the thin sigil surface links a far smaller crypto footprint, so there is less unreachable code to NOP in the first place. Not a public-surface change. (Was 2,970 at 1.8.3 / 6.2.11; 2,634 at 1.8.1 / 6.0.53; 2,090 at 1.8.0 / 6.0.26.)
 - Was 378 KB at 1.2.0, 641 KB at 1.3.0, 650 KB at 1.4.0, 652 KB at
@@ -324,55 +389,66 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Suites
 
-- **Native x86_64: 28 .tcyr suites / 743 assertions** (0 failures on cyrius 6.4.62). At 1.8.4 the toolchain/dep bump touched test *headers* — three suites (`audit_lifecycle`, `parity`, `cc3_ptr_regression`) gained `src/resolver.cyr` + `src/audit_ext.cyr` includes (6.4.62 reachability), `audit_extended` fixed three `str_from`-vs-cstr call sites, and ten files (incl. the shared `tests/test_header.cyr` and bench-gate `src/bench_main.cyr`) dropped the monolithic `lib/sigil.cyr` include — but the assertion surface is unchanged. +2 over 1.6.3 for the 1.7.0 BOOT_MINIMAL shape additions (`svcs_has_name` in `types_b.tcyr`, `steps_has_stage` in `types_a2.tcyr`).
+- **Native x86_64: 28 .tcyr suites / 748 assertions** (0 failures on cyrius 6.5.35). **1.8.5 required zero *src* changes** — the toolchain + dep bump was source-clean, which is the notable result given 6.5.x is a register-allocator rewrite. Test-tree edits: **+5 assertions** in `audit_findings.tcyr` for the new `libro-2.8.7-persist-oversize-field` group (pins the >255-byte `PATRA_ERR_ROWSZ` contract libro 2.8.7 introduced); canonical reformatting of `audit_extended.tcyr` + `modules_c.tcyr` (whitespace-only); a stale-comment fix in `serde.tcyr` (the patra `json_build/6` collision it warned about no longer exists). At 1.8.4 the toolchain/dep bump touched test *headers* — three suites (`audit_lifecycle`, `parity`, `cc3_ptr_regression`) gained `src/resolver.cyr` + `src/audit_ext.cyr` includes (6.4.62 reachability), `audit_extended` fixed three `str_from`-vs-cstr call sites, and ten files (incl. the shared `tests/test_header.cyr` and bench-gate `src/bench_main.cyr`) dropped the monolithic `lib/sigil.cyr` include — but the assertion surface is unchanged. +2 over 1.6.3 for the 1.7.0 BOOT_MINIMAL shape additions (`svcs_has_name` in `types_b.tcyr`, `steps_has_stage` in `types_a2.tcyr`).
 - **qemu harness:** `qemu/pid1-harness-test.sh` covers M3 + L3 end-to-end under real PID 1 (KVM + `+invtsc`); `qemu/boot-test.sh` covers the supervisor-loop smoke. Both ~0.5 s wall time on local KVM.
 - **aarch64 (qemu-user): unblocked under cyrius 6.0.14** — the `cycc_aarch64` cross-build works again, so the sweep can run. Last green sweep: **26 of 28** at 1.6.3 under `cc5_aarch64` 5.10.44 (2 suites in the documented known-failure budget — qemu emulation limits + upstream sigil Ed25519 quirk — see `docs/architecture/001-cross-arch-aarch64.md`). A fresh 6.0.14 sweep is pending a host with `qemu-aarch64` installed (absent on the current dev host); CI runs it.
 - **2 .bcyr binaries** (`tests/bcyr/argonaut.bcyr`, `tests/bcyr/api.bcyr`)
 - **37 benchmarks** wired into `src/bench_main.cyr`; history in `bench-history.csv`
 
-### Bench snapshot (1.8.4-cyrius-6.4.62, 2026-07-13)
+### Bench snapshot (1.8.5-cyrius-6.5.35, 2026-08-24)
 
-**1.8.4 verdict: net win — no regression.** The `1.8.4-cyrius-6.4.62`
-label (cyrius 6.4.62 + patra 1.12.9 + libro 2.8.0 thin sigil) is
-at-or-faster than `1.8.3-cyrius-6.2.11` on every heavy micro, several by
-double digits, from the leaner dep graph (thin sigil, agnosys dropped) plus
-6.4.x codegen. The only upticks are sub-µs on the 1 µs-scale micros
-(`health_tracker_record`, `backoff_delay_compute`, `state_transition_check`,
-`on_service_crash`, `stats_desktop`) — within the ±2 µs noise floor and
-partly an artifact of the historical integer-rounded rows vs 6.4.x's new
-decimal precision (a 1.3 µs value recorded as `1` pre-6.4.x now reads as
-`1.3`) — not regressions. `audit_log_record` (which exercises sha256) is a
-slight win on the thin sigil binary. From 1.8.4 the CSV stores **decimal µs**
-(ns/us/ms normalized by the rewritten `bench-history.sh` parser); the gate is
-measured on the thin `src/bench_main.cyr` binary (~791 KB, matching
-production — not the pre-fix 14 MB monolith-linked bench build).
+**1.8.5 verdict: net win — zero regressions.** 28 of 29 micros are faster
+than `1.8.4-cyrius-6.4.62`; the sole uptick is `mark_all_steps_complete`
+(+0.452 µs / +1.0 %), well inside the ±2 µs noise band. The win holds
+*despite* cyrius 6.5.19 making `fl_alloc`/`fl_free` thread-safe at a +13 %
+single-threaded cost (26.4 → 29.9 ns per alloc+free pair) that argonaut,
+being single-threaded, pays in full.
 
-| Bench | 1.8.3 avg | 1.8.4 avg | Δ |
+| Bench | 1.8.4 | 1.8.5 | Δ |
 |---|---|---|---|
-| build_boot_seq_desktop | 3 µs | 2.3 µs | −0.7 |
-| **init_new_desktop** | **35 µs** | **25.0 µs** | **−10 (−29 %)** |
-| init_new_minimal | 10 µs | 6.6 µs | −3 |
-| resolve_order_desktop | 13 µs | 10.5 µs | −2 |
-| **resolve_order_chain_50** | **99 µs** | **74.4 µs** | **−25 (−25 %)** |
-| **resolve_order_chain_100** | **225 µs** | **184.8 µs** | **−40 (−18 %)** |
-| resolve_waves_chain_20 | 67 µs | 56.0 µs | −11 |
-| resolve_waves_desktop | 16 µs | 12.9 µs | −3 |
-| plan_shutdown_reboot | 17 µs | 13.4 µs | −4 |
-| **generate_tmpfile_cmds_20** | **31 µs** | **14.5 µs** | **−16 (−53 %)** |
-| mark_all_steps_complete | 53 µs | 45.3 µs | −8 |
-| audit_log_record | 8 µs | 7.8 µs | −0.2 |
-| health_tracker_record | 1 µs | 1.4 µs | +0.4 (noise) |
-| state_transition_check | 1 µs | 1.3 µs | +0.3 (noise) |
+| build_boot_seq_desktop | 2.295 µs | 1.084 µs | −1.21 (−52.8 %) |
+| **init_new_desktop** | **24.972 µs** | **22.817 µs** | **−2.16 (−8.6 %)** |
+| init_new_minimal | 6.620 µs | 5.511 µs | −1.11 (−16.8 %) |
+| resolve_order_chain_10 | 10.315 µs | 9.266 µs | −1.05 (−10.2 %) |
+| resolve_order_chain_50 | 74.421 µs | 73.752 µs | −0.67 |
+| resolve_order_chain_100 | 184.792 µs | 182.968 µs | −1.82 (−1.0 %) |
+| resolve_waves_chain_20 | 56.009 µs | 54.299 µs | −1.71 (−3.1 %) |
+| resolve_waves_desktop | 12.946 µs | 12.634 µs | −0.31 |
+| plan_shutdown_reboot | 13.415 µs | 12.631 µs | −0.78 |
+| generate_unit | 5.898 µs | 4.911 µs | −0.99 (−16.7 %) |
+| **generate_tmpfile_cmds_20** | **14.513 µs** | **12.526 µs** | **−1.99 (−13.7 %)** |
+| configure_readonly_rootfs | 3.451 µs | 2.044 µs | −1.41 (−40.8 %) |
+| verify_rootfs_integrity | 2.965 µs | 1.691 µs | −1.27 (−43.0 %) |
+| mark_all_steps_complete | 45.295 µs | 45.747 µs | +0.45 (+1.0 %, noise) |
+| audit_log_record | 7.841 µs | 7.113 µs | −0.73 (−9.3 %) |
 
-(See `bench-history.csv` for the full series + every prior label.)
+⚠ **Do not read the sub-µs micros as an 85–88 % speedup.**
+`health_tracker_record`, `health_history_record`, `state_transition_check`,
+`backoff_delay_compute` and `on_service_crash` report **min = 907 ns** at
+1.8.4 and **min = 0 ns** at 1.8.5: the 6.5.x bench clock resolves below the
+~0.9 µs floor the 6.4.x harness clamped to, so the averages drop by roughly
+that floor. Read those five as *"unchanged, now measurable"* and treat 1.8.5
+as their new baseline rather than comparing across the 6.4/6.5 boundary.
+
+⚠ **`bench-history.csv` records every bench twice per label** (58 rows / 29
+uniq at 1.8.3, 1.8.4 and 1.8.5 alike). `src/bench_main.cyr` prints each micro
+once in its section and again under `=== Summary ===`, and the
+`bench-history.sh` awk parser matches both. Values are identical, so
+comparisons are unaffected — but the duplication is real and predates 1.8.5.
+Fix the parser (anchor on the pre-Summary block) in a standalone patch.
+
+(See `bench-history.csv` for the full series + every prior label. The
+1.8.4 snapshot table it replaces is in CHANGELOG [1.8.4].)
 
 ## Dependencies
 
-- **stdlib (24 modules)**: `string fmt alloc vec str slice syscalls io fs process hashmap tagged args bayan fnptr freelist chrono ct keccak thread thread_local random assert bench` (`json` + `bigint` folded into **`bayan`** at 1.8.3/6.2.x; sakshi + sigil are external git pins resolved transitively; `slice` + `thread_local` explicit since 1.8.1 — `thread_local` is still required ahead of the transitive crypto and the 6.2.x auto-resolver won't pull it on its own).
-- **libro 2.8.0** — single-module dist (`lib/libro.cyr`) via `[deps.libro] tag = "2.8.0" modules = ["dist/libro.cyr"]`. **Bumped 2.7.4 → 2.8.0 at 1.8.4** (latest). libro 2.8.0 pins patra 1.12.9 + sigil 3.11.1 transitively (matching argonaut's direct pins) and resolves the **thin sigil surface** rather than the monolith. Compiles clean under 6.4.62.
-- **patra 1.12.9** — explicit dep, **bumped 1.11.2 → 1.12.9 at 1.8.4** (latest). libro 2.8.0 pins the same 1.12.9. Note: patra 1.12.7 moved the table-insert tail-page cache into the db handle; 1.12.9 routed all file opens through the stdlib `file_open` ABI bridge (Linux behavior unchanged). Builds clean under 6.4.62.
-- **sakshi 2.4.2 (now an EXPLICIT `[deps.sakshi]` git block) + sigil 3.11.1 (thin sub-bundles, transitive via libro) — agnosys DROPPED** — resolved into `lib/` by `cyrius deps`. sigil **3.7.14 → 3.11.1** and sakshi **2.2.3 → 2.4.2** at 1.8.4. **sakshi must be declared explicitly** (git, tag 2.4.2, tracking patra 1.12.9's pin): libro 2.8.0 lists `sakshi` in its own `[deps] stdlib` and cyrius does not recursively resolve a git dep referenced that way, so a clean single-pass `cyrius deps` (CI) failed with `dep libro requires 'sakshi' but it is not in the cyrius stdlib` until the block was added (see architecture quirk 004 §4). sigil now lands as **thin capability sub-bundles** (`lib/sigil_sha256.cyr`, `lib/sigil_sha_ni.cyr`, `lib/sigil-mldsa.cyr`, `lib/sigil_hex.cyr`) covering sha256 + ed25519 + ML-DSA + hex — **not** `dist/sigil.cyr` (whose x509/RSA/authenticode bignum tables carry the ~13 MB static that ballooned the binary pre-1.8.4). **agnosys (was 1.3.2) is no longer in the dependency graph** — its `ERR_IO`/`ERR_UNKNOWN` duplicate-symbol and `run_capture` arity build warnings are gone with it. Test/bench files must **not** `include "lib/sigil.cyr"` — see architecture quirk on thin-sigil test includes.
-- **`cyrius.lock`** — 6.4.62's `cyrius deps` populates per-file SHA-256 hashes for all resolved `lib/*.cyr` units (`cyrius deps --verify` → **54 verified, 0 failed**, 4 commit-pinned); was 49 at 1.8.3 — the split sigil sub-bundles are more files than the old monolith, minus the dropped agnosys.
+- **stdlib (26 modules)**: `string fmt alloc vec str slice syscalls io fs process hashmap tagged args bayan fnptr freelist chrono ct keccak thread thread_local random assert bench sakshi patra`. **`sakshi` + `patra` joined the array at 1.8.5**, replacing the retired git dep blocks — both are stdlib-*folded* libraries and take their version from the toolchain pin. `json` + `bigint` folded into **`bayan`** at 1.8.3/6.2.x; `slice` + `thread_local` explicit since 1.8.1 (`thread_local` must precede the transitive crypto; the auto-resolver won't pull it on its own). `atomic`, `sync` and `test` are declared leaves of `dist/libro.deps` but called zero times by `dist/libro.cyr` — deliberately **not** named, since naming a module force-includes it; cyrius resolves them transitively (clean-room `rm -rf lib && cyrius deps` → 56 deps, 0 failed).
+- **libro 2.8.12 — the SOLE git dep** — single-module dist (`lib/libro.cyr`), `tag = "2.8.12" modules = ["dist/libro.cyr"]`. **Bumped 2.8.0 → 2.8.12 at 1.8.5** (latest). No public symbol renamed or removed; all 40 symbols argonaut calls from `src/audit.cyr` / `src/audit_ext.cyr` keep byte-identical signatures. Pins patra **1.13.10** + sigil **3.12.9** transitively — both matching the 6.5.35 fold, so the overlay and the fold agree and no downgrade is possible at this pin. Still resolves the **thin sigil surface**, not the monolith. ⚠ **2.8.11 + 2.8.12 are on-disk BREAKING** — see the Breaking section of CHANGELOG [1.8.5]; persisted chains from libro ≤2.8.10 will not verify.
+- **patra 1.13.10 — from the FOLD, not a pin.** The explicit git block was **retired at 1.8.5**. It had pinned 1.12.9 over a 1.12.10 fold, reverting the `''` SQL-escaping fix (`patra_quote_str`) that argonaut itself filed — on every build, invisible to `deps --verify`. Now byte-identical to `~/.cyrius/versions/6.5.35/lib/patra.cyr` (sha256 `7cdc24d8…`). 1.13.0 removed all of patra's own git dep blocks for the same reason. Behaviour notes: **1.13.10** stopped `patra_init` calling `sakshi_set_level(SK_WARN)` (it was process-global and clobbered the host's level — argonaut calls `patra_init()` at `src/audit_ext.cyr:33`, so any future `SK_INFO` logging is no longer killed by store init); **1.13.6** returns `PATRA_ERR_ROWSZ` for an over-long STR instead of silently truncating to 255 B; **1.13.8** moved the WAL to format v4 (a v4 WAL is not readable by an older binary — mixed-version access to one `.patra` is the hazard).
+- **sakshi 2.4.11 — from the FOLD, not a pin.** Explicit git block **retired at 1.8.5**; it had pinned 2.4.2 over a 2.4.6 fold, reinstating the `i64::MIN` formatter bug and the agnos `_sk_open` `O_RDWR` fold. Now byte-identical to the 6.5.35 fold (sha256 `585037b7…`). No breaking API change 2.4.2 → 2.4.11; argonaut's three `sakshi_span_enter` sites are balanced and it never calls `sakshi_log_kv`, so neither the 2.4.10 hook-payload nor the 2.4.11 span-refusal change reaches it.
+- **sigil 3.12.9 — thin sub-bundles, transitive via libro; agnosys still out of the graph.** `lib/sigil-mldsa.cyr`, `lib/sigil_sha256.cyr`, `lib/sigil_sha_ni.cyr`, `lib/sigil_hex.cyr` (sha256 + ed25519 + ML-DSA + hex). `sha256.cyr`, `sha_ni.cyr` and `hex.cyr` are **byte-identical** 3.11.1 → 3.12.9; only `sigil-mldsa` changed (+9,544 B; sole module addition `mul64.cyr`). ⚠ Never name `"sigil"` in the stdlib array — that pulls the **monolith** (27,671 lines / 1,084,265 B at 6.5.35) with the whole x509 + RSA + authenticode surface. The `~13 MB static` figure it used to carry is **stale** post-3.12.9 de-banking (upstream now measures 785,408 B); the conclusion is not. Test/bench files must still **not** `include "lib/sigil.cyr"` — the rule now lives in `tests/test_header.cyr`, next to the include block.
+- **Security posture of the sigil advance:** 3.12.9 ships two CRITICAL auth bypasses (3.12.3 PKCS#1 v1.5, 3.12.6 RSA-PSS) and a HIGH (3.12.9 Bellcore verify-after-sign). **None is on argonaut's linked path** — every fix is in `rsa.cyr` / `bignum.cyr` / `authenticode.cyr` / `sys_error.cyr`, none of which is in the `mldsa` profile, and `dist/sigil-mldsa.cyr` at 3.12.9 contains zero `bn_*` / `_rsa_*` / `x509_*` call sites. Argonaut also spawns no threads, and the whole lane-collision class needs ≥2. Recorded so it need not be re-derived.
+- **`cyrius.lock`** — `cyrius deps --verify` → **56 verified, 0 failed**, **3 commit-pinned** (libro, sigil, patra); was 54 verified / 4 commit-pinned at 1.8.4. One fewer commit pin because sakshi now comes from the fold rather than a git tag. ⚠ `--verify` **cannot** detect a fold downgrade — the lock is written *from disk*. The mechanical guard is `cyrius build --check-lib-sync`, wired into CI + release at 1.8.5.
 
 ## In-flight
 
@@ -413,32 +489,79 @@ production — not the pre-fix 14 MB monolith-linked bench build).
   delta) and would have dominated the 1.8.0 release diff. Batch it as
   a standalone style-polish patch where it won't obscure functional
   changes.
+- **RESOLVED (1.8.5) — the dep-pin downgrade class.** The `sakshi` and
+  `patra` git blocks were overlaying older copies of stdlib-folded
+  libraries on top of the toolchain snapshot on every build, invisible
+  to `deps --verify`. Both retired; `cyrius build --check-lib-sync` is
+  now wired into CI + release as the mechanical guard. The why-trail
+  lives in the `cyrius.cyml` comment, next to the retired blocks. Kept
+  here one release.
 - **RESOLVED (1.8.4) — sigil monolith bloat in test builds.** libro
   2.8.0's thin sigil surface + dropping the explicit `include
   "lib/sigil.cyr"` from 10 test/bench files (incl. the shared header + bench entry) removes the ~13 MB static and
-  the −51.7 % binary drop. Documented as architecture quirk
-  `004-thin-sigil-and-cyrius-6.4.md`. Kept here for one release as the
-  why-trail. (The 6.0.1 `cycc_aarch64` and libro-2.6.3-unit-limit
+  the −51.7 % binary drop. (The `004` quirk doc that recorded this was
+  deleted at 1.8.5 as a toolchain reference; the live rule moved into
+  `tests/test_header.cyr`.) Kept here for one release as the why-trail. (The 6.0.1 `cycc_aarch64` and libro-2.6.3-unit-limit
   why-trails were pruned at 1.8.4 — long past their one-release window.)
 - Stale `src/test_*.cyr` stub cleanup (predate `tests/tcyr/`).
-- Patra `json_build/6` namespace upstream — file an issue against
-  patra rather than continue working around it.
-- **Upstream (libro) — `patrastore_append` builds `INSERT … VALUES`
-  via unescaped string interpolation.** A field containing a `'`
-  (single quote) produces malformed SQL → `PATRA_ERR_SYNTAX`, so the
-  audit write silently fails. Surfaced at 1.8.4 via a test passing a
-  garbage service name. Service/action/detail strings are
-  operator-controlled in an init system (LOW), but the audit chain
-  should not be corruptible by a stray quote — file against libro to
-  escape values (or move to patra bind parameters once available).
+- **RESOLVED (1.8.5) — patra `json_build/6` namespace.** Already fixed
+  upstream at **patra 1.9.0**; argonaut's rule was stale by ~15 patra
+  releases. `dist/patra.cyr` at 1.13.10 defines `patra_json_build` and
+  `json_build_lens`, and no bare `json_build` — so the stdlib
+  `json_build/1` (now in `bayan`) is unshadowed. CLAUDE.md's hard
+  constraint and the `tests/tcyr/serde.tcyr` comment were both
+  corrected at 1.8.5.
+- **RESOLVED (1.8.5, upstream) — libro `patrastore_append` SQL
+  interpolation.** Fixed in **libro 2.8.1**, whose release note credits
+  **"argonaut P1"** by name: the write path is now a bound prepared
+  statement (`patra_prepare` + 10x `patra_bind_text` +
+  `patra_exec_prepared`), so values are stored as bytes and never
+  reparsed as SQL. Two follow-ons closed at **2.8.11** — the
+  `hash_algorithm` column was bound with `strlen()` on a `Str` fat
+  pointer (garbage in every row written by 2.8.1–2.8.10), and the
+  *read* path (`patrastore_by_source`) had never been migrated off
+  interpolation. Kept here one release as the why-trail.
+- **NEW (1.8.5) — three libro call sites worth migrating.** Not
+  required to compile and deliberately left out of the 1.8.5 diff
+  (behaviour change, not a dep bump), but all three targets exist in
+  `lib/libro.cyr` today:
+  - `src/audit_ext.cyr:224` `merkle_verify_proof(proof)` — libro now
+    documents this as **self-referential**: it checks a proof against
+    the root carried *inside that same proof*, so a proof for a
+    different tree verifies. Migrate to
+    `merkle_verify_inclusion(mp, expected_root, entry_h)`, passing
+    argonaut's own trusted root and `merkle_leaf_hash(entry_hash(e))`.
+  - `src/audit_ext.cyr:242` — same defect; migrate to
+    `merkle_verify_consistency_against(cp, expected_new_root)`.
+  - `src/audit_ext.cyr:103` `patrastore_load_all(store)` — now a legacy
+    wrapper that **swallows I/O failure into an empty vec**, so a
+    deleted or permission-stripped `.patra` is indistinguishable from
+    an empty log (libro rates it High). Migrate to
+    `patrastore_load_all_or_err` + `libro_is_error`. For PID 1 that
+    distinction is the whole point.
+- **NEW (1.8.5) — upstream request against libro.** libro 2.8.12 still
+  carries its own `deps.patra` git block. It is byte-identical to the
+  6.5.35 fold *at this pin*, so the hazard is closed today — but it
+  reopens the moment cyrius folds a patra newer than libro's pin. Ask
+  libro to drop the block (patra's own rule 2 forbids a git block for a
+  folded module). Until then, re-check the `lib/patra.cyr` banner after
+  a `cyrius build` — not after `cyrius deps` — on every toolchain bump.
+- **NEW (1.8.5) — `bench-history.csv` records every bench twice.**
+  58 rows / 29 unique per label at 1.8.3, 1.8.4 and 1.8.5 alike:
+  `src/bench_main.cyr` prints each micro in its section and again under
+  `=== Summary ===`, and the `bench-history.sh` awk parser matches
+  both. Values are identical so comparisons are unaffected, but the
+  duplication is real and predates 1.8.5. Anchor the parser on the
+  pre-Summary block in a standalone patch.
 
 ## Pending release (unreleased)
 
-- **1.8.4** (UNRELEASED — staged in the working tree, not yet tagged) — toolchain pin bump to cyrius **6.4.62** + dep refresh to latest (**patra 1.11.2 → 1.12.9**, **libro 2.7.4 → 2.8.0**). libro 2.8.0 resolves the **thin sigil surface** (sigil 3.7.14 → 3.11.1, sakshi 2.2.3 → 2.4.2, **agnosys dropped**), collapsing the x86_64 DCE binary **1,629,880 → 786,776 bytes (−51.7 %)** — the monolithic sigil's ~13 MB x509/RSA static is no longer linked. Consumer migrations: 10 test/bench files dropped the monolithic `include "lib/sigil.cyr"` (incl. the shared `tests/test_header.cyr` and bench-gate `src/bench_main.cyr`); 3 suites gained `src/resolver.cyr` + `src/audit_ext.cyr` includes (6.4.62 reachability); `audit_extended` fixed to pass service names as cstr (latent `str_from(Str)` bug, exposed as `PATRA_ERR_SYNTAX`); `argonaut.bcyr` `audit_log_new` → `argonaut_audit_log_new`; `bench-history.sh` parser rewritten for 6.4.x decimal/mixed-unit output. 28 / 743 green; lockfile 54 verified / 0 failed; lint/fmt/vet clean; bench gate **net win vs 1.8.3, no regressions**. New architecture quirk: `docs/architecture/004-thin-sigil-and-cyrius-6.4.md`.
+- **1.8.5** (UNRELEASED — staged in the working tree, not yet tagged) — toolchain pin bump to cyrius **6.5.35** + dep refresh to latest (**libro 2.8.0 → 2.8.12**, carrying **patra 1.12.9 → 1.13.10**, **sigil 3.11.1 → 3.12.9**, **sakshi 2.4.2 → 2.4.11**). **Retired the `sakshi` and `patra` git dep blocks** — both were silently downgrading stdlib-folded libraries on every build; the patra pin was reverting argonaut's *own* filed P1 fix. `libro` is now the sole git dep. **Breaking for persisted audit chains** (libro 2.8.11 + 2.8.12 change the entry preimage and the tree-head signature; `config.audit_persist` deployments must re-export and re-anchor). Zero `src/` changes; **28 suites / 748 assertions** (+5 for the new `libro-2.8.7-persist-oversize-field` group). Build **warning-free**; binary 782,688 → 1,120,400 B (+43.1 %, upstream, dominated by `lib/bayan.cyr` +496,834 B). Fixed two latent CI defects: the fmt gate broke under 6.5.35's rewrite-in-place `cyrius fmt` (now `--check`), and 8 files carried fmt drift that was already red at 6.4.62. CI + release now pass `--check-lib-sync`. Lockfile **56 verified / 0 failed**; lint / fmt / vet clean; bench gate **net win vs 1.8.4, zero regressions**.
 
 ## Recent shipped
 
-- **1.8.3** (2026-06-15) — toolchain pin bump to cyrius **6.2.11** + dep refresh (**patra 1.10.3 → 1.11.2**, **libro 2.7.1 → 2.7.4**; transitive sigil 3.6.0 → 3.7.14). 6.2.x consolidated `json` + `bigint` stdlib modules into **`bayan`** (manifest + 9 test/bench include sites migrated); libro sub-module includes collapsed to the single `dist/libro.cyr` bundle; `thread_local` made an explicit include ahead of sigil; bench harness ported off the `alloc_reset()`+`alloc_init()` idiom to a heap high-water-mark rewind. Quirks doc'd in `docs/architecture/003-cyrius-6.2-stdlib-resolution.md`. Clean x86_64 DCE build (1,629,880 bytes; 2,970 dead-fns NOPed); 28 / 0 green; lockfile 49 verified.
+- **1.8.4** (2026-07-13) — toolchain pin bump to cyrius **6.4.62** + dep refresh (**patra 1.11.2 → 1.12.9**, **libro 2.7.4 → 2.8.0**). libro 2.8.0's **thin sigil surface** (sigil 3.7.14 → 3.11.1, sakshi 2.2.3 → 2.4.2, agnosys dropped) collapsed the x86_64 DCE binary 1,629,880 → 786,776 bytes (−51.7 %). 10 test/bench files dropped the monolithic `include "lib/sigil.cyr"`; 3 suites gained `src/resolver.cyr` + `src/audit_ext.cyr` includes; `bench-history.sh` parser rewritten for 6.4.x decimal/mixed-unit output. 28 / 743 green; lockfile 54 verified. (Its "lint / fmt / vet clean" claim was **wrong on fmt** — 8 files carried `--check` drift, caught and fixed at 1.8.5.)
+- **1.8.3** (2026-06-15) — toolchain pin bump to cyrius **6.2.11** + dep refresh (**patra 1.10.3 → 1.11.2**, **libro 2.7.1 → 2.7.4**; transitive sigil 3.6.0 → 3.7.14). 6.2.x consolidated `json` + `bigint` stdlib modules into **`bayan`** (manifest + 9 test/bench include sites migrated); libro sub-module includes collapsed to the single `dist/libro.cyr` bundle; `thread_local` made an explicit include ahead of sigil; bench harness ported off the `alloc_reset()`+`alloc_init()` idiom to a heap high-water-mark rewind. Clean x86_64 DCE build (1,629,880 bytes; 2,970 dead-fns NOPed); 28 / 0 green; lockfile 49 verified.
 - **1.8.0** (2026-06-01 — committed, untagged; superseded by 1.8.1) — toolchain pin bump to cyrius **6.0.26** + 1.7.x closeout refactor. Cleared the 6.0.14→6.0.26 pin-drift warning. Removed a leftover `/child.marker` debug write from `fork_exec_service`; consolidated six `HealthCheckResult` allocations into `health_result_new`; fixed a stale `cyrius.toml`→`cyrius.cyml` comment. Added a **mandatory benchmark gate** to CLAUDE.md (release-blocking on unexplained regression). Clean x86_64 DCE build (1,044,440 bytes, −704; 2,090 dead-fns NOPed); 28 / 743 green; benches neutral. patra 1.10.3, libro held at 2.6.2.
 
 - **1.7.1** (2026-05-28) — toolchain pin bump to cyrius **6.0.14** + **aarch64 cross-build restored** (6.0.1 `cycc_aarch64` hang/stub fixed upstream; CI / release 6.x gate removed; real 1,166,336-byte ARM ELF). patra 1.9.3 → 1.10.3 (libro held at 2.6.2 — 2.6.3 trips a `cycc` 6.0.14 unit limit, deferred). Clean x86_64 DCE build (1,045,144 bytes, 2,086 dead-fns NOPed); 28 / 743 green; benches flat vs the 6.0.1 draft. `cyrius.lock` populated with per-file SHA-256s (was empty). Known harmless `ct_eq` duplicate-fn warning (sigil 3.0.1 dist ships `ct_eq`, collides with the live 1.5.5 compat shim).

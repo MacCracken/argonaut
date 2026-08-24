@@ -84,15 +84,21 @@ jobs:
           [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
 
       - name: Format check
-        # `cyrius fmt <file>` writes the formatted source to stdout; diff
-        # against the committed file catches drift. (`--check` only sets
-        # the exit code; it does NOT emit the formatted output, so diffing
-        # its stdout always reports spurious drift.)
+        # `cyrius fmt <file> --check` sets the exit code (0 clean / 1 drift)
+        # and leaves the file untouched. Verified non-mutating at 6.5.35.
+        #
+        # Do NOT go back to the pre-1.8.5 `diff -q <(cyrius fmt "$f") "$f"`
+        # form. Cyrius changed `fmt` between 6.5.0 and 6.5.35: it used to
+        # print the formatted source to stdout and leave the file alone;
+        # it now REWRITES IN PLACE and prints nothing. Under 6.5.35 that
+        # gate diffs an empty stream against every file — so it reports
+        # drift unconditionally *and* silently reformats the CI checkout
+        # underneath the later build/test steps.
         run: |
           fail=0
           for f in src/*.cyr tests/tcyr/*.tcyr tests/bcyr/*.bcyr; do
             [ -f "$f" ] || continue
-            if ! diff -q <(cyrius fmt "$f" 2>/dev/null) "$f" > /dev/null; then
+            if ! cyrius fmt "$f" --check > /dev/null 2>&1; then
               echo "needs fmt: $f"
               fail=1
             fi
@@ -103,9 +109,15 @@ jobs:
         run: cyrius vet src/main.cyr
 
       - name: Build (DCE)
+        # --check-lib-sync (cyrius 6.4.63+) turns the `./lib/ shadows
+        # version-pinned <path>` warning into a hard error. It is the guard
+        # for the 1.8.5 class of defect: a stale `deps.NAME` git pin silently
+        # overlaying an OLDER copy of a stdlib-folded library on top of the
+        # toolchain snapshot, on every build, invisible to `deps --verify`
+        # (the lock is written from disk, so it records the downgraded hash).
         run: |
           mkdir -p build
-          CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut
+          CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut
           echo "argonaut: $(wc -c < build/argonaut) bytes"
 
       - name: Verify ELF

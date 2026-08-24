@@ -247,8 +247,8 @@ fn execute_health_check(service_name, hc, pid) {
         # connect failure on a wraparound port.
         if (http_port < 1 || http_port > 65535) {
             return health_result_new(service_name,
-            str_from(health_check_type_str(check_type)), 0, 0,
-            str_from("HTTP check: port out of range"));
+              str_from(health_check_type_str(check_type)), 0, 0,
+              str_from("HTTP check: port out of range"));
         }
 
         # H1 (closed 1.5.2): resolve the configured host via
@@ -264,15 +264,15 @@ fn execute_health_check(service_name, hc, pid) {
         # injection class.
         if (sanitize_host_for_header(host_str) == 0) {
             return health_result_new(service_name,
-            str_from(health_check_type_str(check_type)), 0, 0,
-            str_from("HTTP check: host has invalid byte"));
+              str_from(health_check_type_str(check_type)), 0, 0,
+              str_from("HTTP check: host has invalid byte"));
         }
 
         var http_ip = resolve_host_ipv4(host_str);
         if (http_ip < 0) {
             return health_result_new(service_name,
-            str_from(health_check_type_str(check_type)), 0, 0,
-            str_from("HTTP check: host did not resolve"));
+              str_from(health_check_type_str(check_type)), 0, 0,
+              str_from("HTTP check: host did not resolve"));
         }
 
         # M2: heap-copy + NUL-terminate the path. The legacy code
@@ -377,7 +377,7 @@ fn execute_health_check(service_name, hc, pid) {
     var latency = monotonic_ms() - start;
 
     var result = health_result_new(service_name,
-    str_from(health_check_type_str(check_type)), passed, latency, message);
+      str_from(health_check_type_str(check_type)), passed, latency, message);
 
     # Trace result
     if (passed) {
@@ -420,8 +420,8 @@ fn execute_ready_check(service_name, rc, pid) {
         if (remaining <= 0) {
             # Timed out
             return health_result_new(service_name, 0, 0,
-            monotonic_ms() - overall_start,
-            str_from("ready check timed out"));
+              monotonic_ms() - overall_start,
+              str_from("ready check timed out"));
         }
 
         # Update remaining timeout for this attempt
@@ -447,7 +447,7 @@ fn execute_ready_check(service_name, rc, pid) {
     str_builder_add_int(sb, retries);
     str_builder_add_cstr(sb, " retries");
     return health_result_new(service_name, 0, 0,
-    monotonic_ms() - overall_start, str_builder_build(sb));
+      monotonic_ms() - overall_start, str_builder_build(sb));
 }
 
 # =========================================================================

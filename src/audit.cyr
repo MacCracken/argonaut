@@ -171,7 +171,7 @@ fn audit_log_record_with_agent(log, service, event_type, agent) {
     var action = str_from(event_type_str(event_type));
     var details = str_from(service);
     return chain_append_with_agent(
-    log, severity, source, action, details, str_from(agent));
+      log, severity, source, action, details, str_from(agent));
 }
 
 # Export audit log to file descriptor as JSONL

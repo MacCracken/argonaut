@@ -33,7 +33,16 @@ fn sakshi_span_enter(name, len) { return 0; }
 fn sakshi_span_exit() { return 0; }
 fn sakshi_span_depth() { return 0; }
 
-# Libro core chain modules
+# Libro core chain modules.
+#
+# Do NOT add `include "lib/sigil.cyr"` here or in any .tcyr/.bcyr. Nothing in
+# argonaut calls sigil_* directly — sigil is reached only through libro, whose
+# manifest resolves the THIN sub-bundles (sha256 / sha_ni / mldsa / hex). A
+# hand-written monolith include pulls the full x509+RSA surface, collides with
+# the thin bundle (hundreds of `duplicate fn ... last definition wins`), and
+# made the bench-gate binary 14.3 MB against ~790 KB thin — so the recorded
+# bench numbers stopped describing the production binary. Removed from 10
+# files at 1.8.4; keep it out.
 include "lib/libro.cyr"
 
 # Argonaut modules (audit before init — init depends on audit;

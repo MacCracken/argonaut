@@ -157,7 +157,7 @@ fn audit_log_record_persistent_with_agent(pal, service, event_type, agent) {
     var action = str_from(event_type_str(event_type));
     var details = str_from(service);
     var e = chain_append_with_agent(chain, severity, source, action, details,
-    str_from(agent));
+      str_from(agent));
     if (load64(pal + 24) == 1) { return 0; }
     var rc = patrastore_append(store, e);
     if (rc != 0) { return 0; }

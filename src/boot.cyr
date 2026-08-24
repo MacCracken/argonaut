@@ -9,9 +9,9 @@ fn build_boot_sequence(mode) {
     var s0 = str_from("Mount essential filesystems (proc, sys, dev, tmp)");
     vec_push(steps, boot_step_new(STAGE_MOUNT_FS, s0, 1, 2000));
     vec_push(steps, boot_step_new(STAGE_DEVICE_MGR,
-    str_from("Start udev device manager"), 1, 3000));
+        str_from("Start udev device manager"), 1, 3000));
     vec_push(steps, boot_step_new(STAGE_VERIFY_ROOTFS,
-    str_from("Verify rootfs integrity via dm-verity"), 1, 5000));
+        str_from("Verify rootfs integrity via dm-verity"), 1, 5000));
     var s3 = str_from("Initialize Landlock, seccomp, and MAC policies");
     vec_push(steps, boot_step_new(STAGE_SECURITY, s3, 1, 2000));
 

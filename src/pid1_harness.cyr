@@ -125,9 +125,9 @@ fn pid1_harness_l3() {
     syscall(87, "/l3.marker");
 
     var sd = svc_def_new(
-    str_from("l3-test"),
-    str_from("L3 setsid end-to-end test (1.6.3 helper)"),
-    str_from("/bin/l3-helper"));
+      str_from("l3-test"),
+      str_from("L3 setsid end-to-end test (1.6.3 helper)"),
+      str_from("/bin/l3-helper"));
 
     var spid = fork_exec_service(sd);
     if (spid <= 0) {

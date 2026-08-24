@@ -72,7 +72,7 @@ CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut    # release build
 - Do not commit `build/` (compiled binaries)
 - Do not add Cyrius stdlib includes in individual src files — the manifest resolves them
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the only source of truth (no separate `.cyrius-toolchain` file)
-- Do not call stdlib `json_build/1` — `lib/patra.cyr` defines a 6-arg overload that silently shadows it; use `str_builder` directly
+- Prefer `str_builder` over stdlib `json_build/1` for flat JSON. (The old hard ban is **retired at 1.8.5**: patra renamed its 6-arg overload to `patra_json_build` at 1.9.0, and patra 1.13.10 defines no bare `json_build` — the shadowing is gone. `str_builder` is still the hot-path choice.)
 - Do not use `break` in `while` loops with `var` declarations — flag + `continue`
 - Do not write negative literals as `(0 - N)` — `-N` works since cyrius 3.10.3
 - Do not mix `&&` / `||` in one expression — nest `if` blocks instead
@@ -179,7 +179,8 @@ Rationale: argonaut is PID 1 — boot sequencing, dependency resolution, and hea
 - `match` is reserved; `return;` without value is invalid (use `return 0;`); all `var` declarations are function-scoped
 - Per-compilation-unit limits: 4,096 variables, 1,024 functions, 4,096 initialized globals, 16,384 fixups (cc5 5.4.2+)
 - Counting rule: only a top-level `var NAME = <non-literal>;` (call / identifier / expression initializer) consumes an initialized-globals slot; a bare integer-literal init (`var x = 42;`) takes the static-init fast path and enum members are const-folded, so neither counts. See the cyrius guide's **Global Initializers** section (`docs/guides/cyrius-guide.md` in the cyrius repo)
-- **Patra `json_build/6` shadows stdlib `json_build/1`** — never call stdlib `json_build`; build flat JSON with `str_builder` directly
+- **Module-level `var X[N]` is N *slots*, not N bytes** — a top-level `var buf[N]` reserves N eight-byte slots (8N bytes of static data); only a *function-local* `var buf[N]` is N bytes. Measured upstream in sigil 3.12.9, whose de-banking freed 9,994,240 bytes = 1,249,280 declared units x 8, exactly. Size every module-level buffer as 8N when auditing static footprint
+- ~~Patra `json_build/6` shadows stdlib `json_build/1`~~ — **retired 1.8.5**; patra namespaced it to `patra_json_build` at 1.9.0 and 1.13.10 defines no bare `json_build`
 
 ## CI / Release
 
@@ -208,6 +209,8 @@ Rationale: argonaut is PID 1 — boot sequencing, dependency resolution, and hea
 - [`CHANGELOG.md`](CHANGELOG.md) — source of truth for all changes
 
 New quirks land in `docs/architecture/` as numbered items (`NNN-kebab-case.md`); new decisions in `docs/adr/` using the template. **Never renumber either series.**
+
+**A toolchain pin bump or a dependency refresh does not earn a numbered doc.** It is routine maintenance, and it already gets recorded twice: as a CHANGELOG entry, and as a comment next to the code the constraint actually binds (`cyrius.cyml` for manifest shape, the CI workflow for a gate, `tests/test_header.cyr` for an include rule). A third copy in `docs/architecture/` is a place to forget to update, not a place to look. Reserve the numbered series for argonaut's *own* surface — the aarch64 artifact matrix and its known-failure budget (001), the qemu PID-1 harness (002). Both `003` and `004` were toolchain quirk refs and were deleted at 1.8.5.
 
 Full doc-tree convention: [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md).
 

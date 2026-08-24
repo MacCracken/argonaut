@@ -147,8 +147,9 @@ fn main() {
     assert(json_get(bp, str_from("name")) != 0, "json get name");
     assert_eq(json_get_int(bp, str_from("value")), 42, "json get int");
 
-    # Manual str_builder build (avoid stdlib json_build — name collides with
-    # patra.cyr's 6-arg json_build; patra wins the late-bind).
+    # Manual str_builder build. (The old patra `json_build/6` collision is
+    # gone as of 1.8.5 — patra namespaced it to `patra_json_build` at 1.9.0.
+    # str_builder stays: it's the zero-temporary form for flat JSON.)
     var bsb = str_builder_new();
     str_builder_add_cstr(bsb, "{\"k1\":\"v1\",\"k2\":\"v2\"}");
     var built = str_builder_build(bsb);

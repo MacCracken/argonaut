@@ -21,13 +21,13 @@ fn main() {
 
     var chain = chain_new();
     chain_append(chain, SEV_INFO, str_from("argonaut"),
-    str_from("Starting"), str_from("daimon"));
+      str_from("Starting"), str_from("daimon"));
     chain_append(chain, SEV_INFO, str_from("argonaut"),
-    str_from("Started"),  str_from("daimon"));
+      str_from("Started"),  str_from("daimon"));
     chain_append(chain, SEV_WARNING, str_from("argonaut"),
-    str_from("Restarting"), str_from("daimon"));
+      str_from("Restarting"), str_from("daimon"));
     chain_append(chain, SEV_INFO, str_from("argonaut"),
-    str_from("Started"),  str_from("daimon"));
+      str_from("Started"),  str_from("daimon"));
 
     var root = audit_log_merkle_root(chain);
     assert(root != 0, "merkle: root non-null for non-empty chain");
@@ -114,7 +114,7 @@ fn main() {
     assert_eq(chain_len(pal_chain(pal)), 4, "persist: chain grew to 4");
 
     audit_log_record_persistent_with_agent(pal, "postgres", EVT_STARTING,
-    "fleet-agent");
+      "fleet-agent");
     assert_eq(chain_len(pal_chain(pal)), 5, "persist: with_agent appends too");
 
     audit_log_flush_persistent(pal);

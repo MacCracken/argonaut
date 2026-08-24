@@ -8,10 +8,10 @@
 
 fn postgres_service() {
     var sd = svc_def_new(
-    str_from("postgres"),
-    str_from("PostgreSQL 17 database server"),
-    str_from("/usr/lib/postgresql/17/bin/postgres")
-    );
+      str_from("postgres"),
+      str_from("PostgreSQL 17 database server"),
+      str_from("/usr/lib/postgresql/17/bin/postgres")
+      );
     var args = svc_def_args(sd);
     vec_push(args, str_from("-D"));
     vec_push(args, str_from("/var/lib/postgresql/data"));
@@ -31,10 +31,10 @@ fn postgres_service() {
 
 fn redis_service() {
     var sd = svc_def_new(
-    str_from("redis"),
-    str_from("Redis 7 in-memory cache"),
-    str_from("/usr/bin/redis-server")
-    );
+      str_from("redis"),
+      str_from("Redis 7 in-memory cache"),
+      str_from("/usr/bin/redis-server")
+      );
     vec_push(svc_def_args(sd), str_from("/etc/redis/redis.conf"));
 
     vec_push(svc_def_modes(sd), BOOT_SERVER);
@@ -60,10 +60,10 @@ fn database_services() {
 
 fn ifran_service() {
     var sd = svc_def_new(
-    str_from("ifran"),
-    str_from("Ifran — local LLM inference, training, and fleet management"),
-    str_from("/usr/lib/agnos/ifran")
-    );
+      str_from("ifran"),
+      str_from("Ifran — local LLM inference, training, and fleet management"),
+      str_from("/usr/lib/agnos/ifran")
+      );
     var args = svc_def_args(sd);
     vec_push(args, str_from("serve"));
     vec_push(args, str_from("--config"));
@@ -92,10 +92,10 @@ fn ifran_service() {
 
 fn shruti_service() {
     var sd = svc_def_new(
-    str_from("shruti"),
-    str_from("Shruti digital audio workstation"),
-    str_from("/usr/local/bin/shruti")
-    );
+      str_from("shruti"),
+      str_from("Shruti digital audio workstation"),
+      str_from("/usr/local/bin/shruti")
+      );
     var env = svc_def_env(sd);
     map_set(env, "SHRUTI_DATA_DIR", str_from("/var/lib/shruti"));
     map_set(env, "PIPEWIRE_RUNTIME_DIR", str_from("/run/user/1000"));
@@ -123,10 +123,10 @@ fn default_services(mode) {
     # Edge: agent-runtime only
     if (mode == BOOT_EDGE) {
         var sd = svc_def_new(
-        str_from("daimon"),
-        str_from("Daimon agent orchestrator (edge mode)"),
-        str_from("/usr/lib/agnos/agent_runtime")
-        );
+          str_from("daimon"),
+          str_from("Daimon agent orchestrator (edge mode)"),
+          str_from("/usr/lib/agnos/agent_runtime")
+          );
         var args = svc_def_args(sd);
         vec_push(args, str_from("--port"));
         vec_push(args, str_from("8090"));
@@ -157,10 +157,10 @@ fn default_services(mode) {
 
     # Agent-runtime (always present for non-recovery/edge)
     var daimon = svc_def_new(
-    str_from("daimon"),
-    str_from("Daimon agent orchestrator"),
-    str_from("/usr/lib/agnos/agent_runtime")
-    );
+      str_from("daimon"),
+      str_from("Daimon agent orchestrator"),
+      str_from("/usr/lib/agnos/agent_runtime")
+      );
     vec_push(svc_def_args(daimon), str_from("--port"));
     vec_push(svc_def_args(daimon), str_from("8090"));
     store64(daimon + 56, RESTART_ALWAYS);
@@ -183,10 +183,10 @@ fn default_services(mode) {
     # Enables boot-to-shell MVP: kernel + kybernet + agnoshi reach a prompt on iron.
     if (mode == BOOT_MINIMAL) {
         var min_shell = svc_def_new(
-        str_from("agnoshi"),
-        str_from("AI shell (console mode)"),
-        str_from("/usr/lib/agnos/agnoshi")
-        );
+          str_from("agnoshi"),
+          str_from("AI shell (console mode)"),
+          str_from("/usr/lib/agnos/agnoshi")
+          );
         vec_push(svc_def_modes(min_shell), BOOT_MINIMAL);
         store64(min_shell + 72, health_check_new(HC_PROCESS_ALIVE, 0, 0, 10000, 1000, 3));
         vec_push(services, min_shell);
@@ -195,10 +195,10 @@ fn default_services(mode) {
     # LLM gateway and ifran for Server/Desktop
     if (mode == BOOT_SERVER || mode == BOOT_DESKTOP) {
         var gw = svc_def_new(
-        str_from("llm-gateway"),
-        str_from("Hoosh LLM inference gateway"),
-        str_from("/usr/lib/agnos/llm_gateway")
-        );
+          str_from("llm-gateway"),
+          str_from("Hoosh LLM inference gateway"),
+          str_from("/usr/lib/agnos/llm_gateway")
+          );
         vec_push(svc_def_args(gw), str_from("--port"));
         vec_push(svc_def_args(gw), str_from("8088"));
         vec_push(svc_def_deps(gw), str_from("daimon"));
@@ -214,10 +214,10 @@ fn default_services(mode) {
     # Desktop-only services
     if (mode == BOOT_DESKTOP) {
         var comp = svc_def_new(
-        str_from("aethersafha"),
-        str_from("Wayland compositor"),
-        str_from("/usr/lib/agnos/aethersafha")
-        );
+          str_from("aethersafha"),
+          str_from("Wayland compositor"),
+          str_from("/usr/lib/agnos/aethersafha")
+          );
         map_set(svc_def_env(comp), "XDG_SESSION_TYPE", str_from("wayland"));
         vec_push(svc_def_deps(comp), str_from("daimon"));
         vec_push(svc_def_modes(comp), BOOT_DESKTOP);
@@ -226,10 +226,10 @@ fn default_services(mode) {
         vec_push(services, comp);
 
         var shell = svc_def_new(
-        str_from("agnoshi"),
-        str_from("AI terminal shell"),
-        str_from("/usr/lib/agnos/agnoshi")
-        );
+          str_from("agnoshi"),
+          str_from("AI terminal shell"),
+          str_from("/usr/lib/agnos/agnoshi")
+          );
         vec_push(svc_def_deps(shell), str_from("daimon"));
         vec_push(svc_def_deps(shell), str_from("aethersafha"));
         vec_push(svc_def_modes(shell), BOOT_DESKTOP);
