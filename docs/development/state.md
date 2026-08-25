@@ -6,6 +6,28 @@
 
 ## Version
 
+**1.13.2** (the edge-boot execution path could never succeed. `run_safe_cmd`
+passed `SafeCommand`'s bare binary name — `"mount"`, `"veritysetup"`,
+`"cryptsetup"` — to `exec_vec_str`, which calls `sys_execve` directly, and
+**execve does not search `$PATH`**. Every command failed ENOENT and the child
+exited 127, so `configure_readonly_rootfs` / `verify_rootfs_integrity` /
+`unlock_luks` / `close_luks` were all inert. Unnoticed because no consumer
+imports `src/edge_boot.cyr`. `_resolve_safe_binary` now resolves against
+/usr/sbin, /sbin, /usr/bin, /bin with access(X_OK); explicit paths pass
+through; nothing found returns 127 without forking. Found by kybernet's
+v1.5.7 work, before it wired the path up — consuming it as-is with
+readonly_rootfs required would have refused boot on every edge device.
+872 → **886 assertions**; new tests observed failing on the unfixed tree.
+Bench gate flagged three sub-µs benches; all three land within 1-2 ns of
+1.12.0 and none reaches run_safe_cmd — 1.13.1 was the fast outlier, not
+1.13.2 a regression. Also fixed: run_safe_cmd no longer delegates to the
+stdlib's exec_vec_str, which waits UNBOUNDED and FAILS OPEN — it discards
+waitpid's return and reads a STATIC status buffer (verified on 6.5.35), so a
+failed wait reports the previous command's exit code, or 0 = success on the
+first call. run_safe_cmd_timeout does a bounded WNOHANG wait with a checked
+status, SIGKILL+reap on timeout, reset_child_signal_mask in the child, and a
+real PATH in envp.)
+
 **1.13.1** (aarch64 syscall + `struct stat` portability. Every literal
 x86_64 `syscall(N, ...)` in argonaut is gone; the survivors live in one
 audited file, `src/syscall_compat.cyr`. Nine numbers were landing on the

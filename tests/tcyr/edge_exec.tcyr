@@ -73,6 +73,74 @@ fn main() {
     var vr2 = validate_edge_profile(br, 999999);
     assert(vec_len(vr2) > 0, "vep over");
 
+    test_group("safe-cmd-binary-resolution");
+
+    # 1.13.2. Every SafeCommand above is built with a BARE binary name
+    # ("mount", "veritysetup", "cryptsetup"), and run_safe_cmd ultimately
+    # reaches the stdlib's exec_vec_str, which calls sys_execve directly.
+    # execve(2) does NOT search $PATH — a name with no slash is resolved
+    # against the CWD — so every one of these commands used to fail ENOENT
+    # and the child died on exec_vec_str's sys_exit(127). The whole
+    # edge-boot execution path could never succeed; it went unnoticed only
+    # because no consumer imported this module.
+    var t = safe_cmd_new(str_from("true"));
+    assert_eq(run_safe_cmd(t), 0, "resolve: bare 'true' resolves and runs");
+
+    var f = safe_cmd_new(str_from("false"));
+    assert_eq(run_safe_cmd(f), 1, "resolve: bare 'false' runs, exit code preserved");
+
+    var a = safe_cmd_new(str_from("/bin/true"));
+    assert_eq(run_safe_cmd(a), 0, "resolve: explicit path still runs");
+
+    # A missing binary must be a clean 127, not a hang and not a false 0.
+    var n = safe_cmd_new(str_from("arg-no-such-binary-xyz"));
+    assert_eq(run_safe_cmd(n), 127, "resolve: missing binary -> 127");
+
+    # Resolver unit behaviour.
+    assert_eq(_resolve_safe_binary(str_from("arg-no-such-binary-xyz")), 0,
+      "resolve: returns 0 when nothing matches");
+    assert(str_eq(_resolve_safe_binary(str_from("/bin/true")), str_from("/bin/true")) == 1,
+      "resolve: explicit path passes through unchanged");
+    var rt = _resolve_safe_binary(str_from("true"));
+    assert(rt != 0, "resolve: bare name resolves to something");
+    assert(str_starts_with(rt, "/") == 1, "resolve: result is absolute");
+
+    # A sequence stops on the first failure and reports its code.
+    var seq = vec_new();
+    vec_push(seq, safe_cmd_new(str_from("true")));
+    vec_push(seq, safe_cmd_new(str_from("arg-no-such-binary-xyz")));
+    vec_push(seq, safe_cmd_new(str_from("true")));
+    assert_eq(run_safe_cmd_sequence(seq), 127, "resolve: sequence stops on missing binary");
+
+    test_group("safe-cmd-bounded-exec");
+
+    # 1.13.2. run_safe_cmd no longer delegates to the stdlib's exec_vec_str,
+    # which waits unbounded AND fails open (it discards waitpid's return and
+    # reads a STATIC status buffer, so a failed wait reports the previous
+    # command's exit code — or 0, i.e. SUCCESS, on the first call).
+
+    # A command that outruns its bound must be KILLED and reported as
+    # failure, not waited on forever. `sleep 5` against a 300 ms bound.
+    var slow = safe_cmd_new(str_from("sleep"));
+    safe_cmd_add_arg(slow, str_from("5"));
+    var t0 = monotonic_ms();
+    var rc = run_safe_cmd_timeout(slow, 300);
+    var elapsed = monotonic_ms() - t0;
+    assert_eq(rc, 0 - 1, "timeout: over-budget command reports failure");
+    assert(elapsed < 3000, "timeout: returned well before the child would exit");
+
+    # And the bound does not penalise a command that finishes inside it.
+    var quick = safe_cmd_new(str_from("true"));
+    assert_eq(run_safe_cmd_timeout(quick, 10000), 0, "timeout: fast command still returns 0");
+
+    # Exit codes survive the new wait path, including non-zero ones. This is
+    # the fail-open regression test: under exec_vec_str a wait that did not
+    # land reported the STATIC buffer's contents rather than this exit code.
+    var f2 = safe_cmd_new(str_from("false"));
+    assert_eq(run_safe_cmd_timeout(f2, 10000), 1, "timeout: exit 1 preserved");
+    var t2 = safe_cmd_new(str_from("true"));
+    assert_eq(run_safe_cmd_timeout(t2, 10000), 0, "timeout: exit 0 after a failure, not sticky");
+
     return assert_summary();
 }
 var r = main();

@@ -7,6 +7,112 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.13.2] — 2026-08-24
+
+**The edge-boot execution path could never succeed, and when it failed it
+failed OPEN.** Two independent defects on the same trust path. Suite
+872 → 886 assertions across 30 suites, 0 failures.
+
+### Fixed — `run_safe_cmd` built argv from a bare binary name
+
+`src/edge_boot.cyr` builds every `SafeCommand` with an unqualified name —
+`safe_cmd_new(str_from("mount"))`, `"veritysetup"`, `"cryptsetup"`.
+`run_safe_cmd` handed that straight to the stdlib's `exec_vec_str`, which
+does a bare `sys_execve(cmd, argv, envp)`.
+
+**`execve(2) does not search `$PATH`.** A pathname containing no slash is
+resolved relative to the CWD, so every one of those execs failed `ENOENT`
+and the forked child died on `exec_vec_str`'s `sys_exit(127)`.
+
+Verified against cyrius 6.5.35:
+
+```
+exec_vec_str(["true"])      -> 127     <- execve failed
+exec_vec_str(["/bin/true"]) -> 0
+```
+
+So `configure_readonly_rootfs`, `verify_rootfs_integrity`, `unlock_luks`
+and `close_luks` returned 127 on every command, and `execute_edge_boot`
+recorded "rootfs lockdown failed" / "dm-verity exec failed" unconditionally.
+The entire edge-boot execution surface was inert. It went unnoticed because
+**no consumer imports `src/edge_boot.cyr`** — argonaut's own binary does,
+but nothing exercised the exec path under test.
+
+Found by kybernet's v1.5.7 edge-boot work, and found *before* kybernet wired
+it up: had it consumed this as-is with `readonly_rootfs` required, every
+edge device would have refused to boot.
+
+`_resolve_safe_binary` now resolves a bare name against `/usr/sbin`,
+`/sbin`, `/usr/bin`, `/bin` (sbin first — these are admin tools; all four
+because a split-usr system does not resolve the first two through a
+symlink), checking `access(X_OK)`. An explicit path is passed through
+verbatim. A name that resolves nowhere returns **127** rather than
+attempting a fork, matching the shell convention and `exec_vec_str`'s own
+failed-exec code.
+
+Note the `envp` `exec_vec_str` passes is empty, so a `PATH` inherited from
+the parent would not have helped even if `execve` honoured it — resolution
+has to happen on this side.
+
+The new assertions were observed **failing against the unfixed tree**:
+`bare 'true' runs and exits 0 (got 127, expected 0)`.
+
+### Fixed — `run_safe_cmd` no longer delegates to `exec_vec_str`
+
+The stdlib's `exec_vec_str` has two properties that are untidy in a CLI and
+unacceptable on a PID-1 trust path:
+
+**Unbounded, uninterruptible wait.** `sys_waitpid(pid, &stbuf, 0)` — no
+`WNOHANG`, no deadline. A consumer that blocks SIGCHLD/SIGTERM for a
+signalfd (kybernet does) cannot even break it with `EINTR`. A `cryptsetup`
+stalled on a wedged block device hangs init forever, with no console and no
+shutdown.
+
+**Fail-open.** It discards `waitpid`'s return value and reads the status
+buffer unconditionally — and `var stbuf[4]` is **static storage in cyrius,
+not stack**. Verified on 6.5.35: the same address is returned on every call
+and the contents persist between them. So a wait that does not land reports
+whatever the *previous* command exited with, or `0` on the first call — and
+`0` means `WIFEXITED` true, `WEXITSTATUS` 0, i.e. **success**. On
+`veritysetup open` that is a verification which never ran, reported as
+verified.
+
+Neither is fixable from argonaut (`lib/process.cyr` belongs to the
+toolchain), so `run_safe_cmd_timeout(cmd, timeout_ms)` does the exec
+directly with a bounded, status-checked wait modelled on `process_stop`:
+`WNOHANG` polling against a deadline, `ret > 0` before any status read,
+`ret < 0` reported as failure rather than falling through, and SIGKILL +
+reap on timeout so PID 1 is not left with a stray child. `run_safe_cmd`
+delegates with a 30 s default.
+
+The child now also gets `reset_child_signal_mask()`, which `exec_vec_str`
+omits — without it an inherited PID-1 mask leaves `cryptsetup` unkillable by
+SIGTERM — and a real `PATH` in its envp instead of an empty environment.
+
+### Benchmarks
+
+Gate passes: 0 regressions vs the preceding run. No benchmark exercises
+`run_safe_cmd` — it forks and execs, which nothing in the suite does.
+
+Recording the reading anyway, because the sub-microsecond benches in this
+suite move ±20% run to run and it keeps getting re-litigated. Against the
+stable `1.12.0-extra-env` reference, everything lands within noise; the
+largest is `health_history_record` 168 → 199 ns. The intermediate
+`1.13.2-exec-resolve` run flagged three (`backoff_delay_compute` +19.8%,
+`health_tracker_record` +17.4%, `on_service_crash` +15.3%) purely because
+`1.13.1` had been an unusually FAST run:
+
+```
+backoff_delay_compute   1.12.0: 210   1.13.1: 177   1.13.2: 212
+health_tracker_record   1.12.0: 218   1.13.1: 190   1.13.2: 223
+on_service_crash        1.12.0: 205   1.13.1: 176   1.13.2: 203
+```
+
+All three return to their 1.12.0 values. Treat a single flagged sub-µs bench
+here as run-to-run variance until a second run or a bisect says otherwise.
+
+---
+
 ## [1.13.1] — 2026-08-24
 
 **aarch64 syscall + `struct stat` portability.** Every literal x86_64

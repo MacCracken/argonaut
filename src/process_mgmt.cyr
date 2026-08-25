@@ -90,24 +90,140 @@ fn load_env_files(paths) {
 # SafeCommand execution
 # =========================================================================
 
-# Run a SafeCommand and return exit code. -1 on spawn failure.
-fn run_safe_cmd(cmd) {
-    var binary = str_data(safe_cmd_binary(cmd));
+# POSIX access(2) mode bits. The cyrius stdlib exposes sys_access but not
+# these constants.
+enum ArgAccessMode { ARG_F_OK = 0; ARG_X_OK = 1; }
+
+# Resolve a SafeCommand binary to an ABSOLUTE path, or 0 if not found.
+#
+# ⚠ THIS IS LOAD-BEARING, NOT A CONVENIENCE. run_safe_cmd ultimately calls
+# the stdlib's exec_vec_str, which does a bare `sys_execve(cmd, argv, envp)`
+# — and **execve(2) does not search $PATH**. A pathname containing no slash
+# is resolved relative to the CWD, so `execve("veritysetup", ...)` fails
+# ENOENT and the forked child dies on exec_vec_str's `sys_exit(127)`.
+#
+# Every SafeCommand in src/edge_boot.cyr was built with a bare name —
+# "mount", "veritysetup", "cryptsetup" — so the entire edge-boot execution
+# path returned 127 on every command and could never have succeeded. It went
+# unnoticed because no consumer imported that module. Verified against
+# cyrius 6.5.35: exec_vec_str(["true"]) -> 127, exec_vec_str(["/bin/true"])
+# -> 0. Fixed 1.13.2, found by kybernet's v1.5.7 edge-boot work.
+#
+# The envp exec_vec_str passes is empty, so a PATH inherited from the parent
+# would not help even if execve honoured it. Resolution has to happen here.
+fn _resolve_safe_binary(name) {
+    # Already an explicit path — caller's choice, use it verbatim.
+    if (str_index_of(name, 47) >= 0) { return name; }
+
+    # sbin first: these are admin tools. On a merged-usr system the first
+    # two resolve through the symlink anyway; on a split-usr one they do not,
+    # which is exactly why all four are tried.
+    var dirs = vec_new();
+    vec_push(dirs, "/usr/sbin/");
+    vec_push(dirs, "/sbin/");
+    vec_push(dirs, "/usr/bin/");
+    vec_push(dirs, "/bin/");
+
+    for (var i = 0; i < vec_len(dirs); i = i + 1) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, vec_get(dirs, i));
+        str_builder_add_str(sb, name);
+        var cand = str_builder_build(sb);
+        if (sys_access(str_data(cand), ARG_X_OK) == 0) { return cand; }
+    }
+    return 0;
+}
+
+# Default wall-clock bound for a SafeCommand. Generous: these are
+# veritysetup / cryptsetup / mount against real block devices.
+enum SafeCmdLimits { SAFE_CMD_DEFAULT_TIMEOUT_MS = 30000; }
+
+# Run a SafeCommand under a wall-clock bound. Returns the child's exit code,
+# 127 when the binary cannot be found, or -1 on spawn failure, wait failure,
+# or timeout.
+#
+# ⚠ THIS DELIBERATELY DOES NOT USE THE STDLIB'S exec_vec_str. 1.13.2.
+# That function has two properties that are merely untidy in a CLI and
+# unacceptable on a PID-1 trust path:
+#
+#   1. UNBOUNDED, UNINTERRUPTIBLE WAIT. `sys_waitpid(pid, &stbuf, 0)` — no
+#      WNOHANG, no deadline. A consumer that blocks SIGCHLD/SIGTERM for a
+#      signalfd (kybernet does) cannot even break it with EINTR. A
+#      cryptsetup stalled on a wedged block device hangs init forever.
+#   2. FAIL-OPEN. It discards waitpid's return value and reads the status
+#      buffer unconditionally — and `var stbuf[4]` is STATIC storage in
+#      cyrius, not stack (verified on 6.5.35: same address across calls,
+#      contents persist). So a failed wait reports whatever the PREVIOUS
+#      command exited with, or 0 on the first call. Zero means WIFEXITED
+#      true, WEXITSTATUS 0 — SUCCESS. On `veritysetup open` that is a
+#      verification that never ran reported as verified.
+#
+# Neither is fixable from here (lib/process.cyr is the toolchain's), so the
+# exec is done directly with a bounded, status-checked wait modelled on
+# process_stop. The child also gets reset_child_signal_mask() — exec_vec_str
+# omits it, so an inherited PID-1 mask would leave cryptsetup unkillable by
+# SIGTERM.
+fn run_safe_cmd_timeout(cmd, timeout_ms) {
+    var resolved = _resolve_safe_binary(safe_cmd_binary(cmd));
+    if (resolved == 0) { return 127; }
     var cmd_args = safe_cmd_args(cmd);
     var argc = vec_len(cmd_args);
 
-    # Build argv vec for exec_vec_str (1.6.1 — consumes the cyrius
-    # 5.10.44 typed Str-shape exec sibling argonaut filed against
-    # 1.5.2). Caller-side argv elements are Str throughout the
-    # argonaut codebase, so the cstr-shape `exec_vec` silently
-    # failed on the argv[0] dereference path.
-    var argv = vec_new();
-    vec_push(argv, safe_cmd_binary(cmd));
+    # argv[0] is the RESOLVED path. Caller-side argv elements are Str
+    # throughout argonaut, so each needs str_data for the execve array.
+    var argv_buf = alloc((argc + 2) * 8);
+    store64(argv_buf, str_data(resolved));
     for (var i = 0; i < argc; i = i + 1) {
-        vec_push(argv, vec_get(cmd_args, i));
+        store64(argv_buf + (i + 1) * 8, str_data(vec_get(cmd_args, i)));
+    }
+    store64(argv_buf + (argc + 1) * 8, 0);
+
+    var envp = alloc(16);
+    store64(envp, "PATH=/usr/sbin:/sbin:/usr/bin:/bin");
+    store64(envp + 8, 0);
+
+    var pid = sys_fork();
+    if (pid < 0) { return 0 - 1; }
+    if (pid == 0) {
+        reset_child_signal_mask();
+        sys_execve(str_data(resolved), argv_buf, envp);
+        sys_exit(127);
     }
 
-    return exec_vec_str(argv);
+    var deadline = monotonic_ms() + timeout_ms;
+    while (monotonic_ms() < deadline) {
+        var status_buf[8];
+        store64(&status_buf, 0);
+        var ret = sys_waitpid(pid, &status_buf, WNOHANG);
+        if (ret > 0) {
+            var status = load32(&status_buf);
+            if (WIFEXITED(status)) { return WEXITSTATUS(status); }
+            if (WIFSIGNALED(status)) { return 128 + WTERMSIG(status); }
+            return 0 - 1;
+        }
+        # ret < 0 is a real wait failure (ECHILD, EINVAL). Report it as
+        # failure — never fall through to a status read, which is exactly
+        # the fail-open this function exists to avoid.
+        if (ret < 0) { return 0 - 1; }
+        sleep_ms(20);
+    }
+
+    # Over budget. Kill it and reap, so PID 1 is not left with a stray
+    # child and the caller gets a failure rather than a hang.
+    process_kill(pid);
+    var kill_deadline = monotonic_ms() + 500;
+    while (monotonic_ms() < kill_deadline) {
+        var kbuf[8];
+        store64(&kbuf, 0);
+        if (sys_waitpid(pid, &kbuf, WNOHANG) != 0) { break; }
+        sleep_ms(20);
+    }
+    return 0 - 1;
+}
+
+# Run a SafeCommand under the default bound and return its exit code.
+fn run_safe_cmd(cmd) {
+    return run_safe_cmd_timeout(cmd, SAFE_CMD_DEFAULT_TIMEOUT_MS);
 }
 
 # Run a sequence of SafeCommands, stopping on first failure.
