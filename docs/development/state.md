@@ -6,6 +6,19 @@
 
 ## Version
 
+**1.13.0** (`ServiceDefinition` carries cgroup limits. New field at +168 with
+`svc_def_cgroup_limits` / `svc_def_set_cgroup_limits`, opaque to argonaut for
+the same reason `seccomp`/`landlock`/`capabilities` are. Deliberately NOT a
+reuse of `resource_limits` (+120): argonaut's `ResourceLimits` is
+`{nofile, address_space, nproc, core}` while **agnostik independently defines
+a different 48-byte struct with the same name** and ships the only `rlim_*`
+accessors — and duplicate *structs* emit no compiler warning, so reading one
+through the other's accessors is silent. `rlim_max_memory` on an
+argonaut-built value returns `nofile`, which would have written "1024 open
+files" to `memory.max` as 1024 bytes. Additive; every existing offset
+unchanged. 868 → **872 assertions** across 30 suites. Bench not re-run — no
+code path changed.)
+
 **1.12.0** (supervisor-injectable service environment. `argonaut_set_extra_env`
 / `argonaut_extra_env` let an embedder append `KEY=value` cstrs that every
 spawned service inherits, appended after PATH by `build_default_envp`.

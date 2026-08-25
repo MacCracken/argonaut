@@ -7,6 +7,45 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.13.0] — 2026-08-24
+
+**`ServiceDefinition` carries cgroup limits.** Additive; existing field
+offsets unchanged. Suite 868 → 872 assertions across 30 suites, 0 failures.
+
+### Added — `svc_def_cgroup_limits` / `svc_def_set_cgroup_limits`
+
+A new field at the end of `ServiceDefinition` (+168), opaque to argonaut for
+exactly the reason `seccomp`, `landlock` and `capabilities` are: argonaut
+does not create cgroups and has no opinion on what a "limit" is. It carries
+the pointer so a supervisor can attach limits to a service definition the
+same way it attaches a security policy, and read them back at start time.
+kybernet 1.5.5 stores agnostik's `cgroup_limits` here.
+
+`resource_limits` (+120) was **not** reused, and the distinction matters.
+argonaut's own `ResourceLimits` is `{nofile, address_space, nproc, core}` —
+RLIMIT-shaped, consumed by `to_prlimit_commands`. agnostik independently
+defines a **different** struct with the same name,
+`{max_memory, max_cpu_time, max_fds, max_procs, max_disk, net_bw}`, and
+ships the only `rlim_*` accessors. A consumer linking both — kybernet does —
+gets agnostik's 48-byte layout for `sizeof(ResourceLimits)` while
+`svc_def_rlimits` hands back a pointer argonaut filled to its own 32-byte
+layout. Reading one through the other's accessors is silent: duplicate
+*structs* produce no compiler warning, only duplicate fns and symbols do.
+Concretely, `rlim_max_memory` on an argonaut-built `ResourceLimits` returns
+`nofile`, so "1024 open files" would have been written to `memory.max` as
+**1024 bytes**. A separate field sidesteps the collision entirely.
+
+Purely additive: `svc_def_new` zero-initialises the new slot, every existing
+offset is unchanged, and a consumer that never calls the setter is
+byte-identical to 1.12.0.
+
+### Benchmarks
+
+Not re-run: no code path changed. The addition is one slot in a struct
+literal and two accessors, neither of which any benchmark exercises.
+
+---
+
 ## [1.12.0] — 2026-08-24
 
 **Supervisors can inject environment into every spawned service.**

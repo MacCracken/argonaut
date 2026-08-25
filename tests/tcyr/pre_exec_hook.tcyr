@@ -30,20 +30,29 @@ fn main() {
     assert_eq(svc_def_seccomp(sd), 0, "seccomp defaults 0");
     assert_eq(svc_def_landlock(sd), 0, "landlock defaults 0");
     assert_eq(svc_def_capabilities(sd), 0, "capabilities defaults 0");
+    assert_eq(svc_def_cgroup_limits(sd), 0, "cgroup_limits defaults 0");
 
     # --- and round-trip through the setters ---
     svc_def_set_seccomp(sd, 0x5ECC);
     svc_def_set_landlock(sd, 0x11AD);
     svc_def_set_capabilities(sd, 0xCAB5);
+    svc_def_set_cgroup_limits(sd, 0xC670);
     assert_eq(svc_def_seccomp(sd), 0x5ECC, "seccomp set");
     assert_eq(svc_def_landlock(sd), 0x11AD, "landlock set");
     assert_eq(svc_def_capabilities(sd), 0xCAB5, "capabilities set");
+    assert_eq(svc_def_cgroup_limits(sd), 0xC670, "cgroup_limits set");
 
     # Setting one must not disturb its neighbours — these three sit at
     # +144/+152/+160, immediately past log_config, so an off-by-one in the
     # offsets would show up here and nowhere else.
     assert_eq(svc_def_log_config(sd), 0, "log_config untouched");
     assert_eq(svc_def_rlimits(sd), 0, "rlimits untouched");
+
+    # cgroup_limits (1.13.0) is the newest field, at +168 — the end of the
+    # struct. Setting it must not walk back over capabilities at +160, and
+    # the four above must survive it.
+    assert_eq(svc_def_capabilities(sd), 0xCAB5, "capabilities survives cgroup_limits");
+    assert_eq(svc_def_landlock(sd), 0x11AD, "landlock survives cgroup_limits");
 
     # --- hook registration round-trips, and returns the previous hook ---
     assert_eq(argonaut_pre_exec_hook(), 0, "no hook by default");

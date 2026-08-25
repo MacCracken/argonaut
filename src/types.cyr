@@ -822,6 +822,7 @@ struct ServiceDefinition {
     seccomp;             # seccomp config (0 = none)
     landlock;            # landlock config (0 = none)
     capabilities;        # vec of capabilities to drop (0 = none)
+    cgroup_limits;       # opaque cgroup-limits config (0 = none)
 }
 
 fn svc_def_new(name, desc, binary) {
@@ -847,6 +848,7 @@ fn svc_def_new(name, desc, binary) {
     store64(sd + 144, 0);               # seccomp
     store64(sd + 152, 0);               # landlock
     store64(sd + 160, 0);               # capabilities
+    store64(sd + 168, 0);               # cgroup_limits
     return sd;
 }
 
@@ -889,6 +891,13 @@ fn svc_def_seccomp(sd)       { return load64(sd + 144); }
 fn svc_def_landlock(sd)      { return load64(sd + 152); }
 fn svc_def_capabilities(sd)  { return load64(sd + 160); }
 
+# cgroup_limits (1.13.0). Opaque to argonaut for the same reason seccomp and
+# landlock are: argonaut does not create cgroups and does not know what a
+# "limit" means. It carries the pointer so a supervisor can attach limits to
+# a service definition the same way it attaches a security policy, and read
+# them back at start time. kybernet stores agnostik's cgroup_limits here.
+fn svc_def_cgroup_limits(sd) { return load64(sd + 168); }
+
 # Field setters (1.10.0). Without these a consumer building a
 # ServiceDefinition from config had to write raw `store64(sd + 56, ...)`
 # offsets into its own source — which puts argonaut's struct layout into
@@ -906,6 +915,7 @@ fn svc_def_set_pid_file(sd, p)        { store64(sd + 112, p); return sd; }
 fn svc_def_set_seccomp(sd, cfg)      { store64(sd + 144, cfg); return sd; }
 fn svc_def_set_landlock(sd, cfg)     { store64(sd + 152, cfg); return sd; }
 fn svc_def_set_capabilities(sd, caps) { store64(sd + 160, caps); return sd; }
+fn svc_def_set_cgroup_limits(sd, cl)  { store64(sd + 168, cl); return sd; }
 
 # =========================================================================
 # Managed service — runtime state of a service
