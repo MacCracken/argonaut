@@ -6,6 +6,26 @@
 
 ## Version
 
+**1.12.0** (supervisor-injectable service environment. `argonaut_set_extra_env`
+/ `argonaut_extra_env` let an embedder append `KEY=value` cstrs that every
+spawned service inherits, appended after PATH by `build_default_envp`.
+argonaut assembles the child envp between `fork` and `execve`, so before
+this there was no seam at all — kybernet could bind an sd_notify socket but
+never publish `$NOTIFY_SOCKET`, leaving the entire readiness/watchdog path
+unreachable from the service side. Found by kybernet's 1.5.3 rust-old port
+review. Purely additive; default unset reproduces 1.11.0 byte-for-byte.
+30 suites / **868 assertions** (was 860). Lint / fmt / vet clean; lockfile
+56 verified. Bench gate: two sub-microsecond benches flagged
+(`on_service_crash` +22%, `state_transition_check` +20%) — **neither a
+regression**; both report `min=0ns`, both land 8% *below* the
+`1.8.6-audit-baseline` two labels back, and neither path reaches
+`build_default_envp`. The `1.8.6-p-minus-1-audit` baseline was an
+unusually fast run. Binary 1137728 bytes.)
+
+> **Gap note:** 1.9.0 (argonaut_set_pre_exec_hook), 1.10.0, 1.10.1 and
+> 1.11.0 (kernel capability numbers) shipped without refreshing this file.
+> Their details are in `CHANGELOG.md`.
+
 **1.8.6** (P(-1) security / correctness / hardening pass — the fourth, and
 the first since 2026-05-11. Full report in
 `docs/audit/2026-08-24-audit.md`. **0 CRITICAL / 0 HIGH / 9 MEDIUM / 6 LOW

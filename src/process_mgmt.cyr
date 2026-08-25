@@ -152,15 +152,46 @@ fn reset_child_signal_mask() {
     return sys_sigprocmask(SIG_SETMASK, empty, 0);
 }
 
-# build_default_envp: minimal PATH-only environment vec for
-# services spawned without an explicit env (1.6.3 audit
-# MEDIUM-2). The pre-1.6.3 empty envp dropped PATH entirely;
-# this gives every service a usable PATH without needing
-# per-service config. Full `svc_def_env` map → flat-cstrs
-# conversion lands when a service legitimately needs custom env.
+# Extra environment entries a supervisor wants every service to inherit,
+# as `KEY=value` cstrs. Appended after PATH by build_default_envp.
+#
+# Added 1.12.0. argonaut builds the child's envp itself (it must — the exec
+# happens inside fork_exec_service), so a consumer had no way to put
+# anything in a service's environment. The concrete case: kybernet binds an
+# sd_notify socket, registers it with epoll and has a handler for it, but no
+# service could ever find it, because discovery is by $NOTIFY_SOCKET and
+# nothing set it. The whole readiness/watchdog-ping path was unreachable
+# from the service side. Found by kybernet's rust-old port review — the
+# Rust implementation did `env::set_var("NOTIFY_SOCKET", ...)` right after
+# binding.
+#
+# Entries are cstrs, not Str: they go straight into the execve envp array.
+# The caller owns their lifetime, which must outlive every spawn — string
+# literals or arena-allocated buffers, not stack.
+var _extra_envp = 0;
+
+fn argonaut_set_extra_env(v) {
+    var prev = _extra_envp;
+    _extra_envp = v;
+    return prev;
+}
+
+fn argonaut_extra_env() { return _extra_envp; }
+
+# build_default_envp: minimal PATH-only environment vec for services spawned
+# without an explicit env (1.6.3 audit MEDIUM-2). The pre-1.6.3 empty envp
+# dropped PATH entirely; this gives every service a usable PATH without
+# needing per-service config. Full `svc_def_env` map → flat-cstrs conversion
+# lands when a service legitimately needs custom env. Since 1.12.0 it also
+# appends whatever argonaut_set_extra_env registered.
 fn build_default_envp() {
     var v = vec_new();
     vec_push(v, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    if (_extra_envp != 0) {
+        for (var i = 0; i < vec_len(_extra_envp); i = i + 1) {
+            vec_push(v, vec_get(_extra_envp, i));
+        }
+    }
     return v;
 }
 

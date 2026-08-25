@@ -848,6 +848,34 @@ fn main() {
     var first_env_str = str_new(first_env, 5);
     assert(str_eq(first_env_str, str_from("PATH=")), "M2: first envp entry starts with PATH=");
 
+    test_group("extra-env-seam");
+
+    # 1.12.0: a supervisor can inject entries every service inherits.
+    # argonaut builds the child envp inside fork_exec_service, so without
+    # this seam a consumer had no way to reach a service's environment at
+    # all — kybernet's $NOTIFY_SOCKET could never be published.
+    assert_eq(argonaut_extra_env(), 0, "extra-env: unset by default");
+
+    var xe = vec_new();
+    vec_push(xe, "NOTIFY_SOCKET=/run/systemd/notify");
+    var prev = argonaut_set_extra_env(xe);
+    assert_eq(prev, 0, "extra-env: setter returns the previous value");
+    assert_eq(argonaut_extra_env(), xe, "extra-env: getter round-trips");
+
+    var envp2 = build_default_envp();
+    assert_eq(vec_len(envp2), vec_len(envp) + 1, "extra-env: entry appended");
+    var p0 = str_new(vec_get(envp2, 0), 5);
+    assert(str_eq(p0, str_from("PATH=")), "extra-env: PATH stays first");
+    var n0 = str_new(vec_get(envp2, 1), 14);
+    assert(str_eq(n0, str_from("NOTIFY_SOCKET=")), "extra-env: extra entry follows PATH");
+
+    # Restoring is what makes the seam safe to set more than once —
+    # a second set must replace, not accumulate.
+    argonaut_set_extra_env(prev);
+    assert_eq(argonaut_extra_env(), 0, "extra-env: restores to unset");
+    assert_eq(vec_len(build_default_envp()), vec_len(envp),
+      "extra-env: envp back to PATH-only once cleared");
+
     return assert_summary();
 }
 

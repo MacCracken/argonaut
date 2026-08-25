@@ -39,7 +39,7 @@ argonaut
 │   ├── audit.cyr       — Libro bridge (ServiceEventType → AuditChain)
 │   ├── init.cyr        — ArgonautInit orchestrator, service lifecycle
 │   └── main.cyr        — Entry point
-├── tests/tcyr/         — 26 test suites (607 assertions)
+├── tests/tcyr/         — 30 test suites (868 assertions)
 └── build/              — Compiled binary (378KB ELF x86_64)
 ```
 

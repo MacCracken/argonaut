@@ -7,6 +7,68 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.12.0] — 2026-08-24
+
+**Supervisors can inject environment into every spawned service.**
+Suite 868 assertions across 30 suites, 0 failures.
+
+### Added — `argonaut_set_extra_env` / `argonaut_extra_env`
+
+argonaut builds the child's `envp` itself, and it has to: the array is
+assembled between `fork()` and `execve()` inside `fork_exec_service`, where
+a consumer has no seam. `build_default_envp` returned a hard-coded
+PATH-only vec, so **there was no way for an embedder to put anything into a
+service's environment.**
+
+The concrete casualty was sd_notify. kybernet binds `/run/systemd/notify`,
+registers it with epoll and has a handler ready for it — but a service
+discovers that socket through `$NOTIFY_SOCKET`, and nothing ever set it.
+The entire readiness/watchdog-ping path was unreachable from the service
+side of the fork. The Rust implementation kybernet was ported from called
+`env::set_var("NOTIFY_SOCKET", ...)` immediately after binding; the port
+dropped it, and the gap surfaced in kybernet's 1.5.3 rust-old port review.
+
+```
+var envv = vec_new();
+vec_push(envv, "NOTIFY_SOCKET=/run/systemd/notify");
+argonaut_set_extra_env(envv);       # returns the previous value
+```
+
+Entries are appended after PATH, which stays first. They are **cstrs, not
+`Str`** — they go straight into the execve envp array — and the caller owns
+their lifetime, which must outlive every spawn: string literals or
+arena-allocated buffers, never stack. The setter returns the previous vec
+so a caller can restore it; setting replaces rather than accumulates.
+
+Purely additive. `build_default_envp()` with no extra env registered
+produces exactly the vec it did at 1.11.0, and the default is unset, so
+every existing consumer is byte-identical.
+
+### Benchmarks
+
+`1.12.0-extra-env` vs `1.8.6-p-minus-1-audit` (29 benchmarks). The gate
+flagged two: `on_service_crash` 168 → 205 ns (+22%) and
+`state_transition_check` 160 → 192 ns (+20%).
+
+**Neither is a regression.** Both are sub-microsecond benchmarks reporting
+`min=0ns` — under the timer's resolution — and the series shows the flag is
+an artifact of the *baseline*, not the new run:
+
+```
+on_service_crash        223 -> 229 -> 168 -> 205 ns
+state_transition_check  210 -> 209 -> 160 -> 192 ns
+```
+
+`1.8.6-p-minus-1-audit` was an unusually fast run. Today's numbers are 8%
+**below** the `1.8.6-audit-baseline` two labels back. Neither path reaches
+`build_default_envp`; the only added work is one null check on the spawn
+path, already dominated by `fork` + `execve`. Note the comparison spans
+1.9.0–1.11.0 as well — those releases did not append a bench row.
+
+Everything else moved within ±7%.
+
+---
+
 ## [1.11.0] — 2026-08-25
 
 **`LinuxCapability` values are kernel capability numbers.** Security fix.
