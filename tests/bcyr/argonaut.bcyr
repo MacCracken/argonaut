@@ -36,6 +36,7 @@ include "lib/thread_local.cyr"
 # Libro core chain modules
 include "lib/libro.cyr"
 
+include "src/syscall_compat.cyr"
 include "src/types.cyr"
 include "src/boot.cyr"
 include "src/services.cyr"

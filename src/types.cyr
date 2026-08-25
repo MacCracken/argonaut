@@ -1282,7 +1282,7 @@ struct FleetRegistration {
 fn now_ms() {
     var buf[16];
     # clock_gettime(CLOCK_REALTIME=0, &timespec)
-    syscall(228, 0, &buf);
+    ag_sys_clock_gettime(0, &buf);
     var sec = load64(&buf);
     var nsec = load64(&buf + 8);
     return sec * 1000 + nsec / 1000000;
@@ -1292,7 +1292,7 @@ fn now_ms() {
 fn monotonic_ms() {
     var buf[16];
     # clock_gettime(CLOCK_MONOTONIC=1, &timespec)
-    syscall(228, 1, &buf);
+    ag_sys_clock_gettime(1, &buf);
     var sec = load64(&buf);
     var nsec = load64(&buf + 8);
     return sec * 1000 + nsec / 1000000;

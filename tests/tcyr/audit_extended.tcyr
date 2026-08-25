@@ -102,7 +102,7 @@ fn main() {
     test_group("audit-ext-persist");
 
     var path = str_from("/tmp/argonaut_audit_ext.patra");
-    syscall(87, str_data(path));   # unlink any prior
+    sys_unlink(str_data(path));   # unlink any prior
 
     var pal = audit_log_open_persistent(path);
     assert(pal != 0, "persist: open succeeds");
@@ -153,7 +153,7 @@ fn main() {
     assert_eq(audit_log_verify_snapshot(pproof, pvk), 1, "persist: signed reloaded snapshot verifies");
 
     audit_log_close_persistent(pal2);
-    syscall(87, str_data(path));    # cleanup
+    sys_unlink(str_data(path));    # cleanup
 
     # =====================================================================
     # ArgonautInit integration — opt-in via config flag
@@ -171,7 +171,7 @@ fn main() {
 
     # Opt-in: audit_persist=1, audit_path=<tmp>.
     var path2 = str_from("/tmp/argonaut_audit_ext_init.patra");
-    syscall(87, str_data(path2));
+    sys_unlink(str_data(path2));
     var c_on = argonaut_config_default();
     config_set_audit_persist(c_on, 1);
     config_set_audit_path(c_on, path2);
@@ -188,7 +188,7 @@ fn main() {
     var i_on2 = argonaut_init_new(c_on);
     assert_eq(chain_len(init_audit_log(i_on2)), 2, "init: reopen replays prior entries");
     audit_log_close_persistent(init_audit_log_persistent(i_on2));
-    syscall(87, str_data(path2));
+    sys_unlink(str_data(path2));
 
     return assert_summary();
 }

@@ -14,6 +14,7 @@
 include "lib/thread_local.cyr"
 
 # Argonaut modules
+include "src/syscall_compat.cyr"
 include "src/types.cyr"
 include "src/boot.cyr"
 include "src/services.cyr"
@@ -167,9 +168,6 @@ fn main() {
 
         println("argonaut: pid1 loop ready");
 
-        var tick = alloc(16);
-        store64(tick, 0);                # tv_sec
-        store64(tick + 8, 100000000);    # tv_nsec — 100ms
         var siginfo = alloc(128);         # struct signalfd_siginfo
         var loop = 1;
         while (loop == 1) {
@@ -178,7 +176,7 @@ fn main() {
             # (non-blocking; -1 / EAGAIN on empty is fine).
             var draining = 1;
             while (draining == 1) {
-                var n = syscall(0, sfd, siginfo, 128);
+                var n = sys_read(sfd, siginfo, 128);
                 if (n != 128) {
                     draining = 0;
                 } else {
@@ -190,7 +188,7 @@ fn main() {
                 }
             }
             if (loop == 1) {
-                syscall(35, tick, 0);
+                sleep_ms(100);
             }
         }
 

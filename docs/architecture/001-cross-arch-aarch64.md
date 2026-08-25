@@ -34,47 +34,52 @@ CI runs `qemu-aarch64` on the cross-built binary and grep-asserts
 - Skips with a warning when neither `qemu-aarch64-static` nor
   `qemu-aarch64` is on PATH.
 
-## Known-failure surface (qemu-user + upstream)
+## Known-failure surface
 
-Two classes of `.tcyr` failures show up under `qemu-aarch64` that
-do NOT indicate argonaut-side bugs. They're documented here so
-future cross-arch work doesn't chase them as regressions.
+**None as of 1.13.1.** The aarch64 qemu-user sweep is 30/30 suites /
+872 assertions — identical to native x86_64.
 
-### qemu-user emulation limits
+### Superseded: the "qemu-user emulation limits" claim (1.5.4 - 1.13.0)
 
-`qemu-user` runs the binary against the host kernel via syscall
-translation. A few syscalls don't replicate full Linux semantics:
+This section previously excused two suites, `audit_findings.tcyr` and
+`audit_extended.tcyr`, attributing them to qemu-user's process model and
+an upstream sigil ed25519 quirk. **The qemu-user half of that diagnosis
+was wrong** — those were real, argonaut-side aarch64 defects, fixed in
+1.13.1:
 
-- **`fork(2)` + `waitpid(2)` reparenting** — child PIDs are
-  emulator-internal; reparenting under PR_SET_CHILD_SUBREAPER
-  doesn't compose cleanly with the emulator's process model.
-  `tests/tcyr/audit_findings.tcyr` `audit-m3-reaper-orphans`
-  asserts orphan-reaper behaviour that qemu-user can't enforce.
-- **`setsid(2)` semantics** — `getsid(0)` in the child after
-  `setsid()` returns 0 under qemu-user instead of the new
-  session leader's PID. `audit-l3-fork-setsid` asserts the
-  Linux-native invariant.
+- `audit-m3-reaper-orphans` did not fail because "reparenting under
+  PR_SET_CHILD_SUBREAPER doesn't compose with the emulator". It failed
+  because `syscall(157, 36, 1, ...)` is `prctl` only on x86_64; on
+  aarch64 157 is **`setsid`**, so the subreaper was never enrolled. The
+  test's own 50 ms/200 ms settle sleeps were `syscall(35, ...)`, which is
+  `nanosleep` on x86_64 and **`unlinkat`** on aarch64 — they returned
+  -EFAULT instantly and never slept.
+- `audit-l3-fork-setsid` did not fail because "getsid(0) returns 0 under
+  qemu-user". It failed because `syscall(112)` is `setsid` only on
+  x86_64; on aarch64 it is **`clock_settime`**, and `syscall(124)` is
+  `getsid` on x86_64 but **`sched_yield`** on aarch64. The child never
+  became a session leader and never read back a session id.
+- `audit_extended` was not failing on ed25519 at all by the time it was
+  re-measured. Its aarch64 failure was `persist: open succeeds`: the
+  suite cleans up scratch files with `unlink`, which is `syscall(87)` on
+  x86_64 but **`timerfd_gettime`** on aarch64, so stale state from a
+  previous run was never removed and the reopen failed. The separate
+  ed25519 "wrong vk rejected" assertion passes on aarch64 both before
+  and after this change — that upstream sigil issue was resolved
+  independently (sigil 3.12.9) and is not attributable to this fix.
+- The pid-file group/other-writable assertions failed because
+  `read_pid_file_safe` read `st_mode`/`st_uid` at the **x86_64**
+  `struct stat` offsets (+24/+28). On the aarch64 asm-generic layout
+  those hold `st_uid`/`st_gid`, so for a root-owned file both read 0,
+  the `mode & 0o022` test passed, and the CVE-2025-4598-class check
+  **failed open**.
 
-Real aarch64 hardware (RPi4, Apple Silicon under a Linux VM,
-native ARM cloud instances) should pass these — they're
-qemu-user-specific.
-
-### Upstream sigil quirk (open as of 1.5.4)
-
-- **Ed25519 verify accepts wrong public key on aarch64.** Filed
-  upstream in sigil's issue tracker
-  (`docs/development/issues/2026-05-10-ed25519-verify-aarch64-accepts-wrong-pk.md`).
-  Affects `tests/tcyr/audit_extended.tcyr` `audit-ext-sign-ed25519`
-  "wrong vk rejected" assertion. The right-vk path works; only
-  wrong-key detection mis-passes. Native x86_64 is clean.
-  Argonaut consumers signing audit snapshots on aarch64 should
-  not rely on cross-arch verify (the supervisor is always
-  single-arch — sign on the running arch, verify on the same
-  arch — so the bug doesn't escape into cross-arch trust paths).
-
-Net effect on the aarch64 sweep: 26/28 suites pass under
-qemu-user, **0 known regressions on argonaut surface**. The two
-non-passing suites are documented above.
+All of these were verified against the real kernel entry with
+`qemu-aarch64 -strace`, not inferred. The lesson worth keeping: an
+emulator is a convenient thing to blame, and blaming it hid a security
+check failing open on the shipping ARM binary for eight releases. Before
+writing a failure off as emulation, read the syscall the kernel actually
+received.
 
 ## Real-hardware validation
 

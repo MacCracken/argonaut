@@ -65,17 +65,14 @@ for t in tests/tcyr/*.tcyr; do
         asserts=$((asserts + n))
     else
         fail=$((fail + 1))
-        # Known failures under qemu-user / upstream sigil bug —
-        # see docs/architecture/001-cross-arch-aarch64.md.
-        case "$name" in
-            audit_findings|audit_extended)
-                known_fail_count=$((known_fail_count + 1))
-                echo "KNOWN-FAIL: $name (see arch doc 001)"
-                ;;
-            *)
-                echo "FAIL: $name -> ${sum:-no summary}"
-                ;;
-        esac
+        # No known-failure allowance as of 1.13.1. The two suites that used
+        # to be excused here (audit_findings, audit_extended) were failing on
+        # the x86_64 syscall numbers and struct-stat offsets fixed in that
+        # release, NOT on qemu-user limits as arch doc 001 claimed. The sweep
+        # is now 30/30 with 872 assertions, identical to native x86_64 — so
+        # any failure below is a real regression. Do not re-add an excuse arm
+        # without first proving the cause is genuinely emulator-side.
+        echo "FAIL: $name -> ${sum:-no summary}"
     fi
 done
 

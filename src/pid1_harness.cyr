@@ -81,10 +81,7 @@ fn pid1_harness_m3() {
         # to PID 1.
         var gc = sys_fork();
         if (gc == 0) {
-            var ts = alloc(16);
-            store64(ts, 0);
-            store64(ts + 8, 100000000);    # 100 ms
-            syscall(35, ts, 0);
+            sleep_ms(100);
             sys_exit(0);
         }
         sys_exit(0);
@@ -95,10 +92,7 @@ fn pid1_harness_m3() {
     sys_waitpid(fpid, stbuf, 0);
 
     # Wait long enough for the grandchild to finish.
-    var wait_ts = alloc(16);
-    store64(wait_ts, 0);
-    store64(wait_ts + 8, 200000000);       # 200 ms
-    syscall(35, wait_ts, 0);
+    sleep_ms(200);
 
     var reaped = proc_table_reap_orphans();
     if (reaped >= 1) { return 1; }
@@ -122,7 +116,7 @@ fn pid1_harness_l3() {
     # PID-1 path during 1.6.2 dev (turned out to be why the
     # earlier marker-echo never appeared even when the file was
     # written correctly). Direct writes are unbuffered.
-    syscall(87, "/l3.marker");
+    sys_unlink("/l3.marker");
 
     var sd = svc_def_new(
       str_from("l3-test"),

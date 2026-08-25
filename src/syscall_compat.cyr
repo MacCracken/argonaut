@@ -1,0 +1,111 @@
+# syscall_compat.cyr — arch-dispatched wrappers for the syscalls the cyrius
+# stdlib does not wrap (1.13.1).
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# A literal `syscall(N, ...)` with an x86_64 number is a portability defect:
+# argonaut is cross-built for aarch64 and linked into kybernet's aarch64 PID-1
+# binary, where the same N names a completely different syscall. Before 1.13.1
+# argonaut carried nine such numbers; measured under qemu-user, they landed on:
+#
+#     x86 35  nanosleep   -> aarch64 unlinkat      (service stop/poll loops)
+#     x86 44  sendto      -> aarch64 fstatfs       (sd_notify client send)
+#     x86 47  recvmsg     -> aarch64 fallocate     (sd_notify server recv)
+#     x86 53  socketpair  -> aarch64 fchmodat      (test harness)
+#     x86 87  unlink      -> aarch64 timerfd_gettime
+#     x86 90  chmod       -> aarch64 capget        (test harness)
+#     x86 112 setsid      -> aarch64 clock_settime (per-service session)
+#     x86 124 getsid      -> aarch64 sched_yield   (test harness)
+#     x86 157 prctl       -> aarch64 setsid        (PR_SET_CHILD_SUBREAPER)
+#
+# Prefer a stdlib `sys_*` wrapper wherever one exists — it is already
+# arch-dispatched through lib/syscalls.cyr. This file covers only the gaps.
+#
+# ⚠ THE ESYSXLAT TRAP — read before adding an entry here.
+# The aarch64 backend emits an inline x86-compat translation ladder at every
+# `syscall` site, rewriting a set of x86 source numbers to their aarch64
+# equivalents (including argument fixups). Two consequences:
+#
+#   (a) Some raw x86 numbers already work on aarch64 (0/1 read/write, 7 poll,
+#       41 socket, 42 connect, 49 bind, 54 setsockopt, 55 getsockopt, 72 fcntl,
+#       228 clock_gettime). They are still spelled out explicitly below or
+#       routed through a `sys_*` wrapper — relying on an undocumented compat
+#       ladder is exactly the fragility audit rule 1 exists to remove.
+#
+#   (b) An aarch64-NATIVE number can be CLAIMED by that ladder as an x86 source
+#       number and rewritten out from under you. `73` is the live example:
+#       aarch64 ppoll is 73, but the ladder reads 73 as x86 `flock` and rewrites
+#       it to 32. Verified: `syscall(73, ...)` on aarch64 issues flock(2), not
+#       ppoll(2). That is why `ag_sys_poll` below routes through the x86 number
+#       on BOTH arches rather than using the native one.
+#
+# Every number in this file was verified by cross-building a probe and reading
+# the actual kernel entry under `qemu-aarch64 -strace`. Re-verify that way
+# before changing one; a wrong number here is silent on x86 and fatal on ARM.
+
+# sendto(fd, buf, len, flags, dest_addr, addrlen) — used by the sd_notify
+# client. No stdlib wrapper; no `SYS_SENDTO` in either arch peer.
+# x86_64 44 (native) / aarch64 206 (native, ladder-safe).
+fn ag_sys_sendto(fd, buf, len, flags, dest_addr, addrlen): i64 {
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(44, fd, buf, len, flags, dest_addr, addrlen);
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(206, fd, buf, len, flags, dest_addr, addrlen);
+    #endif
+}
+
+# getsockopt(fd, level, optname, optval, optlen) — SO_ERROR readback after a
+# non-blocking connect. No stdlib wrapper (sys_setsockopt has no peer).
+# x86_64 55 (native) / aarch64 209 (native, ladder-safe).
+fn ag_sys_getsockopt(fd, level, optname, optval, optlen): i64 {
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(55, fd, level, optname, optval, optlen);
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(209, fd, level, optname, optval, optlen);
+    #endif
+}
+
+# poll(fds, nfds, timeout_ms) — readiness wait for the TCP/HTTP health checks.
+#
+# ⚠ Deliberately the x86 number on BOTH arches. aarch64 has no `poll`; the
+# native equivalent is ppoll(73), which takes a `struct timespec` instead of a
+# millisecond int — but 73 is claimed by the ESYSXLAT ladder as x86 `flock` and
+# rewritten to 32, so it cannot be issued directly. Source-7 IS in the ladder
+# and is translated to ppoll WITH the ms -> timespec conversion (and a negative
+# timeout mapped to a NULL timespec, i.e. block forever), so it is correct on
+# both targets. This mirrors what the stdlib itself does in `chrono.sleep_ms`,
+# which issues `syscall(7, 0, 0, ms)` under CYRIUS_TARGET_LINUX for both arches.
+fn ag_sys_poll(fds, nfds, timeout_ms): i64 {
+    return syscall(7, fds, nfds, timeout_ms);
+}
+
+# clock_gettime(clockid, timespec) — backs now_ms / monotonic_ms.
+# x86_64 228 (native) / aarch64 113 (native, ladder-safe).
+fn ag_sys_clock_gettime(clockid, ts): i64 {
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(228, clockid, ts);
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(113, clockid, ts);
+    #endif
+}
+
+# getsid(pid) — test-harness assertion that fork_exec_service called setsid.
+# x86_64 124 (native) / aarch64 156 (native, ladder-safe).
+fn ag_sys_getsid(pid): i64 {
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(124, pid);
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(156, pid);
+    #endif
+}
+
+# fcntl(fd, cmd, arg) — F_SETFL O_NONBLOCK on the notify and health sockets.
+# No stdlib wrapper, but `SYS_FCNTL` IS defined in both arch peers (x86 72 /
+# aarch64 25), so the enum does the dispatch and no #ifdef is needed here.
+fn ag_sys_fcntl(fd, cmd, arg): i64 {
+    return syscall(SYS_FCNTL, fd, cmd, arg);
+}

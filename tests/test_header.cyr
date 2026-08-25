@@ -47,6 +47,7 @@ include "lib/libro.cyr"
 
 # Argonaut modules (audit before init — init depends on audit;
 # resolver before health — health.cyr consumes resolve_host_ipv4)
+include "src/syscall_compat.cyr"
 include "src/types.cyr"
 include "src/boot.cyr"
 include "src/services.cyr"

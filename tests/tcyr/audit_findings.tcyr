@@ -162,7 +162,7 @@ fn main() {
 
     # socketpair(AF_UNIX=1, SOCK_DGRAM=2, 0, &fds)
     var fds[8];
-    var sp = syscall(53, 1, 2, 0, &fds);
+    var sp = sys_socketpair(1, 2, 0, &fds);
     if (sp == 0) {
         var rfd = load32(&fds);
         var sfd = load32(&fds + 4);
@@ -170,11 +170,11 @@ fn main() {
         # Enable SO_PASSCRED on receiver so kernel attaches SCM_CREDENTIALS.
         var one[4];
         store32(&one, 1);
-        syscall(54, rfd, 1, 16, &one, 4);   # setsockopt(SOL_SOCKET=1, SO_PASSCRED=16)
+        sys_setsockopt(rfd, 1, 16, &one, 4);   # SOL_SOCKET=1, SO_PASSCRED=16
 
         # Send a notify datagram from sfd; kernel stamps sender PID.
         var msg = "READY=1\n";
-        syscall(44, sfd, msg, 8, 0, 0, 0);   # sendto(sfd, msg, 8, 0, NULL, 0)
+        ag_sys_sendto(sfd, msg, 8, 0, 0, 0);   # sendto(sfd, msg, 8, 0, NULL, 0)
 
         # Recv with expected = [my_pid] → cred matches → parse + return msg.
         var my_pid = sys_getpid();
@@ -185,7 +185,7 @@ fn main() {
         assert_eq(load64(nm_ok), 1, "m1: parsed READY=1");
 
         # Send again; recv with wrong pid set → drop, return 0.
-        syscall(44, sfd, msg, 8, 0, 0, 0);
+        ag_sys_sendto(sfd, msg, 8, 0, 0, 0);
         var bad_pids = vec_new();
         vec_push(bad_pids, my_pid + 99999);
         var nm_bad = notify_try_recv_authenticated(rfd, bad_pids);
@@ -214,7 +214,7 @@ fn main() {
     test_group("audit-m3-reaper-orphans");
 
     # Enrol as subreaper so the grandchild orphans up to us, not init.
-    syscall(157, 36, 1, 0, 0, 0);   # SYS_prctl(PR_SET_CHILD_SUBREAPER=36, 1)
+    sys_prctl(36, 1, 0, 0, 0);   # PR_SET_CHILD_SUBREAPER=36
 
     var fpid = sys_fork();
     if (fpid == 0) {
@@ -222,10 +222,7 @@ fn main() {
         var gc = sys_fork();
         if (gc == 0) {
             # Grandchild: sleep 50ms so child exits first, then exit.
-            var ts[16];
-            store64(&ts, 0);
-            store64(&ts + 8, 50000000);
-            syscall(35, &ts, 0);
+            sleep_ms(50);
             sys_exit(0);
         }
         sys_exit(0);
@@ -236,10 +233,7 @@ fn main() {
     sys_waitpid(fpid, &st_c, 0);
 
     # Wait long enough for the grandchild to also exit.
-    var ts2[16];
-    store64(&ts2, 0);
-    store64(&ts2 + 8, 200000000);   # 200ms
-    syscall(35, &ts2, 0);
+    sleep_ms(200);
 
     var n_orphans = proc_table_reap_orphans();
     assert(n_orphans >= 1, "m3: orphan reaped via waitpid(-1)");
@@ -254,7 +248,7 @@ fn main() {
     test_group("audit-l3-fork-setsid");
 
     # Validate the platform setsid syscall used by fork_exec_service:
-    # in a forked child, after syscall(112), getsid(0) returns the
+    # in a forked child, after sys_setsid(), getsid(0) returns the
     # child's own PID — i.e. the child became a session leader and is
     # now decoupled from any controlling TTY inherited from the parent.
     # End-to-end verification that fork_exec_service actually invokes
@@ -262,12 +256,12 @@ fn main() {
     # (the existing exec_env Str/cstr quirk noted in health_exec.tcyr
     # blocks unit-level shell exec testing).
     var sid_path = "/tmp/argonaut-l3-sid";
-    syscall(87, sid_path);
+    sys_unlink(sid_path);
 
     var l3_pid = sys_fork();
     if (l3_pid == 0) {
-        syscall(112);                     # SYS_setsid
-        var sid = syscall(124, 0);        # SYS_getsid(0)
+        sys_setsid();
+        var sid = ag_sys_getsid(0);
         var sfd = sys_open(sid_path, 65, 384);   # O_WRONLY|O_CREAT, 0o600
         if (sfd >= 0) {
             var sbuf[24];
@@ -286,7 +280,7 @@ fn main() {
     var rs = str_to_int(str_new(rb, rn));
     assert_eq(rs, l3_pid, "l3: setsid → child sid == child pid");
 
-    syscall(87, sid_path);
+    sys_unlink(sid_path);
 
     # =====================================================================
     # 1.5.5 closeout audit (docs/audit/2026-05-10-audit.md)
@@ -328,7 +322,7 @@ fn main() {
     var e_ok = audit_log_record_persistent(pal_test, "svc-m2", EVT_STARTED);
     assert(e_ok != 0, "M2: clean-path still returns entry");
     audit_log_close_persistent(pal_test);
-    syscall(87, str_data(str_from("/tmp/argonaut_closeout_m2.patra")));
+    sys_unlink(str_data(str_from("/tmp/argonaut_closeout_m2.patra")));
 
     test_group("closeout-medium3-persist-tamper-rejected");
 
@@ -339,7 +333,7 @@ fn main() {
     # helper `_audit_ext_test_mutate_first_detail` performs the
     # in-place SQL update bypassing the audit_log_record API.
     var m3_path = str_from("/tmp/argonaut_closeout_m3.patra");
-    syscall(87, str_data(m3_path));
+    sys_unlink(str_data(m3_path));
     var m3_pal = audit_log_open_persistent(m3_path);
     audit_log_record_persistent(m3_pal, "svc-m3", EVT_STARTING);
     audit_log_record_persistent(m3_pal, "svc-m3", EVT_STARTED);
@@ -351,7 +345,7 @@ fn main() {
 
     var m3_pal2 = audit_log_open_persistent(m3_path);
     assert_eq(m3_pal2, 0, "M3: tampered chain rejected on open");
-    syscall(87, str_data(m3_path));
+    sys_unlink(str_data(m3_path));
 
     test_group("closeout-low2-http-port-range");
 
@@ -691,8 +685,8 @@ fn main() {
     # than hardcoding 0.
     var pf_ok = str_from("/tmp/argonaut_pf_ok.pid");
     var pf_bad = str_from("/tmp/argonaut_pf_bad.pid");
-    syscall(87, str_data(pf_ok));
-    syscall(87, str_data(pf_bad));
+    sys_unlink(str_data(pf_ok));
+    sys_unlink(str_data(pf_bad));
 
     var pf_self = sys_getpid();
     var pf_sb = str_builder_new();
@@ -710,7 +704,7 @@ fn main() {
     var pf_fd2 = sys_open(str_data(pf_bad), 65, 438);  # 0666
     sys_write(pf_fd2, str_data(pf_txt), str_len(pf_txt));
     sys_close(pf_fd2);
-    syscall(90, str_data(pf_bad), 438);                # chmod 0666
+    sys_chmod(str_data(pf_bad), 438);                  # chmod 0666
     assert_eq(read_pid_file_safe(pf_bad, sys_getuid()), 0 - 1,
       "pidfile: world-writable pid file is rejected");
 
@@ -718,8 +712,8 @@ fn main() {
     assert_eq(read_pid_file(pf_bad), 0 - 1,
       "pidfile: the production reader rejects a world-writable pid file");
 
-    syscall(87, str_data(pf_ok));
-    syscall(87, str_data(pf_bad));
+    sys_unlink(str_data(pf_ok));
+    sys_unlink(str_data(pf_bad));
 
     test_group("audit-2026-08-24-medium2-merkle-proof-binding");
 
@@ -804,7 +798,7 @@ fn main() {
     # `chain_append` has already extended by then — must keep growing
     # so the divergence is observable rather than silent.
     var os_path = str_from("/tmp/argonaut_libro287_oversize.patra");
-    syscall(87, str_data(os_path));
+    sys_unlink(str_data(os_path));
     var os_pal = audit_log_open_persistent(os_path);
     assert(os_pal != 0, "oversize: open succeeded for setup");
 
@@ -833,7 +827,7 @@ fn main() {
       "oversize: in-memory chain still advanced (divergence observable)");
 
     audit_log_close_persistent(os_pal);
-    syscall(87, str_data(os_path));
+    sys_unlink(str_data(os_path));
 
     test_group("closeout-medium2-fork-exec-envp-path");
 

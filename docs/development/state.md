@@ -6,6 +6,25 @@
 
 ## Version
 
+**1.13.1** (aarch64 syscall + `struct stat` portability. Every literal
+x86_64 `syscall(N, ...)` in argonaut is gone; the survivors live in one
+audited file, `src/syscall_compat.cyr`. Nine numbers were landing on the
+wrong kernel entry in the cross-built aarch64 binary kybernet ships:
+`nanosleep`→`unlinkat`, `sendto`→`fstatfs`, `recvmsg`→`fallocate`,
+`socketpair`→`fchmodat`, `unlink`→`timerfd_gettime`, `chmod`→`capget`,
+`setsid`→`clock_settime`, `getsid`→`sched_yield`, and — worst —
+`prctl(PR_SET_CHILD_SUBREAPER)`→`setsid`, so orphan reparenting was never
+enrolled on ARM. Separately, `read_pid_file_safe` read `st_mode`/`st_uid`
+at the x86_64 `struct stat` offsets; on the aarch64 asm-generic layout
+those hold `st_uid`/`st_gid`, so for a root-owned file both read 0 and the
+CVE-2025-4598-class world-writable check **failed open**. Now uses the
+arch-dispatched `STAT_MODE`/`STAT_UID`. The aarch64 sweep goes 29 pass /
+1 known-fail / 711 assertions → **30/30, 872 assertions**, identical to
+native x86_64; arch doc 001's "qemu-user emulation limits" known-failure
+allowance was a misdiagnosis of these bugs and has been removed from both
+the doc and `scripts/aarch64-sweep.sh`. No API change; x86_64 behaviour
+byte-equivalent. Bench: 0 regressions ≥15%, max delta +5.5%.)
+
 **1.13.0** (`ServiceDefinition` carries cgroup limits. New field at +168 with
 `svc_def_cgroup_limits` / `svc_def_set_cgroup_limits`, opaque to argonaut for
 the same reason `seccomp`/`landlock`/`capabilities` are. Deliberately NOT a

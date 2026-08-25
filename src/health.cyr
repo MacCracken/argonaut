@@ -55,7 +55,7 @@ fn health_state_str(s) {
 # duplicate /etc/hosts read on the hot path.
 fn tcp_connect_ip(ip, port, timeout_ms) {
     # socket(AF_INET=2, SOCK_STREAM=1, 0)
-    var fd = syscall(41, 2, 1, 0);
+    var fd = sys_socket(2, 1, 0);
     if (fd < 0) { return 0; }
 
     # Build sockaddr_in (16 bytes)
@@ -72,10 +72,10 @@ fn tcp_connect_ip(ip, port, timeout_ms) {
 
     # Set socket non-blocking for timeout
     # fcntl(fd, F_SETFL, O_NONBLOCK)
-    syscall(72, fd, 4, 2048);  # F_SETFL=4, O_NONBLOCK=2048
+    ag_sys_fcntl(fd, 4, 2048);  # F_SETFL=4, O_NONBLOCK=2048
 
     # connect(fd, &addr, 16)
-    var ret = syscall(42, fd, &addr, 16);
+    var ret = sys_connect(fd, &addr, 16);
 
     if (ret == 0) {
         sys_close(fd);
@@ -91,7 +91,7 @@ fn tcp_connect_ip(ip, port, timeout_ms) {
         store16(&pollfd + 4, 4);  # POLLOUT
         store16(&pollfd + 6, 0);  # revents
 
-        var poll_ret = syscall(7, &pollfd, 1, timeout_ms);
+        var poll_ret = ag_sys_poll(&pollfd, 1, timeout_ms);
         if (poll_ret > 0) {
             var revents = load16(&pollfd + 6);
             if (revents & 4) {  # POLLOUT
@@ -107,7 +107,7 @@ fn tcp_connect_ip(ip, port, timeout_ms) {
                 store64(&so_err, 0);
                 store64(&so_len, 4);
                 # getsockopt(fd, SOL_SOCKET=1, SO_ERROR=4, &val, &len)
-                var so_ret = syscall(55, fd, 1, 4, &so_err, &so_len);
+                var so_ret = ag_sys_getsockopt(fd, 1, 4, &so_err, &so_len);
                 if (so_ret == 0 && load32(&so_err) == 0) {
                     sys_close(fd);
                     return 1;
@@ -323,7 +323,7 @@ fn execute_health_check(service_name, hc, pid) {
         }
 
         # TCP connect
-        var fd = syscall(41, 2, 1, 0);  # socket(AF_INET, SOCK_STREAM, 0)
+        var fd = sys_socket(2, 1, 0);  # socket(AF_INET, SOCK_STREAM, 0)
         if (fd >= 0) {
             var addr[16];
             memset(&addr, 0, 16);
@@ -332,7 +332,7 @@ fn execute_health_check(service_name, hc, pid) {
             store16(&addr + 2, pbe);
             write_ipv4_octets(&addr + 4, http_ip);
 
-            var ret = syscall(42, fd, &addr, 16);  # connect
+            var ret = sys_connect(fd, &addr, 16);
             if (ret == 0) {
                 # Send HTTP GET request. Host: header echoes the
                 # configured host (not hardcoded 127.0.0.1) so
@@ -349,7 +349,7 @@ fn execute_health_check(service_name, hc, pid) {
                 # 2026-08-24 audit LOW-3: check the write. A short or failed
                 # write used to fall through to the poll below and surface as
                 # "HTTP response timeout", blaming the peer for a local error.
-                var wrote = syscall(1, fd, req_data, req_len);  # write
+                var wrote = sys_write(fd, req_data, req_len);
                 if (wrote != req_len) {
                     message = str_from("HTTP request write failed");
                     sys_close(fd);
@@ -364,7 +364,7 @@ fn execute_health_check(service_name, hc, pid) {
                 store32(&pfd, fd);
                 store16(&pfd + 4, 1);  # POLLIN
                 store16(&pfd + 6, 0);
-                var poll_ret = syscall(7, &pfd, 1, timeout);
+                var poll_ret = ag_sys_poll(&pfd, 1, timeout);
                 if (poll_ret > 0) {
                     # 2026-08-24 audit LOW-3: a single read() assumed the whole
                     # status line arrived in one segment. A server that splits
@@ -377,7 +377,7 @@ fn execute_health_check(service_name, hc, pid) {
                     var n = 0;
                     var reading = 1;
                     while (reading == 1) {
-                        var got = syscall(0, fd, &resp + n, 511 - n);  # read
+                        var got = sys_read(fd, &resp + n, 511 - n);
                         if (got <= 0) { reading = 0; }
                         else {
                             n = n + got;
@@ -389,7 +389,7 @@ fn execute_health_check(service_name, hc, pid) {
                                 }
                                 if (saw_eol == 1) { reading = 0; }
                                 else {
-                                    var pr = syscall(7, &pfd, 1, timeout);
+                                    var pr = ag_sys_poll(&pfd, 1, timeout);
                                     if (pr <= 0) { reading = 0; }
                                 }
                             }
@@ -503,11 +503,7 @@ fn execute_ready_check(service_name, rc, pid) {
         }
 
         if (attempt < retries) {
-            # Sleep retry_delay ms
-            var ts[16];
-            store64(&ts, retry_delay / 1000);
-            store64(&ts + 8, (retry_delay % 1000) * 1000000);
-            syscall(35, &ts, 0);
+            sleep_ms(retry_delay);
         }
     }
 

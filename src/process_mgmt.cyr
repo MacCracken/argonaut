@@ -253,7 +253,7 @@ fn fork_exec_service(svc_def) {
         # testing) don't reach service children, and so each service
         # gets its own session. Non-fatal — already-session-leader
         # callers return EPERM and we proceed.
-        syscall(112);   # SYS_setsid
+        sys_setsid();
 
         # Redirect stdin to /dev/null and (L3) replace stdout / stderr
         # so service log output stops mixing into argonaut's stdio.
@@ -415,11 +415,7 @@ fn process_stop(pid, timeout_ms) {
             if (WIFSIGNALED(status)) { return 128 + WTERMSIG(status); }
             return 0 - 1;
         }
-        # Sleep 50ms (nanosleep)
-        var ts[16];
-        store64(&ts, 0);           # seconds
-        store64(&ts + 8, 50000000); # 50ms in nanoseconds
-        syscall(35, &ts, 0);       # SYS_nanosleep
+        sleep_ms(50);
     }
 
     # Timed out — SIGKILL
@@ -437,10 +433,7 @@ fn process_stop(pid, timeout_ms) {
             if (WIFSIGNALED(status)) { return 128 + WTERMSIG(status); }
             return 0 - 1;
         }
-        var ts[16];
-        store64(&ts, 0);
-        store64(&ts + 8, 10000000); # 10ms
-        syscall(35, &ts, 0);
+        sleep_ms(10);
     }
 
     return 0 - 1;
@@ -489,10 +482,7 @@ fn proc_table_stop_all(timeout_ms) {
         }
         remaining = still_alive;
         if (vec_len(remaining) > 0) {
-            var ts[16];
-            store64(&ts, 0);
-            store64(&ts + 8, 50000000);
-            syscall(35, &ts, 0);
+            sleep_ms(50);
         }
     }
 
@@ -627,15 +617,25 @@ fn read_pid_file_safe(path, expected_uid) {
     var fd = sys_open(str_data(path), 0, 0);   # O_RDONLY
     if (fd < 0) { return 0 - 1; }
 
-    # fstat(fd, &stat_buf) — stat layout via the cyrius 5.x Stat enum
-    var stat_buf[144];
+    # fstat(fd, &stat_buf) — offsets via the arch-dispatched Stat enum.
+    #
+    # ⚠ These MUST NOT be spelled as literals. `struct stat` is a different
+    # shape per arch: x86_64 puts st_mode at +24 / st_uid at +28, while the
+    # aarch64 asm-generic layout puts them at +16 / +24. Hardcoding the
+    # x86_64 offsets (as this did before 1.13.1) made the aarch64 build read
+    # st_uid into `st_mode` and st_gid into `st_uid` — so for a root-owned
+    # file both came back 0, `(0 & 18) == 0` passed, and this
+    # CVE-2025-4598-class check FAILED OPEN on every world-writable pid file.
+    # STAT_MODE / STAT_UID / STAT_BUFSZ come from lib/syscalls.cyr's per-arch
+    # peer and resolve correctly on both targets.
+    var stat_buf[STAT_BUFSZ];
     var st_ret = syscall(SYS_FSTAT, fd, &stat_buf);
     if (st_ret < 0) {
         sys_close(fd);
         return 0 - 1;
     }
-    var st_mode = load32(&stat_buf + 24);
-    var st_uid  = load32(&stat_buf + 28);
+    var st_mode = load32(&stat_buf + STAT_MODE);
+    var st_uid  = load32(&stat_buf + STAT_UID);
 
     # Reject group- or other-writable pid files (mode & 0o022 = 18 dec).
     if ((st_mode & 18) != 0) {

@@ -38,6 +38,7 @@ fn sakshi_span_depth() { return 0; }
 include "lib/libro.cyr"
 
 # Argonaut modules
+include "src/syscall_compat.cyr"
 include "src/types.cyr"
 include "src/boot.cyr"
 include "src/services.cyr"

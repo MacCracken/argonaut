@@ -79,7 +79,7 @@ fn argonaut_init_new(config) {
     # under a systemd-delegate consumer). Non-fatal — kernels predating
     # PR_SET_CHILD_SUBREAPER (Linux < 3.4) just return EINVAL and we
     # continue with tracked-PID reaping only.
-    syscall(157, 36, 1, 0, 0, 0);   # SYS_prctl(PR_SET_CHILD_SUBREAPER=36, 1)
+    sys_prctl(36, 1, 0, 0, 0);   # PR_SET_CHILD_SUBREAPER=36
 
     sakshi_span_exit();
     return init;

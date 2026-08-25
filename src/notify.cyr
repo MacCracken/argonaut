@@ -101,7 +101,7 @@ fn notify_bind(path) {
     sys_mkdir("/run/argonaut", 448);  # 0o700 — argonaut-internal; no other process should traverse
 
     # socket(AF_UNIX=1, SOCK_DGRAM=2, 0)
-    var fd = syscall(41, 1, 2, 0);
+    var fd = sys_socket(1, 2, 0);
     if (fd < 0) { return 0 - 1; }
 
     # Build sockaddr_un
@@ -114,21 +114,21 @@ fn notify_bind(path) {
     memcpy(&addr + 2, path_data, path_len);
 
     # bind(fd, &addr, sizeof(sa_family) + path_len + 1)
-    var ret = syscall(49, fd, &addr, 2 + path_len + 1);
+    var ret = sys_bind(fd, &addr, 2 + path_len + 1);
     if (ret < 0) {
         sys_close(fd);
         return 0 - 1;
     }
 
     # Set non-blocking
-    syscall(72, fd, 4, 2048);  # fcntl F_SETFL O_NONBLOCK
+    ag_sys_fcntl(fd, 4, 2048);  # F_SETFL O_NONBLOCK
 
     # M1: enable SO_PASSCRED so recvmsg() with SCM_CREDENTIALS gives us
     # the kernel-stamped sender credentials. notify_try_recv_authenticated
     # below relies on this for the per-datagram peer-cred check.
     var one[4];
     store32(&one, 1);
-    syscall(54, fd, 1, 16, &one, 4);   # setsockopt(fd, SOL_SOCKET=1, SO_PASSCRED=16, &one, 4)
+    sys_setsockopt(fd, 1, 16, &one, 4);   # SOL_SOCKET=1, SO_PASSCRED=16
 
     return fd;
 }
@@ -171,7 +171,7 @@ fn notify_try_recv_authenticated(fd, expected_pids) {
     store64(&mh + 32, &ctrl);    # msg_control
     store64(&mh + 40, 32);       # msg_controllen
     # recvmsg(fd, &mh, MSG_DONTWAIT=64)
-    var n = syscall(47, fd, &mh, 64);
+    var n = sys_recvmsg(fd, &mh, 64);
     if (n <= 0) { return 0; }
     # Require an SCM_CREDENTIALS cmsg. Drop on missing/wrong type so a
     # caller that forgets SO_PASSCRED can't slip messages through.
@@ -210,7 +210,7 @@ fn notify_drain(fd, limit) {
 
 # Send an sd_notify message to a socket path (client side).
 fn send_notify(socket_path, message) {
-    var fd = syscall(41, 1, 2, 0);  # AF_UNIX, SOCK_DGRAM
+    var fd = sys_socket(1, 2, 0);  # AF_UNIX, SOCK_DGRAM
     if (fd < 0) { return 0 - 1; }
 
     var addr[110];
@@ -225,7 +225,7 @@ fn send_notify(socket_path, message) {
     var msg_len = str_len(message);
 
     # sendto(fd, msg, len, 0, &addr, addrlen)
-    var ret = syscall(44, fd, msg_data, msg_len, 0, &addr, 2 + path_len + 1);
+    var ret = ag_sys_sendto(fd, msg_data, msg_len, 0, &addr, 2 + path_len + 1);
     sys_close(fd);
 
     if (ret < 0) { return 0 - 1; }

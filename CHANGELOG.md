@@ -7,6 +7,109 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.13.1] — 2026-08-24
+
+**aarch64 syscall + `struct stat` portability.** Every literal x86_64
+syscall number in argonaut is gone. No API change; x86_64 behaviour is
+byte-equivalent. The aarch64 qemu-user sweep goes 29 pass / 1 known-fail /
+711 assertions → **30 pass / 0 fail / 872 assertions**, identical to native
+x86_64.
+
+### Fixed — nine syscalls dispatched to the wrong kernel entry on aarch64
+
+argonaut is cross-built for aarch64 and linked into kybernet's aarch64 PID-1
+binary. A literal `syscall(N, ...)` carrying an x86_64 number names a
+different syscall there. Measured under `qemu-aarch64 -strace`, not inferred:
+
+| call site | intended | what aarch64 actually ran |
+| --- | --- | --- |
+| `syscall(35)` | `nanosleep` | **`unlinkat`** |
+| `syscall(44)` | `sendto` | **`fstatfs`** |
+| `syscall(47)` | `recvmsg` | **`fallocate`** |
+| `syscall(53)` | `socketpair` | **`fchmodat`** |
+| `syscall(87)` | `unlink` | **`timerfd_gettime`** |
+| `syscall(90)` | `chmod` | **`capget`** |
+| `syscall(112)` | `setsid` | **`clock_settime`** |
+| `syscall(124)` | `getsid` | **`sched_yield`** |
+| `syscall(157)` | `prctl` | **`setsid`** |
+
+Impact on the shipping ARM binary:
+
+- **`init.cyr` never enrolled as a child subreaper.** `PR_SET_CHILD_SUBREAPER`
+  went to `setsid` instead, so orphaned grandchildren reparented to the real
+  PID 1 rather than to argonaut, and `proc_table_reap_orphans` had nothing to
+  collect.
+- **No service got its own session.** `fork_exec_service`'s post-fork `setsid`
+  was `clock_settime(112, NULL)` → `-EFAULT`, so every service stayed in
+  argonaut's session and on its controlling TTY.
+- **The service stop path busy-spun.** The 50 ms/10 ms settle sleeps in
+  `process_stop_graceful` / `proc_table_stop_all` were `unlinkat` with a
+  pointer as `dirfd`: instant `-EFAULT`, no sleep. The bounded wait loops
+  became hot spins for their whole timeout.
+- **sd_notify was inert.** The client `sendto` was `fstatfs` and the server
+  `recvmsg` was `fallocate`, so no readiness datagram could be sent or received.
+
+Fixed by routing every call through a stdlib `sys_*` wrapper
+(`sys_setsid`, `sys_prctl`, `sys_recvmsg`, `sys_socketpair`, `sys_unlink`,
+`sys_chmod`, `sys_read`, `sys_write`, `sys_socket`, `sys_bind`, `sys_connect`,
+`sys_setsockopt`), `chrono.sleep_ms` for the sleeps, or — where the stdlib has
+no wrapper and no both-arch enum — a new **`src/syscall_compat.cyr`** holding
+`ag_sys_sendto` / `ag_sys_getsockopt` / `ag_sys_poll` / `ag_sys_clock_gettime`
+/ `ag_sys_getsid` / `ag_sys_fcntl`. That file is now the *only* place in the
+repo with a numeric syscall literal, and each number is documented with the
+strace evidence for both arches.
+
+⚠ **The aarch64 backend's x86-compat translation ladder is a trap in both
+directions.** It silently rewrites *some* x86 source numbers to their aarch64
+equivalents — which is why `read`/`write`/`poll`/`socket`/`connect`/`bind`/
+`setsockopt`/`getsockopt`/`fcntl`/`clock_gettime` happened to work while the
+nine above did not. It also **claims aarch64-native numbers as x86 sources**:
+`73` is aarch64 `ppoll`, but the ladder reads 73 as x86 `flock` and rewrites it
+to 32. `ag_sys_poll` therefore issues the x86 number on *both* arches (the
+ladder converts it to `ppoll` with the ms→timespec fixup), mirroring what
+`chrono.sleep_ms` already does. Verify any new number by strace before adding it.
+
+### Fixed — `read_pid_file_safe` security check failed open on aarch64 (CVE-2025-4598 class)
+
+`read_pid_file_safe` hand-parsed `struct stat` at hardcoded offsets +24
+(`st_mode`) and +28 (`st_uid`). Those are the **x86_64** offsets. The aarch64
+asm-generic layout puts `st_mode` at +16 and `st_uid` at +24, so on ARM the
+code read `st_uid` into `st_mode` and `st_gid` into `st_uid`. For a root-owned
+pid file both read **0**, `(0 & 0o022) == 0` passed, and the group/other-
+writable rejection — the whole point of the hardening — **never fired**. The
+ownership comparison was simultaneously checking the gid.
+
+Now uses the arch-dispatched `STAT_MODE` / `STAT_UID` / `STAT_BUFSZ` constants
+from `lib/syscalls.cyr`'s per-arch peer. Kernel struct *layout* is as
+arch-specific as the syscall number; neither belongs in a literal.
+
+### Changed — the aarch64 known-failure allowance was a misdiagnosis, and is gone
+
+`docs/architecture/001-cross-arch-aarch64.md` excused `audit_findings.tcyr` and
+`audit_extended.tcyr` as qemu-user emulation limits ("reparenting doesn't
+compose with the emulator's process model", "`getsid(0)` returns 0 under
+qemu-user"), and `scripts/aarch64-sweep.sh` encoded that as a pass. Both suites
+were failing on the real bugs above and now pass 161/161 and 47/47 on aarch64.
+The excuse arm is removed from the script and the doc section rewritten, so a
+future failure there is reported as the regression it is.
+
+For the record: `audit_extended`'s actual aarch64 failure was
+`persist: open succeeds` — its scratch-file cleanup used `unlink`, i.e.
+`timerfd_gettime` on ARM, so stale state survived and the reopen failed. The
+separate ed25519 "wrong vk rejected" assertion the doc blamed passes on aarch64
+both before and after this change; that upstream sigil issue was resolved
+independently (sigil 3.12.9) and is **not** attributable to this release.
+
+### Verification
+
+- `cyrius fmt --check`, `cyrius lint`, `cyrius vet` — clean.
+- x86_64 + aarch64 builds OK; 30 suites / 872 assertions green on **both**
+  (`scripts/aarch64-sweep.sh` under qemu-user).
+- Bench: 0 regressions ≥ 15 %; largest delta +5.5 % (`resolve_waves_desktop`),
+  within run-to-run noise.
+
+---
+
 ## [1.13.0] — 2026-08-24
 
 **`ServiceDefinition` carries cgroup limits.** Additive; existing field
