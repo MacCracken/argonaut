@@ -7,6 +7,40 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.10.1] — 2026-08-24
+
+**A boot step can finally be marked SKIPPED.** Additive; no layout change.
+Suite 860 assertions across 30 suites, 0 failures. Driven by kybernet 1.5.1.
+
+### Added — `init_mark_step_skipped(init, stage, reason)`
+
+`STEP_SKIPPED` has existed as a `BootStepStatus` since the enum was written,
+and `init_is_boot_complete` has always accepted it — but **nothing could
+ever set it**. A consumer with a boot stage it does not perform therefore
+had exactly two options: mark it `COMPLETE` and lie, or mark it `FAILED` and
+abort a boot that is fine.
+
+kybernet took the first. Its `execute_boot_stage` returned 1 for all eleven
+stages, so every `boot: <stage>` line an operator saw was theatre, and
+`init_mark_step_failed` plus the whole emergency-drop path were unreachable
+code. There was no third answer available to it. Now there is.
+
+### Added — accessors
+
+- **`init_service_ready(init, name)`** — is a service "up"? `STATE_RUNNING`
+  for a long-lived service; for a `SVC_ONESHOT`, having actually run and
+  exited cleanly (`STATE_STOPPED` with `started_at` set — a oneshot that
+  never ran is *also* `STOPPED`, which is why `started_at` is the
+  discriminator). The same predicate the dependency check uses, exposed
+  because a consumer verifying a boot stage needs exactly it.
+- **`init_boot_sequence(init)`** — the vec of `BootStep`, so a consumer can
+  inspect step status without reaching into the struct by offset.
+- **`config_set_boot_mode(cfg, mode)`** — `boot_mode` is field 0 and every
+  consumer that wanted to change it wrote `store64(cfg, mode)` by hand,
+  putting argonaut's layout in their source.
+
+---
+
 ## [1.10.0] — 2026-08-24
 
 **Config-driven service definitions become usable from outside argonaut**,

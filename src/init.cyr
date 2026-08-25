@@ -86,6 +86,11 @@ fn argonaut_init_new(config) {
 }
 
 fn init_audit_log(init) { return load64(init + 40); }
+
+# The boot sequence for this init's mode — a vec of BootStep. Added 1.10.1
+# so a consumer can inspect step status (COMPLETE / FAILED / SKIPPED)
+# without reaching into the struct by offset.
+fn init_boot_sequence(init) { return load64(init + 8); }
 fn init_notify_fd(init) { return load64(init + 48); }
 
 # 1.5.3 — opt-in persistent audit log accessors.
@@ -176,6 +181,48 @@ fn init_mark_step_failed(init, stage, error_msg) {
         }
     }
     return 0;
+}
+
+# Mark a step SKIPPED — the stage does not apply to this deployment, as
+# distinct from COMPLETE (it ran and succeeded) or FAILED (it ran and did
+# not).
+#
+# Added 1.10.1. STEP_SKIPPED has existed as a status since the enum was
+# written, and init_is_boot_complete has always accepted it — but nothing
+# could ever SET it, so a consumer with a stage it does not perform had
+# only two options: mark it COMPLETE and lie, or mark it FAILED and abort
+# a boot that is fine. kybernet took the first (its execute_boot_stage
+# returned 1 for all eleven stages), which is why its whole boot-stage
+# apparatus reported success it never earned.
+fn init_mark_step_skipped(init, stage, reason) {
+    var steps = load64(init + 8);
+    for (var i = 0; i < vec_len(steps); i = i + 1) {
+        var step = vec_get(steps, i);
+        if (load64(step) == stage) {
+            if (load64(step + 40) == 0) {
+                store64(step + 40, now_ms());
+            }
+            store64(step + 32, STEP_SKIPPED);
+            store64(step + 48, now_ms());
+            store64(step + 56, reason);
+
+            var sname = boot_stage_str(stage);
+            sakshi_info(sname, strlen(sname));
+            return 1;
+        }
+    }
+    return 0;
+}
+
+# Is `name` (a cstr) in a state that counts as "up"?
+#
+# RUNNING for a long-lived service; for a SVC_ONESHOT, having actually run
+# and exited cleanly (STATE_STOPPED with started_at set — a oneshot that
+# never ran is also STOPPED, which is why started_at is the discriminator).
+# This is the same predicate the dependency check uses, exposed because
+# consumers verifying a boot stage need exactly it. Added 1.10.1.
+fn init_service_ready(init, name) {
+    return _dep_satisfied(init, name);
 }
 
 fn init_current_stage(init) {

@@ -875,6 +875,10 @@ fn config_tmpfiles(cfg)           { return load64(cfg + 56); }
 fn config_audit_persist(cfg)      { return load64(cfg + 64); }
 fn config_audit_path(cfg)         { return load64(cfg + 72); }
 
+# 1.10.1 — boot_mode is field 0 and every consumer that wanted to change it
+# wrote `store64(cfg, mode)` by hand, putting the layout in their source.
+fn config_set_boot_mode(cfg, mode)     { store64(cfg, mode); return cfg; }
+
 fn config_set_audit_persist(cfg, on)   { store64(cfg + 64, on); return cfg; }
 fn config_set_audit_path(cfg, path)    { store64(cfg + 72, path); return cfg; }
 
