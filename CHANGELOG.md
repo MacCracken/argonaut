@@ -7,6 +7,44 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.13.3] — 2026-08-25
+
+**The watchdog kill path segfaulted, and in a PID-1 consumer that is a kernel
+panic.** One argument. Suite 30 → 31 files, 0 failures.
+
+### Fixed — `init_enforce_watchdog` passed a cstr to a Str API
+
+`src/init.cyr` took the cstr view of the timed-out service name and handed it
+to `proc_table_pid(name)` — but every `proc_table_*` entry point does
+`str_data(name)` internally (`process_mgmt.cyr:480-500`), because they take a
+**boxed Str**. So it loaded the first eight characters of the service name
+*as a pointer* and gave that to `map_get`: a wild dereference.
+
+In kybernet, which is PID 1, that is
+`Kernel panic - not syncing: Attempted to kill init! exitcode=0x0000000b`.
+
+The four other `proc_table_*` call sites in this file are correct — they pass
+`svc_def_name(sd)`, which is already a `Str`. Only the watchdog site converted
+first and then passed the wrong thing.
+
+### Why thirty test files and every consumer gate missed it
+
+`init_check_watchdog`'s only runtime arm is health-check driven, and
+`init_enforce_watchdog` is reached from nowhere else. **No test and no
+consumer fixture had ever configured a `health_check`**, so the function had
+literally never executed — not once, in any release of argonaut or of the one
+consumer that ships it. kybernet added a failing health check to its QEMU
+harness at 1.6.1 and PID 1 died on the first tick that recorded a failure.
+
+### Tests
+
+- `tests/tcyr/watchdog_kill.tcyr` — drives the whole path with a real
+  proc-table entry and a stale `last_hc`. **Verified to fail on the unfixed
+  source: exit 139 (SIGSEGV).** It cannot fail an assertion there, because a
+  wild dereference has no other way to present. 6 assertions.
+
+---
+
 ## [1.13.2] — 2026-08-24
 
 **The edge-boot execution path could never succeed, and when it failed it

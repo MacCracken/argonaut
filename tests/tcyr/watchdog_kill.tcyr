@@ -1,0 +1,66 @@
+# watchdog_kill.tcyr — the watchdog KILL path, which no test had ever reached.
+#
+# init_check_watchdog's only runtime arm is health-check driven, and no
+# consumer fixture had ever configured a health_check — so init_enforce_watchdog
+# ran zero times in thirty test files and in every release gate of every
+# consumer. kybernet's harness gained a failing health check at its 1.6.1 and
+# PID 1 took a SIGSEGV on the first tick that recorded a failure, panicking the
+# kernel with "Attempted to kill init".
+#
+# The defect was one argument: `proc_table_pid(name)` was handed the CSTR view
+# of the name, but every proc_table_* entry point does `str_data(name)`
+# internally — so it loaded the first eight characters of "kyb-health" AS A
+# POINTER and gave that to map_get.
+#
+# This test drives the whole path with a real proc_table entry. Against the
+# unfixed source it does not fail an assertion — it SEGFAULTS, which is the
+# only way a wild dereference can present.
+include "tests/test_header.cyr"
+fn main() {
+    alloc_init();
+    proc_table_init();
+
+    test_group("watchdog-kill-path");
+
+    # A service that is RUNNING, has a health check, and has never recorded a
+    # passing one — so `last_hc == 0` and elapsed falls back to uptime.
+    var cfg = argonaut_config_default();
+    var sd = svc_def_new(str_from("wd-victim"), str_from("watchdog victim"), str_from("/bin/sleep"));
+    svc_def_set_health_check(sd, health_check_new(HC_TCP_CONNECT, str_from("127.0.0.1"), 9, 1, 1, 1));
+    vec_push(config_services(cfg), sd);
+
+    var init = argonaut_init_new(cfg);
+    assert(init != 0, "init built");
+
+    var ms = init_get_service(init, "wd-victim");
+    assert(ms != 0, "service registered");
+    managed_svc_set_state(ms, STATE_RUNNING);
+
+    # A proc_table entry is what makes init_check_watchdog consider it at all
+    # (it iterates proc_table_keys). pid 0 keeps process_kill out of the way —
+    # the crash was in the LOOKUP, before any signal was sent.
+    proc_table_insert(str_from("wd-victim"), 0);
+    assert_eq(proc_table_count(), 1, "proc table has the victim");
+
+    # The window is interval*retries + timeout = 1*1 + 1 = 2 ms, and uptime is
+    # measured from the insert above — so let real time pass or nothing is
+    # stale yet.
+    sleep_ms(20);
+
+    # interval*retries+timeout = 1*1+1 = 2 ms, so any real uptime exceeds it.
+    var timed_out = init_check_watchdog(init);
+    assert(vec_len(timed_out) >= 1, "watchdog flagged the stale service");
+
+    # ⚠ THE LINE THAT USED TO SEGFAULT. Reaching the assertion at all is the
+    # result; the value is secondary.
+    var killed = init_enforce_watchdog(init);
+    assert(vec_len(killed) >= 1, "enforce_watchdog returned the killed set without faulting");
+
+    # And the service was moved out of RUNNING rather than left dangling.
+    assert_eq(managed_svc_state(init_get_service(init, "wd-victim")), STATE_FAILED,
+      "victim marked FAILED");
+
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

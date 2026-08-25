@@ -760,15 +760,30 @@ fn init_enforce_watchdog(init) {
     var timed_out = init_check_watchdog(init);
 
     for (var i = 0; i < vec_len(timed_out); i = i + 1) {
-        var name = str_data(vec_get(timed_out, i));
+        # `timed_out` holds boxed Str (init_check_watchdog pushes
+        # `str_from(name)`); `name` below is the CSTR view of it. Keep both,
+        # because this loop calls into two different conventions.
+        var name_s = vec_get(timed_out, i);
+        var name = str_data(name_s);
 
         sakshi_error(name, strlen(name));
         audit_log_record(load64(init + 40), name, EVT_TIMEOUT_KILLED);
 
-        var pid = proc_table_pid(name);
+        # ⚠ proc_table_* TAKE A BOXED Str, NOT A CSTR — every one of them
+        # does `str_data(name)` internally (process_mgmt.cyr:480-500). This
+        # line passed the cstr, so `str_data("kyb-health")` loaded the first
+        # eight characters AS A POINTER and handed that to map_get: a wild
+        # dereference, and in a PID-1 consumer a SIGSEGV that panics the
+        # kernel with "Attempted to kill init".
+        #
+        # It survived because nothing had ever reached it. The watchdog's
+        # only runtime arm is health-check-driven, and no consumer fixture
+        # had ever configured a health_check — kybernet's harness gained one
+        # at 1.6.1 and hit this on the first tick that recorded a failure.
+        var pid = proc_table_pid(name_s);
         if (pid > 0) {
             process_kill(pid);
-            proc_table_remove(str_from(name));
+            proc_table_remove(name_s);
         }
         var ms = init_get_service(init, name);
         if (ms != 0) {
