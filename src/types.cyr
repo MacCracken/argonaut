@@ -493,37 +493,172 @@ fn landlock_access_str(a) {
 # Linux capabilities
 # =========================================================================
 
+# Linux capability numbers, as the KERNEL defines them
+# (include/uapi/linux/capability.h). The value IS the capability number.
+#
+# ⚠ Rewritten at 1.11.0. This was a 13-entry list in an arbitrary order —
+# CAP_NET_BIND_SERVICE was 0, CAP_SYS_ADMIN was 1 — and argonaut only ever
+# used it for capability_str, so the wrong values were invisible here. They
+# were not invisible downstream: agnostik defines an enum with the SAME NAME
+# and the same member names, so any consumer linking both (kybernet does)
+# got whichever came last in the include chain. argonaut's came last.
+#
+# kybernet's privilege drop builds a mask with `1 << cap` and hands it to
+# capset(2), so under the old values "keep CAP_SYS_ADMIN" kept kernel
+# capability 1 — CAP_DAC_OVERRIDE — and dropped CAP_SYS_ADMIN. Filed in
+# kybernet's 2026-08-24 audit as cap-ordinal-vs-kernel-number; it became
+# load-bearing at kybernet 1.5.2, when capability policy stopped being
+# decorative.
+#
+# These values now match agnostik's (also corrected, at its 1.4.1), so the
+# duplicate definition is value-identical and harmless. Explicit values, not
+# implicit ordinals, so an insertion cannot renumber the tail.
 enum LinuxCapability {
-    CAP_NET_BIND_SERVICE;
-    CAP_SYS_ADMIN;
-    CAP_DAC_OVERRIDE;
-    CAP_NET_RAW;
-    CAP_SYS_CHROOT;
-    CAP_SETUID;
-    CAP_SETGID;
-    CAP_KILL;
-    CAP_SYS_PTRACE;
-    CAP_SYS_TIME;
-    CAP_NET_ADMIN;
-    CAP_FOWNER;
-    CAP_FSETID;
+    CAP_CHOWN = 0;
+    CAP_DAC_OVERRIDE = 1;
+    CAP_DAC_READ_SEARCH = 2;
+    CAP_FOWNER = 3;
+    CAP_FSETID = 4;
+    CAP_KILL = 5;
+    CAP_SETGID = 6;
+    CAP_SETUID = 7;
+    CAP_SETPCAP = 8;
+    CAP_LINUX_IMMUTABLE = 9;
+    CAP_NET_BIND_SERVICE = 10;
+    CAP_NET_BROADCAST = 11;
+    CAP_NET_ADMIN = 12;
+    CAP_NET_RAW = 13;
+    CAP_IPC_LOCK = 14;
+    CAP_IPC_OWNER = 15;
+    CAP_SYS_MODULE = 16;
+    CAP_SYS_RAWIO = 17;
+    CAP_SYS_CHROOT = 18;
+    CAP_SYS_PTRACE = 19;
+    CAP_SYS_PACCT = 20;
+    CAP_SYS_ADMIN = 21;
+    CAP_SYS_BOOT = 22;
+    CAP_SYS_NICE = 23;
+    CAP_SYS_RESOURCE = 24;
+    CAP_SYS_TIME = 25;
+    CAP_SYS_TTY_CONFIG = 26;
+    CAP_MKNOD = 27;
+    CAP_LEASE = 28;
+    CAP_AUDIT_WRITE = 29;
+    CAP_AUDIT_CONTROL = 30;
+    CAP_SETFCAP = 31;
+    CAP_MAC_OVERRIDE = 32;
+    CAP_MAC_ADMIN = 33;
+    CAP_SYSLOG = 34;
+    CAP_WAKE_ALARM = 35;
+    CAP_BLOCK_SUSPEND = 36;
+    CAP_AUDIT_READ = 37;
+    CAP_PERFMON = 38;
+    CAP_BPF = 39;
+    CAP_CHECKPOINT_RESTORE = 40;
+    CAP_LAST_CAP = 40;
 }
 
+# Canonical capability name — the lowercase cap_ spelling capsh(1),
+# getcap(8) and capability(7) use, so config written against Linux
+# documentation round-trips without translation.
 fn capability_str(c) {
-    if (c == CAP_NET_BIND_SERVICE) { return "cap_net_bind_service"; }
-    if (c == CAP_SYS_ADMIN)       { return "cap_sys_admin"; }
-    if (c == CAP_DAC_OVERRIDE)    { return "cap_dac_override"; }
-    if (c == CAP_NET_RAW)         { return "cap_net_raw"; }
-    if (c == CAP_SYS_CHROOT)     { return "cap_sys_chroot"; }
-    if (c == CAP_SETUID)          { return "cap_setuid"; }
-    if (c == CAP_SETGID)          { return "cap_setgid"; }
-    if (c == CAP_KILL)            { return "cap_kill"; }
-    if (c == CAP_SYS_PTRACE)     { return "cap_sys_ptrace"; }
-    if (c == CAP_SYS_TIME)       { return "cap_sys_time"; }
-    if (c == CAP_NET_ADMIN)      { return "cap_net_admin"; }
-    if (c == CAP_FOWNER)          { return "cap_fowner"; }
-    if (c == CAP_FSETID)          { return "cap_fsetid"; }
+    if (c == CAP_CHOWN) { return "cap_chown"; }
+    elif (c == CAP_DAC_OVERRIDE) { return "cap_dac_override"; }
+    elif (c == CAP_DAC_READ_SEARCH) { return "cap_dac_read_search"; }
+    elif (c == CAP_FOWNER) { return "cap_fowner"; }
+    elif (c == CAP_FSETID) { return "cap_fsetid"; }
+    elif (c == CAP_KILL) { return "cap_kill"; }
+    elif (c == CAP_SETGID) { return "cap_setgid"; }
+    elif (c == CAP_SETUID) { return "cap_setuid"; }
+    elif (c == CAP_SETPCAP) { return "cap_setpcap"; }
+    elif (c == CAP_LINUX_IMMUTABLE) { return "cap_linux_immutable"; }
+    elif (c == CAP_NET_BIND_SERVICE) { return "cap_net_bind_service"; }
+    elif (c == CAP_NET_BROADCAST) { return "cap_net_broadcast"; }
+    elif (c == CAP_NET_ADMIN) { return "cap_net_admin"; }
+    elif (c == CAP_NET_RAW) { return "cap_net_raw"; }
+    elif (c == CAP_IPC_LOCK) { return "cap_ipc_lock"; }
+    elif (c == CAP_IPC_OWNER) { return "cap_ipc_owner"; }
+    elif (c == CAP_SYS_MODULE) { return "cap_sys_module"; }
+    elif (c == CAP_SYS_RAWIO) { return "cap_sys_rawio"; }
+    elif (c == CAP_SYS_CHROOT) { return "cap_sys_chroot"; }
+    elif (c == CAP_SYS_PTRACE) { return "cap_sys_ptrace"; }
+    elif (c == CAP_SYS_PACCT) { return "cap_sys_pacct"; }
+    elif (c == CAP_SYS_ADMIN) { return "cap_sys_admin"; }
+    elif (c == CAP_SYS_BOOT) { return "cap_sys_boot"; }
+    elif (c == CAP_SYS_NICE) { return "cap_sys_nice"; }
+    elif (c == CAP_SYS_RESOURCE) { return "cap_sys_resource"; }
+    elif (c == CAP_SYS_TIME) { return "cap_sys_time"; }
+    elif (c == CAP_SYS_TTY_CONFIG) { return "cap_sys_tty_config"; }
+    elif (c == CAP_MKNOD) { return "cap_mknod"; }
+    elif (c == CAP_LEASE) { return "cap_lease"; }
+    elif (c == CAP_AUDIT_WRITE) { return "cap_audit_write"; }
+    elif (c == CAP_AUDIT_CONTROL) { return "cap_audit_control"; }
+    elif (c == CAP_SETFCAP) { return "cap_setfcap"; }
+    elif (c == CAP_MAC_OVERRIDE) { return "cap_mac_override"; }
+    elif (c == CAP_MAC_ADMIN) { return "cap_mac_admin"; }
+    elif (c == CAP_SYSLOG) { return "cap_syslog"; }
+    elif (c == CAP_WAKE_ALARM) { return "cap_wake_alarm"; }
+    elif (c == CAP_BLOCK_SUSPEND) { return "cap_block_suspend"; }
+    elif (c == CAP_AUDIT_READ) { return "cap_audit_read"; }
+    elif (c == CAP_PERFMON) { return "cap_perfmon"; }
+    elif (c == CAP_BPF) { return "cap_bpf"; }
+    elif (c == CAP_CHECKPOINT_RESTORE) { return "cap_checkpoint_restore"; }
     return "unknown";
+}
+
+# Inverse of capability_str. Exact match — an unrecognised name errors
+# rather than defaulting, because the failure mode of a silent default is
+# retaining a capability the operator asked to drop.
+#
+# ⚠ Named `capability_from_str`, NOT `capability_parse`. agnostik exports
+# `capability_parse` for its own (now value-identical) enum, and a consumer
+# linking both — kybernet does — would get whichever came last in the
+# include chain. Values agreeing makes that harmless *today*, but relying on
+# "last definition wins" for a security primitive is the exact defect class
+# this release exists to remove. Same resolution as `svc_hc_*` at 1.10.0.
+fn capability_from_str(s) {
+    if (str_eq_cstr(s, "cap_chown") == 1) { return Ok(CAP_CHOWN); }
+    elif (str_eq_cstr(s, "cap_dac_override") == 1) { return Ok(CAP_DAC_OVERRIDE); }
+    elif (str_eq_cstr(s, "cap_dac_read_search") == 1) { return Ok(CAP_DAC_READ_SEARCH); }
+    elif (str_eq_cstr(s, "cap_fowner") == 1) { return Ok(CAP_FOWNER); }
+    elif (str_eq_cstr(s, "cap_fsetid") == 1) { return Ok(CAP_FSETID); }
+    elif (str_eq_cstr(s, "cap_kill") == 1) { return Ok(CAP_KILL); }
+    elif (str_eq_cstr(s, "cap_setgid") == 1) { return Ok(CAP_SETGID); }
+    elif (str_eq_cstr(s, "cap_setuid") == 1) { return Ok(CAP_SETUID); }
+    elif (str_eq_cstr(s, "cap_setpcap") == 1) { return Ok(CAP_SETPCAP); }
+    elif (str_eq_cstr(s, "cap_linux_immutable") == 1) { return Ok(CAP_LINUX_IMMUTABLE); }
+    elif (str_eq_cstr(s, "cap_net_bind_service") == 1) { return Ok(CAP_NET_BIND_SERVICE); }
+    elif (str_eq_cstr(s, "cap_net_broadcast") == 1) { return Ok(CAP_NET_BROADCAST); }
+    elif (str_eq_cstr(s, "cap_net_admin") == 1) { return Ok(CAP_NET_ADMIN); }
+    elif (str_eq_cstr(s, "cap_net_raw") == 1) { return Ok(CAP_NET_RAW); }
+    elif (str_eq_cstr(s, "cap_ipc_lock") == 1) { return Ok(CAP_IPC_LOCK); }
+    elif (str_eq_cstr(s, "cap_ipc_owner") == 1) { return Ok(CAP_IPC_OWNER); }
+    elif (str_eq_cstr(s, "cap_sys_module") == 1) { return Ok(CAP_SYS_MODULE); }
+    elif (str_eq_cstr(s, "cap_sys_rawio") == 1) { return Ok(CAP_SYS_RAWIO); }
+    elif (str_eq_cstr(s, "cap_sys_chroot") == 1) { return Ok(CAP_SYS_CHROOT); }
+    elif (str_eq_cstr(s, "cap_sys_ptrace") == 1) { return Ok(CAP_SYS_PTRACE); }
+    elif (str_eq_cstr(s, "cap_sys_pacct") == 1) { return Ok(CAP_SYS_PACCT); }
+    elif (str_eq_cstr(s, "cap_sys_admin") == 1) { return Ok(CAP_SYS_ADMIN); }
+    elif (str_eq_cstr(s, "cap_sys_boot") == 1) { return Ok(CAP_SYS_BOOT); }
+    elif (str_eq_cstr(s, "cap_sys_nice") == 1) { return Ok(CAP_SYS_NICE); }
+    elif (str_eq_cstr(s, "cap_sys_resource") == 1) { return Ok(CAP_SYS_RESOURCE); }
+    elif (str_eq_cstr(s, "cap_sys_time") == 1) { return Ok(CAP_SYS_TIME); }
+    elif (str_eq_cstr(s, "cap_sys_tty_config") == 1) { return Ok(CAP_SYS_TTY_CONFIG); }
+    elif (str_eq_cstr(s, "cap_mknod") == 1) { return Ok(CAP_MKNOD); }
+    elif (str_eq_cstr(s, "cap_lease") == 1) { return Ok(CAP_LEASE); }
+    elif (str_eq_cstr(s, "cap_audit_write") == 1) { return Ok(CAP_AUDIT_WRITE); }
+    elif (str_eq_cstr(s, "cap_audit_control") == 1) { return Ok(CAP_AUDIT_CONTROL); }
+    elif (str_eq_cstr(s, "cap_setfcap") == 1) { return Ok(CAP_SETFCAP); }
+    elif (str_eq_cstr(s, "cap_mac_override") == 1) { return Ok(CAP_MAC_OVERRIDE); }
+    elif (str_eq_cstr(s, "cap_mac_admin") == 1) { return Ok(CAP_MAC_ADMIN); }
+    elif (str_eq_cstr(s, "cap_syslog") == 1) { return Ok(CAP_SYSLOG); }
+    elif (str_eq_cstr(s, "cap_wake_alarm") == 1) { return Ok(CAP_WAKE_ALARM); }
+    elif (str_eq_cstr(s, "cap_block_suspend") == 1) { return Ok(CAP_BLOCK_SUSPEND); }
+    elif (str_eq_cstr(s, "cap_audit_read") == 1) { return Ok(CAP_AUDIT_READ); }
+    elif (str_eq_cstr(s, "cap_perfmon") == 1) { return Ok(CAP_PERFMON); }
+    elif (str_eq_cstr(s, "cap_bpf") == 1) { return Ok(CAP_BPF); }
+    elif (str_eq_cstr(s, "cap_checkpoint_restore") == 1) { return Ok(CAP_CHECKPOINT_RESTORE); }
+    return Err(EINVAL);
 }
 
 # =========================================================================

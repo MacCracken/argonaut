@@ -7,6 +7,52 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.11.0] — 2026-08-25
+
+**`LinuxCapability` values are kernel capability numbers.** Security fix.
+Suite 860 assertions across 30 suites, 0 failures.
+
+### Fixed — the enum was a 13-entry list in an arbitrary order
+
+`CAP_NET_BIND_SERVICE` was 0. `CAP_SYS_ADMIN` was 1. `CAP_SETUID` was 5.
+The kernel's values are 10, 21 and 7.
+
+argonaut only ever used these for `capability_str`, so the wrong numbers
+were invisible *here*. They were not invisible downstream: **agnostik
+defines an enum with the same name and the same member names**, and any
+consumer linking both — kybernet does — got whichever definition came last
+in the include chain. argonaut's came last.
+
+kybernet's privilege drop builds a mask with `1 << cap` and hands it to
+`capset(2)`, so under the old values "keep `CAP_SYS_ADMIN`" retained kernel
+capability 1 — `CAP_DAC_OVERRIDE` — while actually dropping `CAP_SYS_ADMIN`.
+Filed in kybernet's 2026-08-24 audit as `cap-ordinal-vs-kernel-number`; it
+became load-bearing at kybernet 1.5.2, when capability policy stopped being
+decorative.
+
+Now the complete kernel set, 0–40 with explicit values plus `CAP_LAST_CAP`.
+These match agnostik's (also corrected, at its 1.5.0), so the duplicate
+definition is value-identical and the toolchain no longer reports a
+conflicting-value collision for any `CAP_*` symbol.
+
+### Added
+
+- **`capability_from_str(s)`** — inverse of `capability_str`, exact match,
+  `Err(EINVAL)` on an unrecognised name.
+
+  ⚠ Named `capability_from_str`, **not** `capability_parse`: agnostik
+  exports `capability_parse` for its own (now value-identical) enum, and a
+  consumer linking both — kybernet does — would get whichever came last in
+  the include chain. The values agreeing makes that harmless today, but
+  relying on "last definition wins" for a security primitive is the exact
+  defect class this release removes. Same resolution as `svc_hc_*` at
+  1.10.0.
+- `capability_str` now covers all 41 capabilities and emits the canonical
+  lowercase `cap_` spelling used by `capsh(1)` and `capability(7)`, so a
+  config written against Linux documentation round-trips.
+
+---
+
 ## [1.10.1] — 2026-08-24
 
 **A boot step can finally be marked SKIPPED.** Additive; no layout change.
