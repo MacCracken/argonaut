@@ -79,7 +79,7 @@ fn main() {
     assert_eq(init_notify_watchdog(init, "nfy"), 1, "watchdog ping accepted");
     assert(managed_svc_last_notify(ms) > 0, "ping refreshed last_notify");
     assert_eq(managed_svc_last_hc(ms), 0,
-              "ping did NOT touch last_health_check — a service cannot silence a real probe");
+      "ping did NOT touch last_health_check — a service cannot silence a real probe");
 
     # ---- a watchdog without a health_check ----
     var cfg2 = argonaut_config_default();
@@ -97,7 +97,7 @@ fn main() {
     sleep_ms(20);
     var stale = init_check_watchdog(init2);
     assert(vec_len(stale) >= 1,
-           "notify watchdog fires with no health_check — the arm that did not exist before 1.13.6");
+      "notify watchdog fires with no health_check — the arm that did not exist before 1.13.6");
 
     # And a fresh ping clears it, which is the whole point of the deadline.
     init_notify_watchdog(init2, "wd-only");
@@ -113,7 +113,7 @@ fn main() {
     proc_table_insert(str_from("no-wd"), 0);
     sleep_ms(5);
     assert_eq(vec_len(init_check_watchdog(init3)), 0,
-              "watchdog_ms=0 means no notify watchdog — existing behaviour preserved");
+      "watchdog_ms=0 means no notify watchdog — existing behaviour preserved");
 
     return assert_summary();
 }
