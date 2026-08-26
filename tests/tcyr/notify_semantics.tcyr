@@ -1,0 +1,121 @@
+# notify_semantics.tcyr — SVC_NOTIFY readiness and the notify watchdog. (1.13.6)
+#
+# WHAT THIS PINS, AND WHY EACH ONE MATTERS
+#
+# 1. A SVC_NOTIFY service is left STATE_STARTING by the start path. Every other
+#    type is RUNNING the instant fork+exec succeeds, which is exactly why
+#    sd_notify READY had nowhere to land — no service was ever awaiting one.
+#
+# 2. init_notify_ready moves STARTING -> RUNNING, is idempotent, and is ONE-WAY.
+#    A compromised service must not be able to declare itself un-ready and
+#    trigger restarts of everything that depends on it.
+#
+# 3. ⚠ THE SAFETY PROPERTY: init_notify_watchdog touches `last_notify` ONLY and
+#    never `last_health_check`. Those mean different things — "the service SAID
+#    it was alive" versus "a probe argonaut RAN and OBSERVED passing". If a
+#    self-reported ping could refresh the health timestamp, a wedged service
+#    could silence a failure argonaut actually watched happen. Authentication
+#    does not cure that: SCM_CREDENTIALS proves the ping came from the service,
+#    not that the service is honest about itself.
+#
+# 4. `watchdog_ms` gives a service a watchdog WITHOUT a health_check. Before
+#    1.13.6 the runtime watchdog arm was gated entirely on
+#    `svc_def_health_check(sd) != 0`, so most services had no watchdog at all
+#    and WATCHDOG=1 had nothing to refresh.
+include "tests/test_header.cyr"
+fn main() {
+    alloc_init();
+    proc_table_init();
+
+    test_group("notify-semantics");
+
+    # ---- the type round-trips through the config surface ----
+    assert_eq(service_type_str(SVC_NOTIFY), "notify", "SVC_NOTIFY names itself");
+    var pr = service_type_parse(str_from("notify"));
+    assert(is_ok(pr) == 1, "\"notify\" parses");
+    assert_eq(result_unwrap(pr), SVC_NOTIFY, "parses to SVC_NOTIFY");
+
+    # ⚠ Appended, not inserted: the three older values must keep their numbers
+    # or every config written against an older argonaut silently changes type.
+    assert_eq(SVC_SIMPLE, 0, "SVC_SIMPLE still 0");
+    assert_eq(SVC_FORKING, 1, "SVC_FORKING still 1");
+    assert_eq(SVC_ONESHOT, 2, "SVC_ONESHOT still 2");
+    assert_eq(SVC_NOTIFY, 3, "SVC_NOTIFY appended as 3");
+
+    # ---- readiness ----
+    var cfg = argonaut_config_default();
+    var sd = svc_def_new(str_from("nfy"), str_from("notify svc"), str_from("/bin/sleep"));
+    svc_def_set_service_type(sd, SVC_NOTIFY);
+    vec_push(config_services(cfg), sd);
+
+    var init = argonaut_init_new(cfg);
+    var ms = init_get_service(init, "nfy");
+    assert(ms != 0, "notify service registered");
+
+    # Simulate what init_start_simple does for SVC_NOTIFY: left STARTING.
+    managed_svc_set_state(ms, STATE_STARTING);
+    managed_svc_set_last_notify(ms, now_ms());
+    assert_eq(managed_svc_state(ms), STATE_STARTING, "notify service starts STARTING");
+
+    assert_eq(init_notify_ready(init, "nfy"), 1, "READY transitions the service");
+    assert_eq(managed_svc_state(ms), STATE_RUNNING, "now RUNNING");
+
+    # Idempotent: a second READY is a no-op, not an error and not a regression.
+    assert_eq(init_notify_ready(init, "nfy"), 0, "second READY is a no-op");
+    assert_eq(managed_svc_state(ms), STATE_RUNNING, "still RUNNING after repeat READY");
+
+    # One-way: READY must never move a service backwards out of RUNNING.
+    managed_svc_set_state(ms, STATE_RUNNING);
+    init_notify_ready(init, "nfy");
+    assert_eq(managed_svc_state(ms), STATE_RUNNING, "READY never un-readies a service");
+
+    # Unknown service: refused rather than faulting.
+    assert_eq(init_notify_ready(init, "no-such-service"), 0, "unknown name refused");
+
+    # ---- ⚠ THE SAFETY PROPERTY ----
+    # A ping refreshes last_notify and MUST leave last_health_check alone.
+    managed_svc_set_last_hc(ms, 0);
+    managed_svc_set_last_notify(ms, 0);
+    assert_eq(init_notify_watchdog(init, "nfy"), 1, "watchdog ping accepted");
+    assert(managed_svc_last_notify(ms) > 0, "ping refreshed last_notify");
+    assert_eq(managed_svc_last_hc(ms), 0,
+              "ping did NOT touch last_health_check — a service cannot silence a real probe");
+
+    # ---- a watchdog without a health_check ----
+    var cfg2 = argonaut_config_default();
+    var sd2 = svc_def_new(str_from("wd-only"), str_from("no health check"), str_from("/bin/sleep"));
+    svc_def_set_watchdog_ms(sd2, 1);          # 1 ms: any real elapsed time exceeds it
+    assert_eq(svc_def_health_check(sd2), 0, "deliberately has NO health_check");
+    vec_push(config_services(cfg2), sd2);
+
+    var init2 = argonaut_init_new(cfg2);
+    var ms2 = init_get_service(init2, "wd-only");
+    managed_svc_set_state(ms2, STATE_RUNNING);
+    managed_svc_set_last_notify(ms2, now_ms());
+    proc_table_insert(str_from("wd-only"), 0);
+
+    sleep_ms(20);
+    var stale = init_check_watchdog(init2);
+    assert(vec_len(stale) >= 1,
+           "notify watchdog fires with no health_check — the arm that did not exist before 1.13.6");
+
+    # And a fresh ping clears it, which is the whole point of the deadline.
+    init_notify_watchdog(init2, "wd-only");
+    var fresh = init_check_watchdog(init2);
+    assert_eq(vec_len(fresh), 0, "a ping clears the notify watchdog");
+
+    # A service with watchdog_ms == 0 is never flagged by this arm.
+    var cfg3 = argonaut_config_default();
+    var sd3 = svc_def_new(str_from("no-wd"), str_from("default"), str_from("/bin/sleep"));
+    vec_push(config_services(cfg3), sd3);
+    var init3 = argonaut_init_new(cfg3);
+    managed_svc_set_state(init_get_service(init3, "no-wd"), STATE_RUNNING);
+    proc_table_insert(str_from("no-wd"), 0);
+    sleep_ms(5);
+    assert_eq(vec_len(init_check_watchdog(init3)), 0,
+              "watchdog_ms=0 means no notify watchdog — existing behaviour preserved");
+
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

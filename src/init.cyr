@@ -462,10 +462,60 @@ fn init_start_simple(init, name, ms, sd) {
         audit_log_record(load64(init + 40), name, EVT_READY_PASSED);
     }
 
+    # ⚠ A SVC_NOTIFY SERVICE IS LEFT STARTING UNTIL IT REPORTS IN.
+    # Every other type is RUNNING the instant fork+exec succeeds, which is why
+    # sd_notify READY had nowhere to land: no service was ever awaiting a
+    # notification. Under SVC_NOTIFY the transition is owned by
+    # `init_notify_ready`, driven by an authenticated READY=1 from the service's
+    # own pid — systemd's Type=notify contract.
+    #
+    # `last_notify` is seeded at start so a notify watchdog measures from the
+    # spawn, not from epoch 0 (which would fire immediately on the first tick).
+    if (svc_def_service_type(sd) == SVC_NOTIFY) {
+        managed_svc_set_state(ms, STATE_STARTING);
+        managed_svc_set_last_notify(ms, now_ms());
+        audit_log_record(load64(init + 40), name, EVT_STARTED);
+        return pid;
+    }
+
     managed_svc_set_state(ms, STATE_RUNNING);
     managed_svc_set_last_hc(ms, now_ms());
+    managed_svc_set_last_notify(ms, now_ms());
     audit_log_record(load64(init + 40), name, EVT_STARTED);
     return pid;
+}
+
+# Mark a SVC_NOTIFY service ready, from an AUTHENTICATED READY=1.
+#
+# The caller is responsible for having proved the datagram came from this
+# service's own pid (SO_PASSCRED + SCM_CREDENTIALS); this function does not and
+# cannot re-check that. Returns 1 if the service transitioned, 0 otherwise.
+#
+# Idempotent and one-way: a second READY on an already-RUNNING service is a
+# no-op rather than an error, and READY never moves a service BACKWARDS out of
+# RUNNING — a compromised service must not be able to make itself un-ready and
+# trigger dependent restarts.
+fn init_notify_ready(init, name) {
+    var ms = init_get_service(init, name);
+    if (ms == 0) { return 0; }
+    if (managed_svc_state(ms) != STATE_STARTING) { return 0; }
+    managed_svc_set_state(ms, STATE_RUNNING);
+    managed_svc_set_last_notify(ms, now_ms());
+    audit_log_record(load64(init + 40), name, EVT_READY_PASSED);
+    return 1;
+}
+
+# Refresh the notify watchdog deadline from an AUTHENTICATED WATCHDOG=1.
+#
+# ⚠ TOUCHES last_notify ONLY, NEVER last_health_check. Those mean different
+# things — "the service said it was alive" versus "a probe argonaut ran and
+# observed passing" — and letting a self-report satisfy the health deadline
+# would let a wedged service silence a failure argonaut actually saw.
+fn init_notify_watchdog(init, name) {
+    var ms = init_get_service(init, name);
+    if (ms == 0) { return 0; }
+    managed_svc_set_last_notify(ms, now_ms());
+    return 1;
 }
 
 fn init_start_oneshot(init, name, ms, sd) {
@@ -792,6 +842,27 @@ fn init_check_watchdog(init) {
             if (rc != 0) {
                 var max_startup = load64(rc + 24);  # timeout_ms
                 if (uptime > max_startup) {
+                    if (timed_out == 0) { timed_out = vec_new(); }
+                    vec_push(timed_out, str_from(name));
+                }
+            }
+        }
+
+        # ⚠ NOTIFY WATCHDOG — INDEPENDENT OF health_check, AND CHECKED FIRST.
+        # Until 1.13.6 the only runtime watchdog arm was gated on
+        # `svc_def_health_check(sd) != 0`, so a service without a health check
+        # had NO watchdog at all and `WATCHDOG=1` had nothing to refresh. This
+        # deadline is driven by `last_notify` — what the service SAID — and is
+        # deliberately kept apart from the health deadline below, which is
+        # driven by `last_hc`, what argonaut OBSERVED. A ping can satisfy the
+        # first and must never satisfy the second.
+        if (state == STATE_RUNNING || state == STATE_STARTING) {
+            var wms = svc_def_watchdog_ms(sd);
+            if (wms > 0) {
+                var last_n = managed_svc_last_notify(ms);
+                var elapsed_n = uptime;
+                if (last_n != 0) { elapsed_n = now_ms() - last_n; }
+                if (elapsed_n > wms) {
                     if (timed_out == 0) { timed_out = vec_new(); }
                     vec_push(timed_out, str_from(name));
                 }

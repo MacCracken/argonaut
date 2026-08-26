@@ -7,6 +7,74 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.13.6] — 2026-08-26
+
+**sd_notify READY and WATCHDOG can finally mean something.** 32 suites, 0 failures.
+
+### Added — `SVC_NOTIFY`, so READY=1 has somewhere to land
+
+`init_start_simple` sets `STATE_RUNNING` synchronously before returning, so under
+every existing type a service is "running" the instant fork+exec succeeds and **no
+service was ever left awaiting a notification.** That, not a missing API, is why
+sd_notify readiness could not be honoured by any consumer.
+
+A `SVC_NOTIFY` service is left `STATE_STARTING` until it reports in — systemd's
+`Type=notify` contract. `init_notify_ready(init, name)` performs the transition.
+
+⚠ **Appended to `enum ServiceType`, not inserted.** The value is stored raw in
+`ServiceDefinition`, so renumbering the existing three would silently change the
+type of every service in a config written against an older argonaut. A test now
+pins `SVC_SIMPLE=0 / SVC_FORKING=1 / SVC_ONESHOT=2 / SVC_NOTIFY=3`.
+
+`init_notify_ready` is **idempotent and one-way**: a second READY is a no-op, and it
+never moves a service backwards out of RUNNING. A compromised service must not be
+able to declare itself un-ready and trigger restarts of everything downstream of it.
+
+### Added — `last_notify` and `watchdog_ms`, deliberately separate from health
+
+⚠ **THIS SEPARATION IS THE SAFETY PROPERTY OF THE RELEASE.** The only refreshable
+deadline used to be `managed_svc_last_hc`, which means *"a probe argonaut RAN and
+OBSERVED passing"*. A self-reported `WATCHDOG=1` refreshing that would let a wedged
+service **silence a health failure argonaut actually watched happen**.
+
+Authentication does not cure it: `SCM_CREDENTIALS` proves the ping came from the
+service, not that the service is honest about its own health. So there are now two
+deadlines that never satisfy each other —
+
+- `managed_svc_last_notify` — what the service SAID, refreshed by
+  `init_notify_watchdog`, which touches nothing else;
+- `managed_svc_last_hc` — what argonaut OBSERVED, untouched by any ping.
+
+`svc_def_watchdog_ms` gives a service a watchdog **independent of `health_check`**.
+Before this, the runtime watchdog arm was gated entirely on
+`svc_def_health_check(sd) != 0` — so a service without a health check had **no
+watchdog at all**, and `WATCHDOG=1` had nothing to refresh for the majority of
+services. Defaults to 0, preserving existing behaviour exactly.
+
+Both fields are appended (`ManagedService +48`, `ServiceDefinition +176`); the
+constructors size with `sizeof` and nothing hardcodes either, so the layout change
+is additive.
+
+### Added — `tests/tcyr/notify_semantics.tcyr`, verified to fail
+
+22 assertions covering the type round-trip, the enum numbering, readiness
+(transition, idempotence, one-way, unknown name), the health/notify separation, the
+watchdog firing without a health check, a ping clearing it, and `watchdog_ms == 0`
+preserving old behaviour.
+
+**Verified by deliberately introducing the inversion it exists to catch** — adding
+`managed_svc_set_last_hc` to `init_notify_watchdog` — and confirming the suite goes
+red on exactly that assertion, then restoring. A green test proves nothing until it
+has been watched fail.
+
+### Still refused — `MAINPID=`
+
+Needs a bounded parse (`str_to_int` honours a leading `-`, so `MAINPID=-1` yields
+-1, and `process_kill` has no internal `pid > 0` guard — from PID 1 that is
+`kill(-1, SIGKILL)`) **plus** proof the pid belongs to the service's own cgroup.
+That cgroup knowledge lives in the consumer, so it is not argonaut's call to make
+alone. Roadmapped rather than half-done.
+
 ## [1.13.5] — 2026-08-26
 
 **Four defects that all reduce to the same habit: discarding information the code

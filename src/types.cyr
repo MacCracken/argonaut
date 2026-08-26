@@ -298,16 +298,28 @@ fn ready_check_new(check_type, target, port, timeout_ms, retries, retry_delay_ms
 # Service type
 # =========================================================================
 
+# ⚠ SVC_NOTIFY (1.13.6) is what makes READY=1 mean anything.
+# `init_start_simple` sets STATE_RUNNING synchronously before returning, so
+# under every other type a service is "running" the instant fork+exec succeeds
+# and no service is ever left awaiting a notification — which is why sd_notify
+# READY had nowhere to land. A SVC_NOTIFY service stays STATE_STARTING until it
+# reports in, exactly like systemd's Type=notify.
+#
+# Appended, not inserted: these are stored raw in ServiceDefinition and
+# renumbering the existing three would silently change the type of every
+# service in a config written against an older argonaut.
 enum ServiceType {
     SVC_SIMPLE;
     SVC_FORKING;
     SVC_ONESHOT;
+    SVC_NOTIFY;
 }
 
 fn service_type_str(t) {
     if (t == SVC_SIMPLE)  { return "simple"; }
     if (t == SVC_FORKING) { return "forking"; }
     if (t == SVC_ONESHOT) { return "oneshot"; }
+    if (t == SVC_NOTIFY)  { return "notify"; }
     return "unknown";
 }
 
@@ -316,6 +328,7 @@ fn service_type_parse(s) {
     if (str_eq_cstr(s, "simple") == 1)  { return Ok(SVC_SIMPLE); }
     if (str_eq_cstr(s, "forking") == 1) { return Ok(SVC_FORKING); }
     if (str_eq_cstr(s, "oneshot") == 1) { return Ok(SVC_ONESHOT); }
+    if (str_eq_cstr(s, "notify") == 1)  { return Ok(SVC_NOTIFY); }
     return Err(EINVAL);
 }
 
@@ -837,6 +850,7 @@ struct ServiceDefinition {
     landlock;            # landlock config (0 = none)
     capabilities;        # vec of capabilities to drop (0 = none)
     cgroup_limits;       # opaque cgroup-limits config (0 = none)
+    watchdog_ms;         # sd_notify watchdog interval, ms (0 = no watchdog)
 }
 
 fn svc_def_new(name, desc, binary) {
@@ -863,6 +877,7 @@ fn svc_def_new(name, desc, binary) {
     store64(sd + 152, 0);               # landlock
     store64(sd + 160, 0);               # capabilities
     store64(sd + 168, 0);               # cgroup_limits
+    store64(sd + 176, 0);               # watchdog_ms
     return sd;
 }
 
@@ -905,6 +920,22 @@ fn svc_def_seccomp(sd)       { return load64(sd + 144); }
 fn svc_def_landlock(sd)      { return load64(sd + 152); }
 fn svc_def_capabilities(sd)  { return load64(sd + 160); }
 
+# watchdog_ms (1.13.6) — the sd_notify watchdog interval, INDEPENDENT of
+# health_check.
+#
+# ⚠ BEFORE THIS, A SERVICE WITH NO health_check HAD NO WATCHDOG AT ALL. The
+# runtime watchdog arm in init_check_watchdog was gated entirely on
+# `svc_def_health_check(sd) != 0`, so `WATCHDOG=1` had nothing to refresh for
+# the majority of services — and the only refreshable field,
+# `managed_svc_last_hc`, already meant "a probe argonaut ran and saw pass".
+#
+# This is the deadline a self-reported ping is allowed to satisfy, and nothing
+# else: it never touches last_health_check, so a service cannot silence an
+# externally-observed health failure by pinging. 0 = no notify watchdog, which
+# is the default and preserves existing behaviour exactly.
+fn svc_def_watchdog_ms(sd)          { return load64(sd + 176); }
+fn svc_def_set_watchdog_ms(sd, ms)  { store64(sd + 176, ms); return sd; }
+
 # cgroup_limits (1.13.0). Opaque to argonaut for the same reason seccomp and
 # landlock are: argonaut does not create cgroups and does not know what a
 # "limit" means. It carries the pointer so a supervisor can attach limits to
@@ -942,7 +973,21 @@ struct ManagedService {
     started_at;          # epoch ms (0 = not started)
     restart_count;       # i64
     last_health_check;   # epoch ms (0 = never)
+    last_notify;         # epoch ms of the last authenticated WATCHDOG= ping
 }
+
+# ⚠ `last_notify` IS DELIBERATELY SEPARATE FROM `last_health_check`, AND
+# CONFLATING THEM WOULD BE A SAFETY INVERSION.
+#
+# `last_health_check` means "the last health probe argonaut RAN and OBSERVED
+# passing". `last_notify` means "the service SAID it was alive". Those are not
+# interchangeable: refreshing the health timestamp from a self-reported ping
+# lets a wedged service silence a probe that argonaut actually ran and watched
+# fail. Authentication does not cure that — SCM_CREDENTIALS proves the ping came
+# from the service, not that the service is honest about its own health.
+#
+# So the watchdog consults whichever deadline the operator configured, and never
+# lets one satisfy the other.
 
 fn managed_svc_new(definition) {
     var ms = alloc(sizeof(ManagedService));
@@ -952,6 +997,7 @@ fn managed_svc_new(definition) {
     store64(ms + 24, 0);
     store64(ms + 32, 0);
     store64(ms + 40, 0);
+    store64(ms + 48, 0);       # last_notify
     return ms;
 }
 
@@ -961,12 +1007,14 @@ fn managed_svc_pid(ms)      { return load64(ms + 16); }
 fn managed_svc_started(ms)  { return load64(ms + 24); }
 fn managed_svc_restarts(ms) { return load64(ms + 32); }
 fn managed_svc_last_hc(ms)  { return load64(ms + 40); }
+fn managed_svc_last_notify(ms) { return load64(ms + 48); }
 
 fn managed_svc_set_state(ms, state)     { store64(ms + 8, state); }
 fn managed_svc_set_pid(ms, pid)         { store64(ms + 16, pid); }
 fn managed_svc_set_started(ms, ts)      { store64(ms + 24, ts); }
 fn managed_svc_set_restarts(ms, n)      { store64(ms + 32, n); }
 fn managed_svc_set_last_hc(ms, ts)      { store64(ms + 40, ts); }
+fn managed_svc_set_last_notify(ms, ts)  { store64(ms + 48, ts); }
 
 # =========================================================================
 # Edge boot config
