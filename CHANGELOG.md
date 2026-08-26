@@ -7,6 +7,83 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.13.5] — 2026-08-26
+
+**Four defects that all reduce to the same habit: discarding information the code
+already had.** 31 suites, 0 failures.
+
+### Fixed — `enum SocketType` had no values, and warned on every build
+
+Unvalued, so cyrius numbered it from 0 — `SOCK_STREAM=0`, `SOCK_DGRAM=1` — while
+the kernel and the stdlib's `net.cyr` use 1 and 2. Every build of argonaut and of
+every consumer emitted `duplicate symbol 'SOCK_STREAM' redefined with conflicting
+value`, and a `conflicting value` warning means two definitions have genuinely
+diverged.
+
+Harmless only by accident: every call site passes the literals with the value in a
+comment (`sys_socket(1, 2, 0)`), so the enum was decorative. Anyone using the NAMES
+would have opened a STREAM socket for a datagram protocol — which is why kybernet
+had to define its own `SOCK_DGRAM_TYPE = 2` to avoid it. Now `1 / 2 / 5`, and the
+warning is gone from both repos. A build with a permanent warning trains people to
+ignore warnings.
+
+### Fixed — the orphan sweep discarded its pids, leaving services RUNNING on dead pids
+
+`proc_table_reap` probes each TRACKED pid and clears that service's entry when the
+probe reaps it. `proc_table_reap_orphans` runs afterwards and takes everything else
+— **including a tracked service that exited in the window between its own probe and
+that sweep.** Its pid was discarded, so the entry was never cleared: the next tick's
+`waitpid(pid, WNOHANG)` returns `-ECHILD`, which is not `> 0`, `managed_svc_set_pid`
+never runs, and the entry sits `STATE_RUNNING` holding a freed pid indefinitely
+(with no `health_check` there is no watchdog to notice).
+
+That is not untidiness. **Any process that later recycles that pid is attributed to
+that service** — and sd_notify credential attribution rests entirely on the service
+table being true.
+
+`proc_table_reap_orphans_into(out, cap)` now records the reaped pids into a
+caller-owned buffer (allocation-free — this runs on the supervisor tick, which is
+the 1.13.4 leak class), and `init_reap_services` reconciles the service table
+against them. Entries are moved to `STATE_STOPPED`, not `STATE_FAILED`: the exit
+status went to the orphan sweep, so there is no code to judge by, and inventing a
+failure would restart services that exited cleanly. The count-only
+`proc_table_reap_orphans()` is kept so existing callers are unaffected.
+
+### Fixed — `notify_try_recv_authenticated` collapsed four outcomes into `0`
+
+It answered a bare `0` for "queue empty", "ancillary truncated", "no or wrong
+SCM_CREDENTIALS" and "sender is not a known service pid" alike, and **discarded the
+authenticated sender pid it had just validated.**
+
+Two real consequences:
+
+- `init_poll_health`'s drain `break`s on `0`, so **one forged datagram per tick
+  truncated the drain and starved every legitimate message queued behind it.** A
+  local sender could silence sd_notify entirely at one bad datagram per tick.
+- A consumer could prove a datagram came from *a* service but never *which* — and
+  every sd_notify verb (READY, WATCHDOG, MAINPID) needs that attribution, since
+  the `MAINPID=` field inside the message is attacker-controlled by definition.
+
+Now five distinguishable outcomes via `notify_recv_outcome()`, plus
+`notify_recv_sender_pid()` / `notify_recv_sender_uid()`. The drain ends only on
+`NOTIFY_RECV_EMPTY`; a rejected datagram is counted and the loop continues, since
+the `recvmsg` consumed it either way. This is standing rule 29's shape — the middle
+arm looks like success and is not.
+
+Validation is also stricter: `MSG_CTRUNC` is checked (truncated ancillary means the
+credentials cannot be trusted even when the header looks plausible) and `cmsg_len`
+is required to be `>= 28` (cmsghdr 16 + ucred 12), neither of which was checked
+before.
+
+### Fixed — a zero-length datagram ended the drain early
+
+`recvmsg` returning 0 was treated as "queue empty". A zero-length datagram is legal
+on `AF_UNIX SOCK_DGRAM` and `recvmsg` returns 0 having **consumed** it, so this was
+the same starvation by another route. Classified as consumed-and-rejected now.
+
+kybernet fixed the identical bug in its own receive at 1.6.3; the two
+implementations can now converge.
+
 ## [1.13.4] — 2026-08-26
 
 **Two per-tick arena leaks, and a test suite that ran nothing.**

@@ -456,10 +456,24 @@ fn log_config_default() {
 # Socket types
 # =========================================================================
 
+# ⚠ EXPLICIT KERNEL VALUES. This enum was UNVALUED until 1.13.5, so cyrius
+# numbered it from 0 — SOCK_STREAM=0, SOCK_DGRAM=1 — while the kernel and the
+# stdlib's net.cyr use 1 and 2. That produced a `duplicate symbol 'SOCK_STREAM'
+# redefined with conflicting value` warning on EVERY build of argonaut and of
+# every consumer, and CLAUDE.md's own capability rule says a `conflicting value`
+# warning means two definitions have genuinely diverged.
+#
+# It was harmless only by accident: every call site in this repo and in kybernet
+# passes the literals (`sys_socket(1, 2, 0)`) with the value written in a
+# comment, so the enum was decorative. Anyone who used the NAMES would have
+# opened a STREAM socket for a datagram protocol. kybernet had to define its own
+# `SOCK_DGRAM_TYPE = 2` specifically to avoid this.
+#
+# A build with a permanent warning trains people to ignore warnings.
 enum SocketType {
-    SOCK_STREAM;
-    SOCK_DGRAM;
-    SOCK_SEQPACKET;
+    SOCK_STREAM = 1;
+    SOCK_DGRAM = 2;
+    SOCK_SEQPACKET = 5;
 }
 
 # =========================================================================

@@ -604,13 +604,57 @@ fn init_restart_service(init, name, stop_timeout_ms) {
 # Service reaping
 # =========================================================================
 
+# Clear any managed service whose pid appears in a reaped-orphan list.
+#
+# Walks the service map in place (entries stride 24: key, value, occupied) —
+# no map_keys, no allocation; see init_check_watchdog for the same treatment.
+# The entry is moved to STATE_STOPPED rather than STATE_FAILED: the exit status
+# went to the orphan sweep, so there is no code to judge it by, and inventing
+# a failure would restart services that exited cleanly.
+fn _init_clear_reaped_pids(init, pids, n) {
+    var svc_map = load64(init + 16);
+    if (svc_map == 0) { return 0; }
+    var entries = map_entries(svc_map);
+    var cap = map_cap(svc_map);
+    var cleared = 0;
+
+    for (var i = 0; i < cap; i = i + 1) {
+        var ep = entries + i * 24;
+        if (load64(ep + 16) != 1) { continue; }
+        var ms = load64(ep + 8);
+        if (ms == 0) { continue; }
+        var pid = managed_svc_pid(ms);
+        if (pid <= 0) { continue; }
+
+        for (var j = 0; j < n; j = j + 1) {
+            if (load64(pids + j * 8) == pid) {
+                managed_svc_set_pid(ms, 0);
+                managed_svc_set_state(ms, STATE_STOPPED);
+                cleared = cleared + 1;
+                break;
+            }
+        }
+    }
+    return cleared;
+}
+
 fn init_reap_services(init) {
     var exited = proc_table_reap();
     # M3: drain orphans whose original parents exited (services that
     # re-fork, daemons whose parents exit). Tracked PIDs handled above;
     # this catches anything reparented to us via PR_SET_CHILD_SUBREAPER
     # (or our PID-1 status, when graduated).
-    proc_table_reap_orphans();
+    # ⚠ RECORD THE ORPHAN PIDS AND RECONCILE THE SERVICE TABLE AGAINST THEM.
+    # A tracked service that exits in the window between proc_table_reap's probe
+    # of its pid and this sweep is collected HERE, not there — and until 1.13.5
+    # its pid was discarded, so its entry was never cleared. The next probe
+    # returns -ECHILD (not > 0), the entry stays STATE_RUNNING holding a freed
+    # pid forever, and any process that recycles that pid is then attributed to
+    # that service. Static buffer: this runs on the supervisor tick and must not
+    # allocate (the 1.13.4 leak class).
+    var orphans[2048];                       # 2048 BYTES == 256 i64 slots (rule 2)
+    var on = proc_table_reap_orphans_into(&orphans, 256);
+    if (on > 0) { _init_clear_reaped_pids(init, &orphans, on); }
 
     # 2026-08-24 audit HIGH-2: allocate the results vec LAZILY. The PID-1
     # supervisor loop calls this every 100 ms and discards the return, so an
@@ -891,9 +935,15 @@ fn init_poll_health(init, tracker) {
                 vec_push(expected, pidj);
             }
         }
+        # ⚠ ONLY AN EMPTY QUEUE ENDS THE DRAIN. This loop used to `break` on a
+        # bare 0, which the receive returned for rejection as well as for
+        # emptiness — so one forged datagram per tick truncated the drain and
+        # starved every legitimate message behind it. Now that the outcome is
+        # distinguishable (1.13.5), a rejected datagram is counted and the loop
+        # continues; it has already been consumed by the recvmsg either way.
         for (var dg = 0; dg < 32; dg = dg + 1) {
             var nm = notify_try_recv_authenticated(nfd, expected);
-            if (nm == 0) { break; }
+            if (nm == 0 && notify_recv_outcome() == NOTIFY_RECV_EMPTY) { break; }
         }
     }
 

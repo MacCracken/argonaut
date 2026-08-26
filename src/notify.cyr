@@ -152,6 +152,19 @@ fn pid_in_vec(pids, pid) {
 # blocks the spoofing primitive where a local attacker on the notify
 # socket fakes READY=1 / WATCHDOG=1 for a service they don't own.
 # Returns NotifyMessage ptr on accept; 0 on (no message OR rejected).
+# Outcome of the most recent notify_try_recv_authenticated call.
+enum NotifyRecvOutcome {
+    NOTIFY_RECV_EMPTY = 0;         # nothing queued — the ONLY "stop draining"
+    NOTIFY_RECV_OK = 1;            # authenticated and attributed
+    NOTIFY_RECV_NOCRED = 2;        # consumed; no/invalid SCM_CREDENTIALS
+    NOTIFY_RECV_TRUNCATED = 3;     # consumed; MSG_CTRUNC, credentials untrustworthy
+    NOTIFY_RECV_UNATTRIBUTED = 4;  # consumed; authenticated but not a known service pid
+}
+
+var _notify_last = 0;
+var _notify_sender_pid = 0;
+var _notify_sender_uid = 0;
+
 fn notify_try_recv_authenticated(fd, expected_pids) {
     if (_notify_recv_buf == 0) {
         _notify_recv_buf = alloc(1024);
@@ -171,19 +184,64 @@ fn notify_try_recv_authenticated(fd, expected_pids) {
     store64(&mh + 32, &ctrl);    # msg_control
     store64(&mh + 40, 32);       # msg_controllen
     # recvmsg(fd, &mh, MSG_DONTWAIT=64)
+    _notify_last = NOTIFY_RECV_EMPTY;
     var n = sys_recvmsg(fd, &mh, 64);
-    if (n <= 0) { return 0; }
+    if (n < 0) { return 0; }
+    # A zero-length datagram is legal on AF_UNIX SOCK_DGRAM and recvmsg
+    # returns 0 having CONSUMED it — reporting that as "queue empty" ends the
+    # drain early, which is the same starvation this change exists to fix.
+    if (n == 0) { _notify_last = NOTIFY_RECV_NOCRED; return 0; }
     # Require an SCM_CREDENTIALS cmsg. Drop on missing/wrong type so a
     # caller that forgets SO_PASSCRED can't slip messages through.
     var ctrllen = load64(&mh + 40);
-    if (ctrllen < 16) { return 0; }
+    # Stricter than `< 16`: a cmsghdr(16) plus a struct ucred(12) is 28 bytes,
+    # and MSG_CTRUNC means the ancillary data was cut short so the credentials
+    # cannot be trusted even if the header looks plausible.
+    var mflags = load32(&mh + 48);
+    if (mflags & 8 != 0) { _notify_last = NOTIFY_RECV_TRUNCATED; return 0; }   # MSG_CTRUNC
+    if (ctrllen < 28) { _notify_last = NOTIFY_RECV_NOCRED; return 0; }
+    var cmsg_len = load64(&ctrl);
+    if (cmsg_len < 28) { _notify_last = NOTIFY_RECV_NOCRED; return 0; }
     var cmsg_level = load32(&ctrl + 8);
     var cmsg_type  = load32(&ctrl + 12);
-    if (cmsg_level != 1 || cmsg_type != 2) { return 0; }   # SOL_SOCKET=1, SCM_CREDENTIALS=2
+    if (cmsg_level != 1 || cmsg_type != 2) {                 # SOL_SOCKET=1, SCM_CREDENTIALS=2
+        _notify_last = NOTIFY_RECV_NOCRED;
+        return 0;
+    }
     var sender_pid = load32(&ctrl + 16);
-    if (pid_in_vec(expected_pids, sender_pid) == 0) { return 0; }
+    _notify_sender_pid = sender_pid;
+    _notify_sender_uid = load32(&ctrl + 20);
+    if (pid_in_vec(expected_pids, sender_pid) == 0) {
+        _notify_last = NOTIFY_RECV_UNATTRIBUTED;
+        return 0;
+    }
+    _notify_last = NOTIFY_RECV_OK;
     return notify_parse(_notify_recv_buf, n);
 }
+
+# Why the last outcome and the sender identity are exposed.
+#
+# ⚠ RETURNING A BARE 0 FOR FOUR DIFFERENT OUTCOMES IS A DEFECT, NOT A
+# SIMPLIFICATION. Until 1.13.5 this function answered 0 for "queue empty",
+# "ancillary truncated", "no or wrong SCM_CREDENTIALS" and "sender is not a
+# known service pid" alike. Two consequences, both real:
+#
+#   - The drain loop in init_poll_health `break`s on 0, so ONE forged datagram
+#     per tick truncated the drain and starved every legitimate message queued
+#     behind it. A local attacker could silence sd_notify entirely by sending
+#     one bad datagram per tick.
+#   - The caller could not tell a spoofing attempt from an idle socket, so
+#     there was nothing to log or rate-limit. That is standing rule 29's shape:
+#     the middle arm looks like success and is not.
+#
+# It also DISCARDED the authenticated sender pid it had just validated, so a
+# consumer could prove a datagram came from *a* service but never *which* —
+# and every sd_notify verb (READY, WATCHDOG, MAINPID) needs that attribution.
+# kybernet wrote its own stricter receive at 1.6.3 rather than wait; exposing
+# these lets the two converge.
+fn notify_recv_outcome()   { return _notify_last; }
+fn notify_recv_sender_pid() { return _notify_sender_pid; }
+fn notify_recv_sender_uid() { return _notify_sender_uid; }
 
 # Try to receive a notification without blocking.
 # Returns a NotifyMessage ptr, or 0 if no message available.

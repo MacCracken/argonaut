@@ -692,15 +692,38 @@ fn proc_table_reap() {
 # and they accumulate as zombies. This loop drains *any* exited child
 # via `waitpid(-1, ..., WNOHANG)` until ESRCH (-10) or 0 (no waitable).
 # Returns the count of orphans reaped.
-fn proc_table_reap_orphans() {
+# Reap reparented orphans, RECORDING the pids into a caller-provided buffer.
+#
+# ⚠ THE PIDS MATTER, AND DISCARDING THEM CAUSED A REAL DEFECT. `proc_table_reap`
+# probes each TRACKED pid first and clears that service's entry when the probe
+# reaps it. This sweep runs afterwards and takes everything else — including a
+# tracked service that happened to exit in the window between its own probe and
+# this call. When that happens the service's entry is never cleared: the next
+# tick's `waitpid(pid, WNOHANG)` returns -ECHILD, which is not `> 0`, so
+# `managed_svc_set_pid(ms, 0)` never runs and the entry stays STATE_RUNNING with
+# a dead pid indefinitely (with no health_check there is no watchdog to notice).
+#
+# A stale RUNNING entry holding a freed pid is not merely untidy — any process
+# that later recycles that pid is attributed to that service, which is exactly
+# what sd_notify credential attribution relies on being true.
+#
+# `out` is a buffer of `cap` i64 slots, or 0 to only count. Allocation-free by
+# construction: the caller owns the storage.
+fn proc_table_reap_orphans_into(out, cap) {
     var n = 0;
     for (var guard = 0; guard < 256; guard = guard + 1) {
         var status_buf[8];
         var ret = sys_waitpid(0 - 1, &status_buf, WNOHANG);
         if (ret <= 0) { break; }   # 0 = no exited child; <0 = ECHILD/ESRCH
+        if (out != 0 && n < cap) { store64(out + n * 8, ret); }
         n = n + 1;
     }
     return n;
+}
+
+# Count-only form. Kept so existing callers are unaffected.
+fn proc_table_reap_orphans() {
+    return proc_table_reap_orphans_into(0, 0);
 }
 
 # =========================================================================
