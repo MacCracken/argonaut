@@ -7,6 +7,66 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.13.4] — 2026-08-26
+
+**Two per-tick arena leaks, and a test suite that ran nothing.**
+
+### Fixed — `init_check_watchdog` and `init_poll_health` leaked on every tick
+
+Both run on a PID-1 consumer's reactor timers and both allocated unconditionally,
+whether or not there was any work to report. In a bump-allocated arena that PID 1
+never resets, that is permanent growth.
+
+- `init_check_watchdog` — `vec_new()` for `timed_out` before anything could time
+  out, **plus** `proc_table_keys()`, which is `map_keys` (a fresh vec and a push
+  per entry). Measured **304 bytes per tick**. On kybernet's 10 s watchdog timer
+  that is 2.63 MB/day on a completely idle board; the first 256 MB arena chunk
+  went in ~97 days.
+- `init_poll_health` — `vec_new()` for `results` plus a `map_keys` vec on every
+  tick, even though most services have no `health_check` at all.
+
+Both now iterate their map IN PLACE (entries stride 24: key, value, occupied) and
+allocate the result vec lazily, the treatment `proc_table_reap` already carried.
+Measured after: **152 bytes total across 2000 calls** for each — one memoized
+empty vec, then nothing.
+
+⚠ **Contract note.** The idle path now returns a SHARED memoized empty vec. It is
+never mutated internally and callers must not mutate it either; reading it with
+`vec_len`/`vec_get` (what kybernet does) is safe. Same pattern and same caveat as
+`_reap_empty_vec`.
+
+### Fixed — `tests/test.sh` compiled and ran NOTHING, and reported success
+
+Six links, each innocuous alone:
+
+1. `CC` defaulted to `$HOME/.cyrius/bin/cc3`, which has not existed for several
+   toolchain releases;
+2. the compile was `cat "$tcyr" | "$CC" > out 2>/dev/null` — failure silenced;
+3. it produced a **0-byte** file;
+4. `chmod +x` succeeded on it;
+5. **an empty file with the exec bit set exits 0** — the kernel hands it to the
+   shell, which runs no commands;
+6. so `TOTAL_FAIL` never moved and the suite exited 0.
+
+Result: 33 "passing" suites, every binary zero bytes. Every release from 1.13.0
+onward shipped with no test coverage behind it — including `watchdog_kill.tcyr`,
+the regression test added for the 1.13.3 PID-1 SIGSEGV, which had never run.
+
+The deeper cause was the pipe into raw `cycc`, which bypasses cyrius dependency
+resolution: the `.tcyr` chain reaches libro, which reaches sigil's thin bundles,
+whose own `include "src/sha_ni.cyr"` only resolves under a real dep resolve. Raw
+`cycc` could never have built these regardless of which binary it pointed at —
+which is why `cyrius build src/main.cyr` worked the whole time the tests did not.
+
+Now: `cyrius build` for both suites and benchmarks; the compiler is resolved and
+its absence is fatal; stderr is kept and a compile failure fails the run; a
+zero-byte binary is refused rather than executed; and a run where `TOTAL_RUN` is
+0 fails, because a run that executed nothing is not a pass.
+
+**31 suites now compile and run, 0 failures — and the runner is verified to exit
+1 on a deliberately injected failing assertion.** A green suite means nothing
+until it has been watched go red.
+
 ## [1.13.3] — 2026-08-25
 
 **The watchdog kill path segfaulted, and in a PID-1 consumer that is a kernel

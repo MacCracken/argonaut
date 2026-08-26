@@ -705,12 +705,36 @@ fn init_should_drop_to_emergency(init) {
 # Watchdog
 # =========================================================================
 
-fn init_check_watchdog(init) {
-    var timed_out = vec_new();
-    var keys = proc_table_keys();
+# Memoized empty vec for the idle path — the same treatment proc_table_reap
+# already carries. Never mutated; callers only read it.
+var _wd_empty = 0;
 
-    for (var i = 0; i < vec_len(keys); i = i + 1) {
-        var name = vec_get(keys, i);
+fn _wd_empty_vec() {
+    if (_wd_empty == 0) { _wd_empty = vec_new(); }
+    return _wd_empty;
+}
+
+# ⚠ ALLOCATES NOTHING ON THE IDLE PATH, AND THAT IS A LEAK FIX.
+# This ran on kybernet's watchdog timer — every 10 s in production — and
+# allocated TWO vecs per tick unconditionally: `vec_new()` for `timed_out`
+# before anything could time out, plus `proc_table_keys()`, which is
+# `map_keys` (a fresh vec plus a push per entry). Measured at **304 bytes per
+# tick**, i.e. 2.63 MB/day on a completely idle board, in a bump-allocated
+# arena PID 1 never resets. The first 256 MB chunk went in ~97 days.
+#
+# Two changes, both mirroring proc_table_reap (process_mgmt.cyr:643):
+#   - iterate the proc table IN PLACE (entries stride 24: key, value,
+#     occupied) instead of materialising a key vec;
+#   - allocate `timed_out` lazily, only once something has actually timed out.
+fn init_check_watchdog(init) {
+    var timed_out = 0;
+    var entries = map_entries(g_proc_table);
+    var cap = map_cap(g_proc_table);
+
+    for (var ki = 0; ki < cap; ki = ki + 1) {
+        var ep = entries + ki * 24;
+        if (load64(ep + 16) != 1) { continue; }
+        var name = load64(ep);
         var ms = init_get_service(init, name);
         if (ms == 0) { continue; }
 
@@ -724,6 +748,7 @@ fn init_check_watchdog(init) {
             if (rc != 0) {
                 var max_startup = load64(rc + 24);  # timeout_ms
                 if (uptime > max_startup) {
+                    if (timed_out == 0) { timed_out = vec_new(); }
                     vec_push(timed_out, str_from(name));
                 }
             }
@@ -747,12 +772,14 @@ fn init_check_watchdog(init) {
                 }
 
                 if (elapsed > watchdog_ms) {
+                    if (timed_out == 0) { timed_out = vec_new(); }
                     vec_push(timed_out, str_from(name));
                 }
             }
         }
     }
 
+    if (timed_out == 0) { return _wd_empty_vec(); }
     return timed_out;
 }
 
@@ -799,14 +826,31 @@ fn init_enforce_watchdog(init) {
 # Health polling
 # =========================================================================
 
-fn init_poll_health(init, tracker) {
-    var results = vec_new();
-    var svc_map = load64(init + 16);
-    var keys = map_keys(svc_map);
+# Memoized empty vec — see _wd_empty_vec above for the rationale.
+var _ph_empty = 0;
 
-    for (var i = 0; i < vec_len(keys); i = i + 1) {
-        var name = vec_get(keys, i);
-        var ms = map_get(svc_map, name);
+fn _ph_empty_vec() {
+    if (_ph_empty == 0) { _ph_empty = vec_new(); }
+    return _ph_empty;
+}
+
+# ⚠ IDLE PATH ALLOCATES NOTHING. This runs on kybernet's health timer (every
+# 30 s in production) and used to allocate `results` plus a `map_keys` vec on
+# every tick whether or not a single service had a health_check configured —
+# and most do not, so the common case was pure waste in an arena PID 1 never
+# resets. Same fix as init_check_watchdog: iterate the service map in place,
+# allocate `results` only once a check has actually produced one.
+fn init_poll_health(init, tracker) {
+    var results = 0;
+    var svc_map = load64(init + 16);
+    var entries = map_entries(svc_map);
+    var cap = map_cap(svc_map);
+
+    for (var i = 0; i < cap; i = i + 1) {
+        var ep = entries + i * 24;
+        if (load64(ep + 16) != 1) { continue; }
+        var name = load64(ep);
+        var ms = load64(ep + 8);
         if (managed_svc_state(ms) == STATE_RUNNING) {
             var sd = managed_svc_def(ms);
             var hc = svc_def_health_check(sd);
@@ -823,6 +867,7 @@ fn init_poll_health(init, tracker) {
                     sakshi_warn(name, strlen(name));
                     audit_log_record(load64(init + 40), name, EVT_HEALTH_FAILED);
                 }
+                if (results == 0) { results = vec_new(); }
                 vec_push(results, result);
             }
         }
@@ -837,8 +882,10 @@ fn init_poll_health(init, tracker) {
     var nfd = load64(init + 48);
     if (nfd > 0) {
         var expected = vec_new();
-        for (var j = 0; j < vec_len(keys); j = j + 1) {
-            var msj = map_get(svc_map, vec_get(keys, j));
+        for (var j = 0; j < cap; j = j + 1) {
+            var epj = entries + j * 24;
+            if (load64(epj + 16) != 1) { continue; }
+            var msj = load64(epj + 8);
             var pidj = managed_svc_pid(msj);
             if (pidj > 0 && managed_svc_state(msj) == STATE_RUNNING) {
                 vec_push(expected, pidj);
@@ -850,6 +897,7 @@ fn init_poll_health(init, tracker) {
         }
     }
 
+    if (results == 0) { return _ph_empty_vec(); }
     return results;
 }
 
