@@ -99,6 +99,12 @@ fn argonaut_audit_log_new() {
     return chain_new();
 }
 
+# The O(1) variant, for a chain nobody queries. See config_audit_retain for why
+# this is the default at init and why capacity-rotation is not an alternative.
+fn argonaut_audit_log_new_streaming() {
+    return chain_new_streaming();
+}
+
 fn audit_log_entries(log) {
     return chain_entries(log);
 }

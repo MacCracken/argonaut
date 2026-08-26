@@ -67,7 +67,15 @@ fn argonaut_init_new(config) {
             store64(init + 56, pal);
         }
     } else {
-        store64(init + 40, argonaut_audit_log_new());
+        # Streaming unless the operator asked to keep the chain queryable.
+        # The init-owned chain has no reader in argonaut or in kybernet, and
+        # retaining it grew ~240 bytes per audit event forever in a process
+        # that never exits. See config_audit_retain.
+        if (config_audit_retain(config) == 1) {
+            store64(init + 40, argonaut_audit_log_new());
+        } else {
+            store64(init + 40, argonaut_audit_log_new_streaming());
+        }
         store64(init + 56, 0);
     }
     store64(init + 48, 0 - 1);            # notify_fd (M1) — opt-in via init_notify_bind
@@ -671,6 +679,21 @@ fn init_restart_service(init, name, stop_timeout_ms) {
 # The entry is moved to STATE_STOPPED rather than STATE_FAILED: the exit status
 # went to the orphan sweep, so there is no code to judge it by, and inventing
 # a failure would restart services that exited cleanly.
+# How many reparented orphans the most recent init_reap_services collected.
+#
+# ⚠ THE NUMBER ALWAYS EXISTED AND WAS ALWAYS THROWN AWAY. `init_reap_services`
+# returns only the tracked-service exits, so a consumer had no way to see that
+# orphans were being reaped at all — and since argonaut's sweep runs BEFORE the
+# consumer's own reaper, argonaut collects every orphan first. A service leaking
+# children therefore produced no evidence anywhere: not in argonaut's return, not
+# in the consumer's reaper, which found nothing left to reap.
+#
+# Read it immediately after init_reap_services; it is overwritten on the next
+# call.
+var _init_last_orphans = 0;
+
+fn init_last_orphan_count() { return _init_last_orphans; }
+
 fn _init_clear_reaped_pids(init, pids, n) {
     var svc_map = load64(init + 16);
     if (svc_map == 0) { return 0; }
@@ -714,6 +737,7 @@ fn init_reap_services(init) {
     # allocate (the 1.13.4 leak class).
     var orphans[2048];                       # 2048 BYTES == 256 i64 slots (rule 2)
     var on = proc_table_reap_orphans_into(&orphans, 256);
+    _init_last_orphans = on;
     if (on > 0) { _init_clear_reaped_pids(init, &orphans, on); }
 
     # 2026-08-24 audit HIGH-2: allocate the results vec LAZILY. The PID-1
@@ -965,6 +989,46 @@ fn _ph_empty_vec() {
 # and most do not, so the common case was pure waste in an arena PID 1 never
 # resets. Same fix as init_check_watchdog: iterate the service map in place,
 # allocate `results` only once a check has actually produced one.
+# Is this service's health check actually DUE?
+#
+# ⚠ WITHOUT THIS, `interval_ms` DESCRIBED NOTHING. Every service with a health
+# check was probed on every tick, whatever it had asked for. kybernet 1.6.7
+# worked around it by setting its poll timer to the SMALLEST configured
+# interval, so nobody was polled too slowly — at the cost of polling everyone
+# else too often. A service asking for 60 s got probed every 5 s because some
+# unrelated service wanted 5 s, and a health check can exec a command.
+#
+# The consumer could not fix that alone: it cannot ask this function for a
+# subset. The due-time test belongs here, where `last_hc` already lives.
+#
+# `last_hc == 0` means never probed, which is always due — that is the first
+# tick after a spawn, and a service should not wait a full interval for its
+# first check. A non-positive interval means "every tick", preserving the
+# behaviour of any config that never set one.
+#
+# ⚠ A FAILING SERVICE IS RE-PROBED EVERY TICK, DELIBERATELY, AND THE MECHANISM
+# IS WORTH UNDERSTANDING BEFORE ANYONE "FIXES" IT. `last_hc` is written ONLY
+# when a probe PASSES — that is load-bearing for the watchdog, which measures
+# its deadline as `now - last_hc` and must fire when checks stop passing. So a
+# failing service keeps a stale `last_hc`, stays permanently due, and is probed
+# at the timer's resolution rather than its own interval.
+#
+# That is the right behaviour for a supervisor — probe passing services at the
+# cadence they asked for, and watch a failing one closely until it recovers or
+# the watchdog takes it — and it is exactly what every service did before this
+# filter existed, so it is not a regression for anyone. If it ever needs to
+# change, the fix is a SEPARATE last-attempt timestamp, not writing `last_hc` on
+# failure: that would silence the watchdog, which is the 1.13.6 safety inversion
+# in a different disguise.
+fn _hc_is_due(ms, hc) {
+    var interval = load64(hc + 24);
+    if (interval <= 0) { return 1; }
+    var last = managed_svc_last_hc(ms);
+    if (last == 0) { return 1; }
+    if (now_ms() - last >= interval) { return 1; }
+    return 0;
+}
+
 fn init_poll_health(init, tracker) {
     var results = 0;
     var svc_map = load64(init + 16);
@@ -979,7 +1043,7 @@ fn init_poll_health(init, tracker) {
         if (managed_svc_state(ms) == STATE_RUNNING) {
             var sd = managed_svc_def(ms);
             var hc = svc_def_health_check(sd);
-            if (hc != 0) {
+            if (hc != 0 && _hc_is_due(ms, hc)) {
                 var pid = managed_svc_pid(ms);
                 var result = execute_health_check(svc_def_name(sd), hc, pid);
                 var threshold = load64(hc + 40);

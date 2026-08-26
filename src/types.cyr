@@ -1054,6 +1054,7 @@ struct ArgonautConfig {
     tmpfiles;            # vec of tmpfile entries
     audit_persist;       # 1/0 — opt-in PatraStore audit-log persistence (1.5.3)
     audit_path;          # Str — on-disk path when audit_persist == 1
+    audit_retain;        # 1/0 — keep the in-memory chain queryable (1.13.8)
 }
 
 fn argonaut_config_default() {
@@ -1068,6 +1069,7 @@ fn argonaut_config_default() {
     store64(cfg + 56, vec_new());
     store64(cfg + 64, 0);                              # audit_persist off by default
     store64(cfg + 72, str_from("/var/log/argonaut.patra"));   # default path; unused when audit_persist == 0
+    store64(cfg + 80, 0);                                     # audit_retain: streaming by default — see config_audit_retain
     return cfg;
 }
 
@@ -1088,6 +1090,38 @@ fn config_set_boot_mode(cfg, mode)     { store64(cfg, mode); return cfg; }
 
 fn config_set_audit_persist(cfg, on)   { store64(cfg + 64, on); return cfg; }
 fn config_set_audit_path(cfg, path)    { store64(cfg + 72, path); return cfg; }
+
+# ⚠ DEFAULTS TO 0 (STREAMING), AND THAT IS A DELIBERATE BEHAVIOUR CHANGE AT 1.13.8.
+#
+# The in-memory audit chain retained every entry forever: measured at **240 bytes
+# per record**, one record per service start/stop/crash and per health probe, in a
+# supervisor whose consumer is PID 1 and never exits. At a 30 s health interval
+# that is ~0.68 MB/day/service of live, reachable growth — not merely un-freeable
+# arena, but a data structure that keeps growing.
+#
+# ⚠ `chain_with_capacity` DOES NOT FIX IT, and I checked rather than assumed:
+# `_chain_auto_rotate` calls `chain_rotate`, which archives the entries vec into
+# the `overflow` vec (libro.cyr). The entries stay referenced — memory is MOVED,
+# not freed. Under a bump allocator that is identical growth plus archive
+# overhead.
+#
+# libro's streaming chain is the actual fix and is documented for exactly this
+# consumer shape ("wrong shape for a write-through consumer... a long-lived
+# writer grew forever"). It keeps only the head hash, so **linkage across appends
+# is byte-identical** — a chain persisted to a store verifies exactly as before.
+# Memory is O(1).
+#
+# The trade is explicit: on a streaming chain `chain_len` is always 0 and every
+# query returns empty. Nothing in argonaut or kybernet READS the init-owned chain
+# in production — kybernet makes zero direct `audit_*` calls — so the default
+# costs nothing real. A consumer that genuinely wants to query its own history in
+# memory sets `audit_retain: 1` and accepts the growth knowingly.
+#
+# This is not silent truncation. A streaming chain never retains, so there is
+# nothing for an attacker to flush by generating noise, and the durable record —
+# when `audit_persist` is on — is untouched.
+fn config_audit_retain(cfg)            { return load64(cfg + 80); }
+fn config_set_audit_retain(cfg, on)    { store64(cfg + 80, on); return cfg; }
 
 # =========================================================================
 # Argonaut stats — snapshot of init-system statistics

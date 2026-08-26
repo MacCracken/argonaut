@@ -60,6 +60,12 @@ fn main() {
     # --- init creates an audit log ---
     var cfg = argonaut_config_default();
     store64(cfg, BOOT_MINIMAL);
+    # ⚠ This whole suite asserts that entries are RETAINED and COUNTED, so it
+    # needs the retaining chain explicitly. Since 1.13.8 init's chain is
+    # streaming by default (O(1) memory, chain_len always 0) because nothing
+    # reads it in production. Inheriting the mode from a default is what made
+    # this test silently depend on unbounded growth.
+    config_set_audit_retain(cfg, 1);
     var init = argonaut_init_new(cfg);
     var alog = init_audit_log(init);
     assert(alog != 0, "audit log exists");

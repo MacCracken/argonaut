@@ -1,0 +1,55 @@
+# health_due.tcyr — per-service health scheduling. (1.13.8)
+#
+# `interval_ms` was parsed onto the HealthCheck struct and never consulted:
+# init_poll_health probed EVERY service with a health check on every tick. The
+# consumer could not fix it alone — it cannot ask for a subset — so kybernet
+# 1.6.7 set its poll timer to the smallest configured interval, meaning a
+# service asking for 60 s was probed at 5 s because something else wanted 5 s.
+#
+# ⚠ Note what is NOT asserted here: that a FAILING service backs off. It does
+# not, on purpose. `last_hc` is written only when a probe passes, because the
+# watchdog measures `now - last_hc` and must fire when checks stop passing — so
+# a failing service stays permanently due. Writing `last_hc` on failure would
+# silence the watchdog, which is the 1.13.6 safety inversion wearing a hat.
+include "tests/test_header.cyr"
+fn main() {
+    alloc_init();
+    proc_table_init();
+
+    test_group("health-due");
+
+    var cfg = argonaut_config_default();
+    var sd = svc_def_new(str_from("hd"), str_from("d"), str_from("/bin/true"));
+    svc_def_set_health_check(sd, health_check_new(HC_PROCESS_ALIVE, 0, 0, 60000, 1000, 2));
+    vec_push(config_services(cfg), sd);
+    var init = argonaut_init_new(cfg);
+    var ms = init_get_service(init, "hd");
+    var hc2 = health_check_new(HC_PROCESS_ALIVE, 0, 0, 60000, 1000, 2);
+
+    # Never probed -> always due. A service must not wait a full interval for
+    # its first check after a spawn.
+    managed_svc_set_last_hc(ms, 0);
+    assert_eq(_hc_is_due(ms, hc2), 1, "never-probed service is due");
+
+    # Just probed -> not due for another 60s.
+    managed_svc_set_last_hc(ms, now_ms());
+    assert_eq(_hc_is_due(ms, hc2), 0, "just-probed service is NOT due");
+
+    # Probed longer ago than the interval -> due again.
+    managed_svc_set_last_hc(ms, now_ms() - 61000);
+    assert_eq(_hc_is_due(ms, hc2), 1, "service past its interval is due");
+
+    # Exactly at the interval counts as due (>=, not >).
+    managed_svc_set_last_hc(ms, now_ms() - 60000);
+    assert_eq(_hc_is_due(ms, hc2), 1, "exactly at the interval is due");
+
+    # A zero/absent interval means every tick — preserves the behaviour of any
+    # config that never set one.
+    var hc0 = health_check_new(HC_PROCESS_ALIVE, 0, 0, 0, 1000, 2);
+    managed_svc_set_last_hc(ms, now_ms());
+    assert_eq(_hc_is_due(ms, hc0), 1, "interval 0 means every tick");
+
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

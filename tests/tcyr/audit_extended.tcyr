@@ -162,6 +162,12 @@ fn main() {
 
     # Default config: persistence off; init_audit_log_persistent == 0.
     var c_off = argonaut_config_default();
+    # ⚠ DECLARE THE MODE THIS TEST NEEDS. Since 1.13.8 the init-owned chain is
+    # STREAMING by default — O(1) memory, chain_len always 0 — because nothing
+    # in argonaut or kybernet reads it in production and retaining it grew ~240
+    # bytes per audit event forever. A test that asserts entries are RETAINED is
+    # testing the retaining mode, so it must ask for it rather than inherit it.
+    config_set_audit_retain(c_off, 1);
     var i_off = argonaut_init_new(c_off);
     assert_eq(init_audit_log_persistent(i_off), 0, "init: default config = in-memory only");
     assert(init_audit_log(i_off) != 0, "init: in-memory chain still attached");

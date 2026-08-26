@@ -7,6 +7,83 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.13.8] — 2026-08-26
+
+**Three unbounded or unschedulable things in the long-lived path.** All found by
+auditing what a supervisor does *per tick* and *per record* rather than per boot —
+the costs that do not show up in any single-shot test because they need a machine
+that has been up for a while.
+
+### Changed — the in-memory audit chain streams by default (⚠ behaviour change)
+
+The chain `argonaut_init_new` builds retained every entry forever, at a measured
+**240 bytes per record**. Records are written on every service start, stop and
+crash, and on every health probe. With a 30 s health interval that is roughly
+**0.68 MB per day per service** of live, reachable growth, in a supervisor whose
+consumer is PID 1 and never exits.
+
+`config_audit_retain` / `config_set_audit_retain` (`cfg + 80`) select the
+behaviour; **it defaults to 0, streaming.** `argonaut_audit_log_new_streaming()`
+is the constructor `init.cyr` now uses unless retention is asked for.
+
+⚠ **`chain_with_capacity` is NOT the fix, and this was checked rather than
+assumed.** `_chain_auto_rotate` calls `chain_rotate`, which archives the entries
+vec into the chain's `overflow` vec — the entries stay referenced. Memory is
+*moved*, not freed, so under a bump allocator it is identical growth plus the
+archive overhead. libro's streaming chain keeps only the head hash, so **linkage
+across appends is byte-identical**: a chain persisted to a `PatraStore` verifies
+exactly as it did before, and `audit_persist` deployments are unaffected.
+
+The trade is stated plainly because it is real: on a streaming chain `chain_len`
+is always 0 and every in-memory query returns empty. Nothing in argonaut or
+kybernet reads the init-owned chain in production — kybernet makes zero direct
+`audit_*` calls — so the default costs nothing that anyone was using. A consumer
+that genuinely wants to query its own history in memory sets `audit_retain: 1`
+and takes the growth knowingly. Two test suites asserted the retained shape and
+were updated to say so explicitly (`config_set_audit_retain(cfg, 1)`), which is
+the correct outcome: they now document that they are testing the opt-in mode.
+
+### Added — `init_last_orphan_count()`
+
+`init_reap_services` calls `proc_table_reap_orphans_into` and discarded the
+count. Orphan reaping is PID 1's most load-bearing quiet duty and there was no
+way for a consumer to observe that it had happened at all, let alone gate on it.
+The count from the last sweep is now readable.
+
+### Fixed — `interval_ms` was parsed onto `HealthCheck` and never consulted
+
+`init_poll_health` probed **every** service that had a health check, on every
+tick, regardless of the interval that service asked for. The field was accepted
+from config, stored, exposed via `svc_hc_interval` — and read by nothing on the
+scheduling path.
+
+The consumer could not work around it, because it cannot ask for a subset: this
+is why kybernet 1.6.7 set its poll timer to the *smallest* configured interval
+across all services. A service asking for 60 s was probed every 5 s because
+something unrelated wanted 5 s. `_hc_is_due(ms, hc)` now gates each probe, and
+the consumer can hold one cheap timer again.
+
+⚠ **A failing service is still re-probed every tick, deliberately.** `last_hc` is
+written only when a probe PASSES — that is load-bearing for the watchdog, which
+measures its deadline as `now - last_hc` and must fire when checks stop passing.
+So a failing service keeps a stale `last_hc` and stays permanently due. That is
+correct for a supervisor (watch a failing service closely until it recovers or
+the watchdog takes it) and is exactly what every service did before this filter
+existed, so it is a regression for nobody. If it ever needs to change, the fix is
+a **separate last-attempt timestamp** — never writing `last_hc` on failure, which
+would silence the watchdog: the 1.13.6 safety inversion in a different disguise.
+
+### Added — `tests/tcyr/health_due.tcyr`
+
+Five assertions on the scheduling predicate: never-probed is due (a service must
+not wait a full interval for its first check after a spawn), just-probed is not,
+past-interval is, exactly-at-interval is (`>=`, not `>`), and interval 0 means
+every tick. **Verified to go red on the defect it exists to catch** — stubbing
+`_hc_is_due` to `return 1`, the pre-1.13.8 behaviour, fails
+`just-probed service is NOT due`. 33 suites, 0 failures.
+
+---
+
 ## [1.13.7] — 2026-08-26
 
 **1.13.6 added a service type the dispatcher could not start.**
