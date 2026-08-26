@@ -418,7 +418,17 @@ fn init_start_service(init, name) {
     var svc_type = svc_def_service_type(sd);
 
     var result = 0 - 1;
-    if (svc_type == SVC_SIMPLE) {
+    # ⚠ SVC_NOTIFY ROUTES HERE TOO. It is spawned exactly like SVC_SIMPLE —
+    # fork+exec, no waiting — and differs only in the state it is LEFT in:
+    # init_start_simple leaves a notify service STATE_STARTING rather than
+    # STATE_RUNNING, so its own authenticated READY=1 is what promotes it.
+    #
+    # Adding the enum value at 1.13.6 without adding this arm made every
+    # `"type": "notify"` service fall to the `else` below and be marked
+    # STATE_FAILED with "unknown svc type" — the feature was unreachable from a
+    # config file. It was not caught because the test SIMULATED the start by
+    # setting the state directly instead of driving this dispatcher. 1.13.7.
+    if (svc_type == SVC_SIMPLE || svc_type == SVC_NOTIFY) {
         result = init_start_simple(init, name, ms, sd);
     } elif (svc_type == SVC_ONESHOT) {
         result = init_start_oneshot(init, name, ms, sd);

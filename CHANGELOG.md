@@ -7,6 +7,47 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.13.7] — 2026-08-26
+
+**1.13.6 added a service type the dispatcher could not start.**
+
+### Fixed — every `"type": "notify"` service failed to start
+
+`init_start_service` dispatches on the service type with arms for `SVC_SIMPLE`,
+`SVC_ONESHOT` and `SVC_FORKING`, and an `else` that sets `STATE_FAILED` and logs
+"unknown svc type". 1.13.6 added `SVC_NOTIFY` to the enum and taught
+`init_start_simple` how to leave such a service `STATE_STARTING` — but **never
+added the arm that routes to it.** So every notify service fell to the `else` and
+was marked FAILED. The feature was completely unreachable from a config file.
+
+`SVC_NOTIFY` now routes to `init_start_simple` alongside `SVC_SIMPLE`: it is
+spawned identically (fork+exec, no waiting) and differs only in the state it is
+LEFT in.
+
+### Fixed — the test that should have caught it was simulating the code
+
+⚠ **This is the more useful half of the entry.** `notify_semantics.tcyr` set the
+state by hand —
+
+```
+# Simulate what init_start_simple does for SVC_NOTIFY: left STARTING.
+managed_svc_set_state(ms, STATE_STARTING);
+```
+
+— so it asserted the author's mental model rather than the code. It passed, with 22
+green assertions, while the dispatcher had no arm for the type at all. Only the
+consumer's QEMU harness caught it, one release later.
+
+The test now calls `init_start_service` and asserts the REAL start path leaves the
+service `STATE_STARTING` with `last_notify` seeded. Verified by re-introducing the
+1.13.6 dispatcher gap and confirming three assertions go red — including the state
+reading `4` (`STATE_FAILED`), which is precisely the "unknown svc type" arm — then
+restoring.
+
+**A test that simulates the thing it is testing cannot fail when that thing is
+missing.** Drive the real entry point, or the assertions only describe what was
+already believed.
+
 ## [1.13.6] — 2026-08-26
 
 **sd_notify READY and WATCHDOG can finally mean something.** 32 suites, 0 failures.

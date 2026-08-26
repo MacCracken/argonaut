@@ -52,10 +52,18 @@ fn main() {
     var ms = init_get_service(init, "nfy");
     assert(ms != 0, "notify service registered");
 
-    # Simulate what init_start_simple does for SVC_NOTIFY: left STARTING.
-    managed_svc_set_state(ms, STATE_STARTING);
-    managed_svc_set_last_notify(ms, now_ms());
-    assert_eq(managed_svc_state(ms), STATE_STARTING, "notify service starts STARTING");
+    # ⚠ DRIVE THE REAL DISPATCHER, DO NOT SIMULATE IT. The first version of
+    # this test set the state by hand — "simulate what init_start_simple does" —
+    # and so asserted my mental model rather than the code. It passed while
+    # `init_start_service` had no SVC_NOTIFY arm at all, sending every
+    # `"type": "notify"` service to STATE_FAILED with "unknown svc type". The
+    # feature was unreachable from a config file and 22 green assertions said
+    # otherwise. Only the QEMU harness caught it.
+    var started = init_start_service(init, "nfy");
+    assert(started > 0, "notify service actually spawned (dispatcher has an arm for it)");
+    assert_eq(managed_svc_state(ms), STATE_STARTING,
+      "left STARTING by the REAL start path, not by a hand-set state");
+    assert(managed_svc_last_notify(ms) > 0, "last_notify seeded at spawn");
 
     assert_eq(init_notify_ready(init, "nfy"), 1, "READY transitions the service");
     assert_eq(managed_svc_state(ms), STATE_RUNNING, "now RUNNING");
