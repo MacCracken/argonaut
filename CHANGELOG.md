@@ -7,6 +7,76 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.13.10] — 2026-08-27
+
+**The HTTP health check's connect was unbounded, and it was the second copy of a
+connect this repo had already made bounded.** Found by kybernet's 2026-08-26
+P(-1) audit (MEDIUM-4). Suite 33 → 38 assertions in `tests/tcyr/health_exec.tcyr`.
+
+### Fixed — `health_check.type = "http"` could stall the caller for ~127 seconds
+
+`execute_health_check`'s `HC_HTTP_GET` arm did a plain blocking
+`sys_connect(fd, &addr, 16)` — no `O_NONBLOCK`, no `poll`, no deadline — while
+its sibling `tcp_connect_ip` had been given exactly that treatment. So a target
+that silently drops SYN (host down, a firewall configured to DROP rather than
+REJECT, a pulled cable — ordinary for a health endpoint on another box) blocked
+the caller for the kernel's full SYN-retry window, roughly **127 seconds**, no
+matter what `timeout_ms` the operator configured.
+
+In kybernet the caller is PID 1's reactor, which blocks every signal into a
+signalfd and installs no handler, so the connect cannot even be cut short by
+EINTR. For those two minutes nothing reaps zombies, nothing handles SIGTERM or
+SIGCHLD, no watchdog is serviced and the notify socket is not drained — and with
+a poll interval shorter than the stall, the board is unresponsive essentially
+continuously while a shutdown request sits unhandled.
+
+The bounded connect is now **one function, `connect_bounded`**, called by both
+arms, so they cannot drift apart again — which is precisely how this arose:
+`tcp_connect_ip` was fixed and the HTTP copy was not. It returns a connected
+**blocking** fd, since `O_NONBLOCK` is an implementation detail of bounding the
+connect and the HTTP arm's subsequent write and poll-bounded read want a normal
+socket. `tcp_connect_ip` is now four lines over the top of it, and keeps the
+2026-08-24 LOW-5 `SO_ERROR` fail-closed check that a refused connection must not
+be reported as a successful one.
+
+Measured: against 198.51.100.1 (TEST-NET-2, RFC 5737) with a 200 ms bound, the
+call returns at **200 ms**. The new assertion is written as an upper bound rather
+than a range, because on a host where that address is unroutable instead of
+blackholed the connect fails immediately — a gate must not demand a network
+property the environment may not supply, and an upper bound still catches a
+regression to the unbounded form. The test file says so.
+
+### Changed — the two constant audit Strs are cached (partial, MEDIUM-10)
+
+`audit_log_record` called `str_from` three times per append, and two of the three
+are invariant: `source` is the literal `"argonaut"` on every call, and
+`event_type_str` returns a literal per event type. Both are cached now — the
+event-type table is a small lazy array, with an out-of-range index falling back
+to allocating so a future event type cannot index past it.
+
+⚠ **This does NOT close kybernet's MEDIUM-10, and is recorded as partial on
+purpose.** Measured against libro 2.8.12: a streaming append cost **224 bytes**
+per record; it now costs **192**. The other 176 is inside libro's `entry_new` —
+an 88-byte struct plus the timestamp, hash and algorithm Strs — and the obvious
+fix there does not work. Making a streaming chain reuse one scratch entry was
+implemented and reverted: `chain_append` returns the entry to its caller, and
+libro's own suite asserts that two returned entries are independent (four tests
+go red, verified). Closing it properly needs an opt-in libro API — an append
+that returns the head hash rather than an entry — which is a minor release with
+consumer review, not a patch.
+
+### Known, still not fixed here
+
+`check_command` allocates **232 bytes per invocation** on PID 1's reactor path —
+`str_from` boxes, `safe_cmd_new`, `run_safe_cmd_timeout`'s argv buffer and
+`_resolve_safe_binary`'s path builder. At a 5 s interval that is ~4 MB/day/service
+in an arena init never resets. Pre-existing, shared with the edge-boot callers
+(which run once per boot, where it does not matter), and removing it means
+reworking `SafeCommand`'s allocation rather than patching a call site. Filed in
+kybernet's roadmap rather than rushed.
+
+---
+
 ## [1.13.9] — 2026-08-27
 
 **`health_check.type = "command"` could freeze PID 1's reactor, and could never

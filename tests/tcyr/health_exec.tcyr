@@ -75,6 +75,46 @@ fn main() {
     assert_eq(zero_tmo, 0, "timeout_ms <= 0 falls back to a bound, never unbounded");
     assert(now_ms() - t1 < 4000, "the <=0 fallback is a real bound, not a wait for exit");
 
+    # ⚠ 1.13.10 — kybernet audit MEDIUM-4: the HTTP arm's connect is BOUNDED.
+    #
+    # `execute_health_check`'s HC_HTTP_GET arm had its own copy of the connect
+    # logic that was a plain blocking `sys_connect` — no O_NONBLOCK, no poll —
+    # so a target that silently drops SYN stalled the caller for the kernel's
+    # full SYN-retry window (~127 s) no matter what `timeout_ms` said. In
+    # kybernet that caller is PID 1's reactor, with all signals blocked into a
+    # signalfd, so it could not even be interrupted: no reaping, no SIGTERM, no
+    # watchdog, no notify drain, for two minutes per health tick.
+    #
+    # Both arms now share `connect_bounded`, so they cannot drift apart again —
+    # which is exactly how this arose: tcp_connect_ip was made bounded and the
+    # HTTP copy was not.
+    #
+    # ⚠ WHAT THIS ASSERTION CAN AND CANNOT PROVE. 198.51.100.1 is TEST-NET-2
+    # (RFC 5737) and blackholes on a typical network — measured here, the call
+    # returns at exactly the 200 ms bound. On a host where that address is
+    # instead unroutable, connect fails immediately with EHOSTUNREACH and the
+    # assertion passes without having exercised the timeout at all. It is
+    # written as an upper bound rather than a range for that reason: it must
+    # never demand a network property the environment may not supply, and it
+    # still catches a regression to the unbounded form, which would take ~127 s.
+    var bh_ip = resolve_host_ipv4(str_from("198.51.100.1"));
+    if (bh_ip >= 0) {
+        var c0 = now_ms();
+        var bh_fd = connect_bounded(bh_ip, 8080, 200);
+        var c_spent = now_ms() - c0;
+        assert_eq(bh_fd, 0 - 1, "connect_bounded: a blackholed target FAILS, not hangs");
+        assert(c_spent < 3000, "connect_bounded: returns near its bound, not the SYN-retry window");
+    }
+
+    # A refused connection must fail fast and fail CLOSED — never report the
+    # stale SO_ERROR of a previous call as success.
+    var lo_ip = resolve_host_ipv4(str_from("127.0.0.1"));
+    assert(lo_ip >= 0, "127.0.0.1 resolves");
+    assert_eq(connect_bounded(lo_ip, 9, 500), 0 - 1, "connect_bounded: refused port fails closed");
+
+    # And the reachability wrapper still agrees with it.
+    assert_eq(tcp_connect_ip(lo_ip, 9, 500), 0, "tcp_connect_ip: refused port is not reachable");
+
     # PATH resolution, asserted separately so it cannot silently stand in for
     # the timeout assertions above.
     var bare = check_command(str_from("true"), 5000);

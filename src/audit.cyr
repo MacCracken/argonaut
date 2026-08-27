@@ -109,10 +109,43 @@ fn audit_log_entries(log) {
     return chain_entries(log);
 }
 
+# ⚠ THE TWO CONSTANT Strs ARE CACHED. 1.13.10 — kybernet audit MEDIUM-10.
+#
+# `str_from` boxes its argument (16 bytes) on every call, and two of these three
+# arguments are invariant: `source` is the literal "argonaut" on every append,
+# and `event_type_str` returns a literal per event type. Only `details` is
+# genuinely per-call. In kybernet this runs once per service start/stop/crash
+# and once per health probe, in an arena PID 1 never resets.
+#
+# ⚠ THIS IS A PARTIAL SAVING AND MEDIUM-10 IS NOT CLOSED BY IT. Measured on
+# libro 2.8.12: a streaming append costs **224 bytes**, of which 48 is these
+# three `str_from` and **176 is inside libro's `entry_new`** (an 88-byte struct
+# plus the timestamp, hash and algorithm Strs). Caching here removes 32. The
+# remaining 192 needs a libro change, and the obvious one does not work: making
+# a streaming chain reuse a scratch entry breaks `chain_append`'s contract that
+# the returned entry is the caller's, which libro's own suite asserts by holding
+# two entries at once (verified — four tests go red). That needs an opt-in API
+# and a libro minor release, not a patch. See kybernet's roadmap.
+var _audit_src_cached = 0;
+var _audit_action_cache[64];
+
 fn audit_log_record(log, service, event_type) {
     var severity = audit_event_severity(event_type);
-    var source = str_from("argonaut");
-    var action = str_from(event_type_str(event_type));
+    if (_audit_src_cached == 0) { _audit_src_cached = str_from("argonaut"); }
+    var source = _audit_src_cached;
+    # Small lazy table keyed by event type. The enum is bounded and small; an
+    # out-of-range value falls back to allocating, so a future event type cannot
+    # index out of the array.
+    var action = 0;
+    if (event_type >= 0 && event_type < 64) {
+        action = load64((&_audit_action_cache) + event_type * 8);
+        if (action == 0) {
+            action = str_from(event_type_str(event_type));
+            store64((&_audit_action_cache) + event_type * 8, action);
+        }
+    } else {
+        action = str_from(event_type_str(event_type));
+    }
     var details = str_from(service);
     return chain_append(log, severity, source, action, details);
 }

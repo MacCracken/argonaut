@@ -53,10 +53,36 @@ fn health_state_str(s) {
 # Split from `check_tcp_connect` (1.5.5 audit LOW-1) so the
 # dispatcher can pre-resolve once and pass the IP, avoiding the
 # duplicate /etc/hosts read on the hot path.
-fn tcp_connect_ip(ip, port, timeout_ms) {
+# ⚠ THE ONE BOUNDED CONNECT. 1.13.10 — kybernet audit MEDIUM-4.
+#
+# Returns a CONNECTED, BLOCKING fd (>= 0), or -1. The caller owns the fd.
+#
+# Factored out of `tcp_connect_ip` because the HTTP_GET arm of
+# `execute_health_check` had its own copy that was a plain, blocking
+# `sys_connect` with no O_NONBLOCK and no poll — so a `"type": "http"` check
+# against an address that silently drops SYN (host down, firewall DROP rather
+# than REJECT, cable pulled — ordinary for a health endpoint on another box)
+# blocked the caller for the kernel's full SYN-retry window, roughly 127
+# seconds, no matter what `timeout_ms` the operator configured.
+#
+# In kybernet that caller is PID 1's reactor, which blocks all signals into a
+# signalfd and installs no handler, so the connect cannot even be cut short by
+# EINTR: for those two minutes nothing reaps zombies, nothing handles SIGTERM,
+# no watchdog is serviced and the notify socket is not drained. With a poll
+# interval shorter than the stall the board is unresponsive essentially
+# continuously.
+#
+# One implementation, two callers, so the bounded and unbounded versions cannot
+# drift apart again — which is how this happened: `tcp_connect_ip` was made
+# bounded and the HTTP copy was not.
+#
+# The fd comes back in BLOCKING mode. O_NONBLOCK is an implementation detail of
+# bounding the connect; the HTTP arm then does an ordinary write and a
+# poll-bounded read, exactly as it did before.
+fn connect_bounded(ip, port, timeout_ms) {
     # socket(AF_INET=2, SOCK_STREAM=1, 0)
     var fd = sys_socket(2, 1, 0);
-    if (fd < 0) { return 0; }
+    if (fd < 0) { return 0 - 1; }
 
     # Build sockaddr_in (16 bytes)
     var addr[16];
@@ -70,22 +96,19 @@ fn tcp_connect_ip(ip, port, timeout_ms) {
     # sin_addr (4 bytes, big-endian).
     write_ipv4_octets(&addr + 4, ip);
 
-    # Set socket non-blocking for timeout
-    # fcntl(fd, F_SETFL, O_NONBLOCK)
-    ag_sys_fcntl(fd, 4, 2048);  # F_SETFL=4, O_NONBLOCK=2048
+    # Non-blocking so the connect can be bounded.
+    # fcntl(fd, F_SETFL=4, O_NONBLOCK=2048)
+    ag_sys_fcntl(fd, 4, 2048);
 
-    # connect(fd, &addr, 16)
     var ret = sys_connect(fd, &addr, 16);
 
     if (ret == 0) {
-        sys_close(fd);
-        return 1;
+        ag_sys_fcntl(fd, 4, 0);          # back to blocking
+        return fd;
     }
 
-    # EINPROGRESS = -115, wait with poll/epoll
+    # EINPROGRESS = -115: wait for writability, bounded.
     if (ret == (0 - 115)) {
-        # Use poll to wait for connection
-        # poll(fds, nfds=1, timeout_ms)
         var pollfd[8];
         store32(&pollfd, fd);
         store16(&pollfd + 4, 4);  # POLLOUT
@@ -95,7 +118,6 @@ fn tcp_connect_ip(ip, port, timeout_ms) {
         if (poll_ret > 0) {
             var revents = load16(&pollfd + 6);
             if (revents & 4) {  # POLLOUT
-                # Verify connection succeeded via SO_ERROR
                 # 2026-08-24 audit LOW-5: zero the buffer AND check the
                 # getsockopt return. `so_err` is static storage, so a failed
                 # getsockopt left the previous call's value in place — and a
@@ -109,15 +131,23 @@ fn tcp_connect_ip(ip, port, timeout_ms) {
                 # getsockopt(fd, SOL_SOCKET=1, SO_ERROR=4, &val, &len)
                 var so_ret = ag_sys_getsockopt(fd, 1, 4, &so_err, &so_len);
                 if (so_ret == 0 && load32(&so_err) == 0) {
-                    sys_close(fd);
-                    return 1;
+                    ag_sys_fcntl(fd, 4, 0);      # back to blocking
+                    return fd;
                 }
             }
         }
     }
 
     sys_close(fd);
-    return 0;
+    return 0 - 1;
+}
+
+# TCP reachability probe. 1 if a connection completed inside the bound.
+fn tcp_connect_ip(ip, port, timeout_ms) {
+    var fd = connect_bounded(ip, port, timeout_ms);
+    if (fd < 0) { return 0; }
+    sys_close(fd);
+    return 1;
 }
 
 # check_tcp_connect(host, port, timeout_ms) — backwards-compatible
@@ -390,17 +420,14 @@ fn execute_health_check(service_name, hc, pid) {
             path = path_buf;
         }
 
-        # TCP connect
-        var fd = sys_socket(2, 1, 0);  # socket(AF_INET, SOCK_STREAM, 0)
+        # ⚠ BOUNDED CONNECT — 1.13.10, kybernet audit MEDIUM-4. This was a
+        # plain blocking `sys_connect`, so a blackholed target stalled the
+        # caller for the kernel's whole SYN-retry window (~127 s) regardless of
+        # `timeout_ms`. In kybernet the caller is PID 1's reactor. Shares one
+        # implementation with `tcp_connect_ip` now so the two cannot drift.
+        var fd = connect_bounded(http_ip, http_port, timeout);
         if (fd >= 0) {
-            var addr[16];
-            memset(&addr, 0, 16);
-            store16(&addr, 2);  # AF_INET
-            var pbe = ((http_port & 255) << 8) | ((http_port >> 8) & 255);
-            store16(&addr + 2, pbe);
-            write_ipv4_octets(&addr + 4, http_ip);
-
-            var ret = sys_connect(fd, &addr, 16);
+            var ret = 0;
             if (ret == 0) {
                 # Send HTTP GET request. Host: header echoes the
                 # configured host (not hardcoded 127.0.0.1) so
