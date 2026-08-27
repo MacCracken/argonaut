@@ -138,21 +138,89 @@ fn check_process_alive(pid) {
 }
 
 # Command check — run command, exit 0 = healthy
-fn check_command(cmd_str, timeout_ms) {
-    # Split command on whitespace
-    var parts = str_split(cmd_str, str_from(" "));
-    if (vec_len(parts) == 0) { return 0; }
+#
+# ⚠ THIS RAN UNBOUNDED ON PID 1's REACTOR PATH UNTIL 1.13.9, AND IGNORED THE
+# TIMEOUT IT WAS HANDED.
+#
+# `timeout_ms` appeared in the signature and NOWHERE in the body: the call was
+# `exec_vec_str(argv)`, and the cyrius stdlib's `exec_vec_str` does
+# `sys_waitpid(pid, &stbuf, 0)` — flag 0, no WNOHANG, no deadline. Under
+# kybernet, which is PID 1 and blocks signals process-wide, that wait is not
+# even EINTR-breakable. A health command that blocks on a flock, a dead NFS
+# mount, a socket read or a full pipe therefore froze the entire reactor: no
+# SIGCHLD reaping (zombies to PID exhaustion), no SIGTERM/SIGINT handling (the
+# box cannot shut down), no watchdog, no restart queue, no notify drain. The
+# board looks alive and is dead.
+#
+# Two more defects in the same call, both from the same stdlib function:
+#   - `exec_vec_str` builds an EMPTY envp and `execve(2)` does not search
+#     $PATH, so a target like "true" or "systemctl is-active foo" was ENOENT
+#     -> 127 -> unhealthy, deterministically, forever. A supervisor then
+#     restarts a perfectly healthy service on a config that reads as correct.
+#   - It DISCARDS waitpid's return before reading a `var stbuf[4]` that is
+#     STATIC storage in cyrius, so a wait that does not land decodes status 0
+#     as SUCCESS — a health check that never ran, reported as passing.
+#
+# `run_safe_cmd_timeout` is the bounded, status-checked, PATH-resolving,
+# mask-resetting replacement that has been in this repo since 1.13.2, and
+# which the consumer's own standing rule 17 mandates for exactly this reason.
+# kybernet's edge-boot path made this move at its 1.5.7 and left the health
+# path — one function away — on the unbounded stdlib call.
+# ⚠ `str_split` RETURNS VIEWS, NOT NUL-TERMINATED STRINGS, AND execve NEEDS
+# NUL-TERMINATED STRINGS.
+#
+# Measured on 6.5.35: splitting "/bin/sleep 5" on " " gives word[0] with
+# str_len 10 whose NEXT BYTE IS 32 (the space), not 0 — the parts alias the
+# original buffer. `run_safe_cmd_timeout` builds execve's argv from
+# `str_data()`, so argv[0] came out as the whole "/bin/sleep 5" and every
+# multi-word health command was ENOENT -> 127 -> unhealthy, forever. The old
+# `exec_vec_str` path had the identical defect, so this was never a regression
+# — it is why `check_command` only ever worked for a single-word target, and
+# the reason the pre-1.13.9 test suite only ever tried `/bin/true`.
+#
+# Copied into a STATIC scratch buffer and split IN PLACE by overwriting each
+# separator with a NUL. Static because this runs once per health poll per
+# service on PID 1's reactor path, where an allocation per tick is a slow OOM
+# of init — the defect class kybernet has now fixed five times. The buffer is
+# 1024 bytes at global scope ([128] slots x 8); a longer command line is
+# refused rather than truncated, because a silently shortened argv is a
+# different command.
+var _HC_CMD_BUF[128];
+var _HC_WORDS[16];
 
-    var argv = vec_new();
-    for (var i = 0; i < vec_len(parts); i = i + 1) {
-        vec_push(argv, vec_get(parts, i));
+fn check_command(cmd_str, timeout_ms) {
+    var slen = str_len(cmd_str);
+    if (slen <= 0 || slen >= 1023) { return 0; }
+    memcpy(&_HC_CMD_BUF, str_data(cmd_str), slen);
+    store8((&_HC_CMD_BUF) + slen, 0);
+
+    # Split in place: each word becomes its own NUL-terminated C string.
+    var nwords = 0;
+    var i = 0;
+    while (i < slen && nwords < 16) {
+        while (i < slen && load8((&_HC_CMD_BUF) + i) == 32) { i = i + 1; }
+        if (i >= slen) { break; }
+        var start = i;
+        while (i < slen && load8((&_HC_CMD_BUF) + i) != 32) { i = i + 1; }
+        store8((&_HC_CMD_BUF) + i, 0);
+        store64((&_HC_WORDS) + nwords * 8, (&_HC_CMD_BUF) + start);
+        nwords = nwords + 1;
+        i = i + 1;
+    }
+    if (nwords == 0) { return 0; }
+
+    var cmd = safe_cmd_new(str_from(load64(&_HC_WORDS)));
+    for (var j = 1; j < nwords; j = j + 1) {
+        safe_cmd_add_arg(cmd, str_from(load64((&_HC_WORDS) + j * 8)));
     }
 
-    # 1.6.1 — exec_vec_str (Str-shape argv). The 1.5.2 upstream
-    # issue argonaut filed against cyrius landed in 5.10.44 as a
-    # parallel typed-shape family; this call site was one of the
-    # ones the issue named as broken.
-    var code = exec_vec_str(argv);
+    # A caller that passes 0/negative gets the HealthCheck default rather than
+    # an unbounded wait: "no timeout configured" must never mean "wait forever"
+    # in PID 1.
+    var tmo = timeout_ms;
+    if (tmo <= 0) { tmo = 2000; }
+
+    var code = run_safe_cmd_timeout(cmd, tmo);
     return code == 0;
 }
 

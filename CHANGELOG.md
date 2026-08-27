@@ -7,6 +7,77 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.13.9] — 2026-08-27
+
+**`health_check.type = "command"` could freeze PID 1's reactor, and could never
+run a command with an argument.** Found by kybernet's 2026-08-26 P(-1) audit
+(HIGH-6) and fixed here because argonaut is where the defect lives. Three
+distinct faults in one call, all in `check_command`. Suite 23 → 33 assertions in
+`tests/tcyr/health_exec.tcyr`.
+
+### Fixed — the configured `timeout_ms` was discarded and the wait was unbounded
+
+`timeout_ms` appeared in `check_command`'s signature and **nowhere in its body**:
+the call was the cyrius stdlib's `exec_vec_str`, which does
+`sys_waitpid(pid, &stbuf, 0)` — flag 0, no WNOHANG, no deadline. Under kybernet,
+which is PID 1 and blocks signals process-wide, that wait is not even
+EINTR-breakable. A health command blocking on a flock, a dead NFS mount, a socket
+read or a full pipe therefore froze the **entire reactor**: no SIGCHLD reaping
+(zombies to PID exhaustion), no SIGTERM/SIGINT handling (the box cannot shut
+down), no watchdog, no restart queue, no notify drain. The board looks alive and
+is dead.
+
+`exec_vec_str` also **fails open**: it discards `waitpid`'s return before reading
+a `var stbuf[4]` that is STATIC storage in cyrius, so a wait that does not land
+decodes status 0 as SUCCESS — a health check that never ran, reported as passing.
+
+Now `run_safe_cmd_timeout(cmd, ms)`, the bounded, status-checked, PATH-resolving,
+mask-resetting runner this repo has had since 1.13.2 and which kybernet's standing
+rule 17 mandates for exactly this reason. A `timeout_ms <= 0` falls back to 2000
+rather than waiting forever. Measured: `/bin/sleep 5` under a 500 ms bound now
+returns unhealthy after 522 ms.
+
+### Fixed — a bare command name was ENOENT, forever
+
+`exec_vec_str` builds an **empty envp**, and `execve(2)` does not search `$PATH`.
+So `"target": "true"` or `"systemctl is-active foo"` was ENOENT → 127 → unhealthy,
+deterministically, on every tick — and a supervisor then restarts a perfectly
+healthy service on a config that reads as correct.
+
+### Fixed — ⚠ a command with ANY argument never ran at all
+
+`str_split` returns **views into the original buffer**, not NUL-terminated
+strings. Measured on 6.5.35: splitting `"/bin/sleep 5"` on `" "` gives word[0]
+with `str_len` 10 whose **next byte is 32 (the space), not 0**. `execve`'s argv
+needs NUL-terminated strings, so argv[0] came out as the entire command line and
+every multi-word health check was ENOENT → 127 → unhealthy.
+
+This was never a regression — the old `exec_vec_str` path had the identical
+defect. It is why `check_command` only ever worked for a single-word target, and
+why the pre-1.13.9 suite only ever tried `/bin/true`. The command is now copied
+into a static scratch buffer and split **in place** by overwriting each separator
+with a NUL — static because this runs once per health poll per service on PID 1's
+reactor path, where an allocation per tick is a slow OOM of init. A command line
+longer than the 1023-byte buffer is **refused, never truncated**: a silently
+shortened argv is a different command.
+
+⚠ Note the two defects masked each other: against the old implementation the new
+timeout assertions PASS, because `/bin/sleep 5` never exec'd, so it returned
+"unhealthy" instantly — the answer the assertion wanted, for the wrong reason.
+The bound was verified separately by direct probe. The test file says so.
+
+### Known, measured, not fixed here
+
+`check_command` still allocates **232 bytes per invocation** — `str_from` boxes,
+`safe_cmd_new`, `run_safe_cmd_timeout`'s argv buffer and `_resolve_safe_binary`'s
+path builder. On PID 1's reactor path that is ~4 MB/day/service at a 5 s interval,
+in an arena init never resets. It is pre-existing and shared with the edge-boot
+callers (which run once per boot, where it does not matter), so removing it means
+reworking `SafeCommand`'s allocation rather than patching this one call site.
+Filed rather than rushed.
+
+---
+
 ## [1.13.8] — 2026-08-26
 
 **Three unbounded or unschedulable things in the long-lived path.** All found by

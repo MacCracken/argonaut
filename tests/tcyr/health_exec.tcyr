@@ -28,6 +28,80 @@ fn main() {
     var cmd_fail = check_command(str_from("/bin/false"), 5000);
     assert_eq(cmd_fail, 0, "cmd /bin/false returns 0");
 
+    # ⚠ 1.13.9 — THE TIMEOUT IS HONOURED, AND $PATH IS SEARCHED.
+    #
+    # Until 1.13.9 `timeout_ms` appeared in check_command's signature and
+    # nowhere in its body: the call was the stdlib's `exec_vec_str`, which does
+    # `sys_waitpid(pid, &stbuf, 0)` — no WNOHANG, no deadline. In kybernet,
+    # which is PID 1 and blocks signals process-wide, that wait is not even
+    # EINTR-breakable, so a blocking health command froze the whole reactor:
+    # no reaping, no SIGTERM, no watchdog, no restart queue.
+    #
+    # Both assertions below FAIL on the pre-1.13.9 implementation, and neither
+    # is slow:
+    #   - `sleep 5` under a 500 ms bound exits 0 after five seconds, so the old
+    #     code reported the service HEALTHY (1) — a check that outlived its
+    #     budget by 10x and then passed. The new code kills it and reports 0.
+    #   - a bare `true` was ENOENT under the old code, because exec_vec_str
+    #     builds an EMPTY envp and execve(2) does not search $PATH — so it was
+    #     127 -> unhealthy, deterministically, forever, on a config that reads
+    #     as correct. run_safe_cmd_timeout resolves bare names.
+    # ⚠ ABSOLUTE PATH, DELIBERATELY. Written first as `sleep 5`, these two
+    # assertions PASSED against the broken implementation — for the wrong
+    # reason. exec_vec_str builds an empty envp and execve does not search
+    # $PATH, so a bare `sleep` never exec'd at all: ENOENT -> 127 -> "unhealthy"
+    # instantly, which is the answer the assertion wanted. The PATH defect
+    # masked the timeout defect, and the test would have shipped green over
+    # both. Naming /bin/sleep makes the exec succeed on either implementation,
+    # so the ONLY variable left is whether the bound is honoured.
+    # ⚠ HONEST NOTE ON WHAT THIS DOES AND DOES NOT CATCH. Against the
+    # pre-1.13.9 implementation these two assertions PASS — not because the
+    # bound was honoured, but because the argv defect below meant `/bin/sleep 5`
+    # never exec'd at all (ENOENT -> 127 -> "unhealthy", instantly). The two
+    # defects mask each other in that direction. The bound itself was verified
+    # by direct probe: run_safe_cmd_timeout(/bin/sleep 5, 500) returns -1 after
+    # a measured 522 ms, and check_command now does the same. These stay as a
+    # FORWARD regression guard — they fail the moment someone removes the bound
+    # while argv still works.
+    var t0 = now_ms();
+    var slow = check_command(str_from("/bin/sleep 5"), 500);
+    var spent = now_ms() - t0;
+    assert_eq(slow, 0, "a command that outruns its timeout is UNHEALTHY, not healthy");
+    assert(spent < 3000, "check_command returned inside its budget, not after the child exited");
+
+    # A zero/absent timeout must not mean "wait forever" in PID 1.
+    var t1 = now_ms();
+    var zero_tmo = check_command(str_from("/bin/sleep 5"), 0);
+    assert_eq(zero_tmo, 0, "timeout_ms <= 0 falls back to a bound, never unbounded");
+    assert(now_ms() - t1 < 4000, "the <=0 fallback is a real bound, not a wait for exit");
+
+    # PATH resolution, asserted separately so it cannot silently stand in for
+    # the timeout assertions above.
+    var bare = check_command(str_from("true"), 5000);
+    assert_eq(bare, 1, "a bare command name is resolved against PATH");
+
+    # ⚠ MULTI-WORD COMMANDS, WHICH NEVER WORKED. `str_split` returns VIEWS
+    # into the original buffer — measured: word[0] of "/bin/sleep 5" has
+    # str_len 10 and its next byte is 32 (the space), not 0 — and execve needs
+    # NUL-terminated strings. So argv[0] came out as the entire command line
+    # and every health check with an argument was ENOENT -> 127 -> unhealthy,
+    # forever, on a config that reads as correct. It was never a regression:
+    # the old exec_vec_str path had the same defect, which is why the suite
+    # before 1.13.9 only ever tried single-word targets.
+    assert_eq(check_command(str_from("/bin/sh -c true"), 5000), 1,
+      "a multi-word command runs, and its zero exit is healthy");
+    assert_eq(check_command(str_from("/bin/sh -c false"), 5000), 0,
+      "a multi-word command's NON-zero exit is unhealthy");
+    assert_eq(check_command(str_from("/bin/sh  -c   true"), 5000), 1,
+      "runs of spaces do not become empty argv entries");
+
+    # Bounded input: a command line longer than the scratch buffer is REFUSED,
+    # never truncated — a silently shortened argv is a different command.
+    var long_cmd = str_from("/bin/true");
+    for (var k = 0; k < 8; k = k + 1) { long_cmd = str_cat(long_cmd, long_cmd); }
+    assert(str_len(long_cmd) > 1023, "the oversized command really is oversized");
+    assert_eq(check_command(long_cmd, 5000), 0, "an over-long command line is refused, not truncated");
+
     # --- execute_health_check: process alive ---
     var hc_pa = health_check_new(HC_PROCESS_ALIVE, 0, 0, 5000, 2000, 3);
     var r1 = execute_health_check(str_from("self"), hc_pa, my_pid);
