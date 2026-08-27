@@ -1069,7 +1069,7 @@ fn argonaut_config_default() {
     store64(cfg + 56, vec_new());
     store64(cfg + 64, 0);                              # audit_persist off by default
     store64(cfg + 72, str_from("/var/log/argonaut.patra"));   # default path; unused when audit_persist == 0
-    store64(cfg + 80, 0);                                     # audit_retain: streaming by default — see config_audit_retain
+    store64(cfg + 80, 0);                              # audit_retain: streaming; see config_audit_retain
     return cfg;
 }
 

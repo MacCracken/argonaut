@@ -73,6 +73,22 @@ existed, so it is a regression for nobody. If it ever needs to change, the fix i
 a **separate last-attempt timestamp** — never writing `last_hc` on failure, which
 would silence the watchdog: the 1.13.6 safety inversion in a different disguise.
 
+### Changed — the Test step's name no longer claims a count nothing enforces
+
+`- name: Test (28 suites / 743 assertions)` while the tree had **33 and 921**. The step
+gates on `fail -eq 0` and nothing else, so neither number was ever checked and the label
+drifted for releases. Renamed to `Test (every tcyr suite)`; the real counts are reported
+from the run.
+
+Deliberately **not** replaced with a count gate. An assertion-total floor would gate the
+runner's environment rather than the code, and a suite-count floor is redundant — every
+path through the loop increments `pass` or `fail`. Checked rather than assumed: under
+bash's default globbing an unmatched `tests/tcyr/*.tcyr` leaves the literal pattern as
+`$t`, `cyrius test` fails on it and `fail` becomes 1, so even the empty-glob case is
+already caught; only `shopt -s nullglob`, which Actions does not set, would make it
+vacuous. A first draft of this release added that floor with a comment asserting the
+opposite, and the comment was wrong.
+
 ### Added — `tests/tcyr/health_due.tcyr`
 
 Five assertions on the scheduling predicate: never-probed is due (a service must

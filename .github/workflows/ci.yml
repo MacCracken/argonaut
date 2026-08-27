@@ -173,7 +173,24 @@ jobs:
           "$QEMU" ./build/argonaut-aarch64 | tee /tmp/smoke_aarch64
           grep -q "all systems nominal" /tmp/smoke_aarch64
 
-      - name: Test (28 suites / 743 assertions)
+      - name: Test (every tcyr suite)
+        # The name used to read "28 suites / 743 assertions" while the tree
+        # actually had 33 and 921. Nothing enforced either number — the step
+        # gates on `fail -eq 0` and nothing else — so the label was free to
+        # drift, and did, for releases. Hardcoded counts in a step NAME are
+        # documentation that looks like a gate; the real counts are reported
+        # from the run itself on the summary line below.
+        #
+        # Deliberately NOT gated on a count. An assertion-total floor would be
+        # a gate on the runner's environment rather than on the code (kybernet
+        # standing rule 33), and a suite-count floor is redundant: every path
+        # through the loop increments pass or fail, so `fail -eq 0` already
+        # implies every discovered suite ran to a clean summary. Checked rather
+        # than assumed: with bash's default globbing an unmatched
+        # tests/tcyr/*.tcyr leaves the literal pattern as $t, cyrius fails on
+        # it, and fail becomes 1 — so the empty-glob case is caught too, and
+        # only `shopt -s nullglob` (which Actions does not set) would make this
+        # vacuous.
         run: |
           pass=0; fail=0; asserts=0
           for t in tests/tcyr/*.tcyr; do
