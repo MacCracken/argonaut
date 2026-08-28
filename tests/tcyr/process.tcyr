@@ -100,7 +100,7 @@ fn main() {
     var wbuf[8];
     sys_waitpid(pid, &wbuf, 0);
 
-    test_group("service env (1.16.0)");
+    test_group("service env (1.15.0)");
     # ⚠ ServiceDefinition.environment existed from the beginning and
     # fork_exec_service NEVER read it — envp came from build_default_envp()
     # alone. argonaut's OWN default_services populates it (PGDATA at
@@ -133,12 +133,11 @@ fn main() {
 
     # ready_check: readable and consulted since 1.10, settable by nothing until
     # now, so it was argonaut's default on every consumer board.
-    test_group("ready_check setter (1.16.0)");
+    test_group("ready_check setter (1.15.0)");
     assert_eq(svc_def_ready_check(psd), 0, "ready_check defaults to none");
     var rc = ready_check_new(HC_TCP_CONNECT, str_from("127.0.0.1"), 8080, 1000, 3, 200);
     svc_def_set_ready_check(psd, rc);
     assert_eq(svc_def_ready_check(psd), rc, "ready_check is settable and reads back");
-
 
     return assert_summary();
 }

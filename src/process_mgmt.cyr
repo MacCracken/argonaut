@@ -331,7 +331,7 @@ fn build_default_envp() {
     return v;
 }
 
-# ⚠ THE SERVICE'S OWN `environment` MAP, FLATTENED TO "KEY=VALUE" cstrs. 1.16.0.
+# ⚠ THE SERVICE'S OWN `environment` MAP, FLATTENED TO "KEY=VALUE" cstrs. 1.15.0.
 #
 # `ServiceDefinition.environment` has existed since the beginning and
 # `fork_exec_service` never read it: envp came from `build_default_envp()`
