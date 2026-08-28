@@ -100,6 +100,46 @@ fn main() {
     var wbuf[8];
     sys_waitpid(pid, &wbuf, 0);
 
+    test_group("service env (1.16.0)");
+    # ⚠ ServiceDefinition.environment existed from the beginning and
+    # fork_exec_service NEVER read it — envp came from build_default_envp()
+    # alone. argonaut's OWN default_services populates it (PGDATA at
+    # services.cyr:21, XDG_SESSION_TYPE at :221), so those have been silently
+    # ineffective for the life of the field.
+    var esd = svc_def_new(str_from("envsvc"), str_from("d"), str_from("/bin/true"));
+    map_set(svc_def_env(esd), "FOO", str_from("bar"));
+    map_set(svc_def_env(esd), "BAZ", str_from("qux"));
+    var ev = build_default_envp();
+    var before = vec_len(ev);
+    _append_service_env(ev, esd);
+    assert_eq(vec_len(ev) - before, 2, "service env entries are appended to envp");
+    var found_foo = 0;
+    var found_baz = 0;
+    for (var ei = before; ei < vec_len(ev); ei = ei + 1) {
+        var entry = vec_get(ev, ei);
+        if (streq(entry, "FOO=bar") == 1) { found_foo = 1; }
+        if (streq(entry, "BAZ=qux") == 1) { found_baz = 1; }
+    }
+    assert_eq(found_foo, 1, "FOO=bar is flattened correctly");
+    assert_eq(found_baz, 1, "BAZ=qux is flattened correctly");
+
+    # A service with no env must not add anything — and must not crash on the
+    # empty map, which is what every service that never sets one has.
+    var psd = svc_def_new(str_from("plain"), str_from("d"), str_from("/bin/true"));
+    var pv = build_default_envp();
+    var pbefore = vec_len(pv);
+    _append_service_env(pv, psd);
+    assert_eq(vec_len(pv), pbefore, "a service with no env adds nothing");
+
+    # ready_check: readable and consulted since 1.10, settable by nothing until
+    # now, so it was argonaut's default on every consumer board.
+    test_group("ready_check setter (1.16.0)");
+    assert_eq(svc_def_ready_check(psd), 0, "ready_check defaults to none");
+    var rc = ready_check_new(HC_TCP_CONNECT, str_from("127.0.0.1"), 8080, 1000, 3, 200);
+    svc_def_set_ready_check(psd, rc);
+    assert_eq(svc_def_ready_check(psd), rc, "ready_check is settable and reads back");
+
+
     return assert_summary();
 }
 var r = main();

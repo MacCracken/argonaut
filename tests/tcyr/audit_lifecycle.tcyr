@@ -53,6 +53,45 @@ include "src/audit.cyr"
 include "src/audit_ext.cyr"
 include "src/init.cyr"
 
+# ⚠ 1.15.0 — `audit_log_record` returns the HEAD HASH and reuses libro's scratch
+# entry. The chain is STREAMING by default since 1.13.8, so every record's entry
+# was allocated and abandoned; under kybernet that arena is PID 1's and is never
+# reset.
+fn test_audit_record_nokeep() {
+    test_group("audit nokeep");
+    var log = chain_new_streaming();
+
+    var h1 = audit_log_record(log, "svc-a", EVT_STARTED);
+    assert(h1 != 0, "audit_log_record returns a head hash");
+    assert(str_len(h1) > 0, "the head hash is not empty");
+    assert(str_eq(h1, chain_head_hash(log)) == 1, "it IS the chain head");
+    assert_eq(chain_len(log), 0, "a streaming chain still retains nothing");
+
+    var h2 = audit_log_record(log, "svc-b", EVT_STOPPED_OK);
+    assert(str_eq(h1, h2) == 0, "the head advances per record");
+
+    # Linkage: an ordinary append after two nokeep records must record the
+    # nokeep head as its predecessor. That is what keeps `audit_persist`
+    # deployments verifying across this change.
+    var after = chain_append(log, SEV_INFO, str_from("s"), str_from("a"), str_from("d"));
+    assert(str_eq(entry_prev_hash(after), h2) == 1, "linkage carries across nokeep");
+
+    # Bounded per record. Warm first so lazily-created slots do not count.
+    var wlog = chain_new_streaming();
+    audit_log_record(wlog, "svc", EVT_STARTED);
+    var before = alloc_used();
+    var i = 0;
+    while (i < 100) { audit_log_record(wlog, "svc", EVT_STARTED); i = i + 1; }
+    var per = (alloc_used() - before) / 100;
+    # 176 measured at 1.15.0, down from 224 at 1.13.9 (plus an 88-byte fl_alloc
+    # per record that is now zero). The remainder is Strs inherent to producing
+    # a link — the RFC3339 timestamp, the superseded head hash, the hasher's
+    # output — and closing it needs a fixed-buffer hash in libro. Asserted as a
+    # CEILING so the number cannot silently climb back.
+    assert(per <= 192, "audit_log_record stays at or below its measured per-record cost");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("audit-lifecycle");
@@ -155,6 +194,8 @@ fn main() {
     # --- all entries source is "argonaut" ---
     var by_src = audit_log_by_source(alog, "argonaut");
     assert_eq(vec_len(by_src), vec_len(all_entries), "all from argonaut");
+
+    test_audit_record_nokeep();
 
     return assert_summary();
 }

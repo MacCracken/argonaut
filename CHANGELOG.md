@@ -7,6 +7,51 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.15.0] — 2026-08-27
+
+**`audit_log_record` adopts libro 2.9.0's `chain_append_nokeep`.** Minor because its
+return type changes: it now hands back the chain's new **head hash** rather than an
+entry. libro 2.8.12 → **2.9.0**.
+
+### Changed — the audit entry is no longer allocated and abandoned
+
+`chain_append` returns an entry the caller owns and is expected to free. Nothing in
+argonaut ever used it — every call site here and in `init.cyr` discards it — while on
+a STREAMING chain, which has been the default since 1.13.8, libro retains nothing. So
+an entry was allocated and dropped on every service start, stop, crash and health
+probe, in an arena kybernet's PID 1 never resets.
+
+`chain_append_nokeep` is libro's opt-in append for exactly this shape: it reuses one
+scratch entry per chain and returns the head hash.
+
+### Measured, including what is still there
+
+Per audit record, on a streaming chain:
+
+| | arena | `fl_alloc` |
+|---|---:|---:|
+| 1.13.9 | 224 | 88 |
+| 1.13.10 (constant Strs cached) | 192 | 88 |
+| **1.15.0** (nokeep) | **176** | **0** |
+
+312 → 176 bytes of real per-record memory, a 44% reduction. Asserted as a **ceiling**
+in `tests/tcyr/audit_lifecycle.tcyr` so the figure cannot silently climb back.
+
+⚠ **The remaining 176 is not the entry struct**, which is what the original analysis
+assumed. It is Strs inherent to producing a link with libro's current representation:
+the RFC3339 timestamp (40 bytes), the superseded head-hash Str, and the hasher's
+output. Closing it means a fixed-buffer hash in libro, which touches
+`entry_compute_hash` and therefore byte-identical linkage for every consumer — a libro
+change with real blast radius, not a tidy-up. Tracked in kybernet's roadmap as
+MEDIUM-10, still open.
+
+### Linkage is unchanged
+
+`entry_compute_hash` reads only the entry struct's fields, so filling a reused struct
+produces the same hash as allocating a fresh one. `audit_persist` deployments verify
+across this change. Asserted directly: an ordinary `chain_append` after two `nokeep`
+records finds the nokeep head as its predecessor.
+
 ## [1.14.0] — 2026-08-27
 
 **`check_command` allocated 232 bytes on PID 1's reactor path, once per health

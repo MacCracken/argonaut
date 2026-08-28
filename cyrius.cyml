@@ -91,5 +91,5 @@ stdlib = [
 
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
-tag = "2.8.12"
+tag = "2.9.0"
 modules = ["dist/libro.cyr"]

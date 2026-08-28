@@ -893,6 +893,10 @@ fn svc_def_restart_policy(sd){ return load64(sd + 56); }
 fn svc_def_restart_config(sd){ return load64(sd + 64); }
 fn svc_def_health_check(sd)  { return load64(sd + 72); }
 fn svc_def_ready_check(sd)   { return load64(sd + 80); }
+# 1.16.0 — the field was readable and settable by nothing, so `ready_check` was
+# argonaut's default on every consumer board. `init_start_service` HAS consulted
+# it since 1.10 (init.cyr:467, :875); only the setter was missing.
+fn svc_def_set_ready_check(sd, rc) { store64(sd + 80, rc); return sd; }
 fn svc_def_enabled(sd)       { return load64(sd + 88); }
 fn svc_def_service_type(sd)  { return load64(sd + 96); }
 fn svc_def_env_files(sd)     { return load64(sd + 104); }

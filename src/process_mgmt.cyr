@@ -331,6 +331,39 @@ fn build_default_envp() {
     return v;
 }
 
+# ⚠ THE SERVICE'S OWN `environment` MAP, FLATTENED TO "KEY=VALUE" cstrs. 1.16.0.
+#
+# `ServiceDefinition.environment` has existed since the beginning and
+# `fork_exec_service` never read it: envp came from `build_default_envp()`
+# alone. The comment there said "full map -> flat-cstrs lands when a service
+# surfaces a need for custom env beyond PATH" — a service has, so it lands.
+#
+# The consequence of not having it was worse than an absent feature. Consumers
+# CAN populate the map — argonaut's own `default_services` does, setting PGDATA
+# and XDG_SESSION_TYPE (services.cyr:21, :221) — and none of it ever reached a
+# child. Those two have been silently ineffective for the life of the field.
+#
+# Called in the CHILD after fork, so the allocations here are copy-on-write and
+# die with the exec. Service entries come AFTER the defaults, so a service may
+# deliberately override PATH; the last duplicate wins in every libc's getenv.
+fn _append_service_env(v, svc_def) {
+    var env = svc_def_env(svc_def);
+    if (env == 0) { return 0; }
+    var keys = map_keys(env);
+    if (keys == 0) { return 0; }
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        var k = vec_get(keys, i);
+        var val = map_get(env, k);
+        if (val == 0) { continue; }
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, k);
+        str_builder_add_cstr(sb, "=");
+        str_builder_add_str(sb, val);
+        vec_push(v, str_data(str_builder_build(sb)));
+    }
+    return 0;
+}
+
 # =========================================================================
 # Pre-exec hook (1.9.0)
 # =========================================================================
@@ -435,6 +468,7 @@ fn fork_exec_service(svc_def) {
         # flat-cstrs lands when a service surfaces a need for
         # custom env beyond PATH.
         var env_vec = build_default_envp();
+        _append_service_env(env_vec, svc_def);
         var envc = vec_len(env_vec);
         var envp_buf = alloc((envc + 1) * 8);
         var enpi = 0;

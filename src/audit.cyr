@@ -147,7 +147,21 @@ fn audit_log_record(log, service, event_type) {
         action = str_from(event_type_str(event_type));
     }
     var details = str_from(service);
-    return chain_append(log, severity, source, action, details);
+    # ⚠ RETURNS THE HEAD HASH, NOT AN ENTRY. 1.15.0 — the reason this release is
+    # a minor.
+    #
+    # `chain_append` hands back an entry the caller owns and is expected to free.
+    # Nothing in argonaut ever used it — every call site here and in init.cyr
+    # discards it — while on a STREAMING chain (which is the default since
+    # 1.13.8) libro retains nothing, so the entry was allocated and abandoned on
+    # every service start, stop, crash and health probe, in an arena kybernet's
+    # PID 1 never resets.
+    #
+    # libro 2.9.0's `chain_append_nokeep` is the opt-in append for exactly this
+    # shape: it reuses one scratch entry per chain and returns the new head hash.
+    # Linkage is byte-identical — `entry_compute_hash` reads only the struct's
+    # fields — so `audit_persist` deployments verify across the change.
+    return chain_append_nokeep(log, severity, source, action, details);
 }
 
 fn audit_log_len(log) {
