@@ -7,6 +7,54 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.14.0] — 2026-08-27
+
+**`check_command` allocated 232 bytes on PID 1's reactor path, once per health
+poll per service. It now allocates nothing.** Minor rather than patch because
+`run_safe_cmd_timeout` gains a documented argv bound. Suite 38 → 41 assertions in
+`tests/tcyr/health_exec.tcyr`.
+
+Filed by kybernet's 2026-08-26 P(-1) audit work and measured there: at a 5 s
+interval this is roughly 4 MB/day/service in an arena PID 1 never resets — the
+same slow-OOM-of-init class kybernet has now closed five times over.
+
+### Fixed — the allocation, measured at each step
+
+| | bytes/call |
+|---|---:|
+| 1.13.10 | **232** |
+| — of which `safe_cmd_new` (struct + a fresh `vec_new()` for args) | 184 |
+| — of which `run_safe_cmd_timeout`'s argv + envp | 32 |
+| 1.14.0 | **0** |
+
+One `SafeCommand` per process with its args vec **truncated** rather than
+replaced; a fixed pool of `Str` boxes rewritten in place over the words already
+NUL-terminated inside `_HC_CMD_BUF` (a `Str` is `{data, len}`, so rewriting one
+is two stores); and static argv/envp arrays in `run_safe_cmd_timeout`.
+
+Static is safe here for a specific reason rather than by assumption: the buffers
+are filled, handed to `execve` in the child, and dead in the parent the moment
+`fork` returns — and `fork` gives the child its own copy, so the parent reusing a
+buffer cannot affect a running child. PID 1's reactor is single-threaded and
+neither function recurses.
+
+Asserted, not described: `health_exec.tcyr` now measures `alloc_used()` across 50
+calls and requires **0** bytes per call, for both the single-word and multi-word
+paths. "We made it cheaper" is exactly the claim that rots.
+
+### Fixed — ⚠ an over-long command was silently TRUNCATED, not refused
+
+Found by writing the test for the new argv bound. 1.13.9's word split was
+`while (i < slen && nwords < 16)`, which **dropped every word past the sixteenth
+and ran the shortened command** — the exact defect the command-length guard three
+lines above it exists to prevent, reintroduced one loop down. A command with more
+arguments than fit is a different command; running it is worse than reporting the
+service unhealthy. It now refuses, and `run_safe_cmd_timeout` refuses an argv
+longer than its static buffer for the same reason.
+
+The assertion was written to check a refusal and instead caught a truncation,
+which is the argument for writing it at all.
+
 ## [1.13.10] — 2026-08-27
 
 **The HTTP health check's connect was unbounded, and it was the second copy of a

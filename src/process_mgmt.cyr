@@ -163,22 +163,42 @@ enum SafeCmdLimits { SAFE_CMD_DEFAULT_TIMEOUT_MS = 30000; }
 # process_stop. The child also gets reset_child_signal_mask() — exec_vec_str
 # omits it, so an inherited PID-1 mask would leave cryptsetup unkillable by
 # SIGTERM.
+# ⚠ STATIC argv AND envp. 1.14.0.
+#
+# These were `alloc((argc + 2) * 8)` and `alloc(16)` per invocation — 32 bytes a
+# call, which is nothing for the edge-boot callers that run once per boot and is
+# a slow leak for `check_command`, which runs once per health poll per service on
+# PID 1's reactor path in an arena that is never reset.
+#
+# Static is safe here and the reason is specific: the buffers are consumed
+# synchronously — filled, handed to `execve` in the child, and dead in the parent
+# the moment `fork` returns. `fork` gives the child its own copy, so the parent
+# reusing the buffer on the next call cannot affect a running child. PID 1's
+# reactor is single-threaded and this function does not recurse.
+#
+# ⚠ GLOBAL SCOPE, so `[18]` is 18 SLOTS = 144 bytes — 16 argv entries plus argv[0]
+# plus the NULL terminator. An argv longer than that is REFUSED rather than
+# truncated: a silently shortened argv is a different command.
+var _RSC_ARGV[18];
+var _RSC_ENVP[2];
+
 fn run_safe_cmd_timeout(cmd, timeout_ms) {
     var resolved = _resolve_safe_binary(safe_cmd_binary(cmd));
     if (resolved == 0) { return 127; }
     var cmd_args = safe_cmd_args(cmd);
     var argc = vec_len(cmd_args);
+    if (argc > 16) { return 127; }
 
     # argv[0] is the RESOLVED path. Caller-side argv elements are Str
     # throughout argonaut, so each needs str_data for the execve array.
-    var argv_buf = alloc((argc + 2) * 8);
+    var argv_buf = &_RSC_ARGV;
     store64(argv_buf, str_data(resolved));
     for (var i = 0; i < argc; i = i + 1) {
         store64(argv_buf + (i + 1) * 8, str_data(vec_get(cmd_args, i)));
     }
     store64(argv_buf + (argc + 1) * 8, 0);
 
-    var envp = alloc(16);
+    var envp = &_RSC_ENVP;
     store64(envp, "PATH=/usr/sbin:/sbin:/usr/bin:/bin");
     store64(envp + 8, 0);
 

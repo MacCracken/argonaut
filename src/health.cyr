@@ -218,6 +218,39 @@ fn check_process_alive(pid) {
 var _HC_CMD_BUF[128];
 var _HC_WORDS[16];
 
+# ⚠ THE SafeCommand AND ITS Str BOXES ARE REUSED TOO. 1.14.0.
+#
+# Measured on 1.13.10: `check_command` allocated **232 bytes per invocation**, of
+# which **184 was `safe_cmd_new`** — an `alloc(16)` struct plus a fresh
+# `vec_new()` for the args every single time — and 32 was inside
+# `run_safe_cmd_timeout`. On PID 1's reactor path, once per health poll per
+# service, in an arena init never resets, that is ~4 MB/day/service at a 5 s
+# interval. Same defect class as the per-tick leaks kybernet has now fixed five
+# times over.
+#
+# One SafeCommand per process, its args vec TRUNCATED rather than replaced, and
+# a fixed pool of Str boxes rewritten in place over the words already sitting in
+# `_HC_CMD_BUF`. A Str is {data, len}, so rewriting a box is two stores and
+# allocates nothing.
+#
+# Safe because PID 1's reactor is single-threaded and `check_command` does not
+# recurse: the command has been fully consumed by `run_safe_cmd_timeout` before
+# the function returns, and nothing retains the SafeCommand or the boxes.
+var _HC_SAFE_CMD = 0;
+var _HC_STRS[16];
+
+fn _hc_str(slot, cstr_ptr, n) {
+    var box = load64((&_HC_STRS) + slot * 8);
+    if (box == 0) {
+        box = str_new(cstr_ptr, n);
+        store64((&_HC_STRS) + slot * 8, box);
+        return box;
+    }
+    store64(box, cstr_ptr);
+    store64(box + 8, n);
+    return box;
+}
+
 fn check_command(cmd_str, timeout_ms) {
     var slen = str_len(cmd_str);
     if (slen <= 0 || slen >= 1023) { return 0; }
@@ -227,9 +260,19 @@ fn check_command(cmd_str, timeout_ms) {
     # Split in place: each word becomes its own NUL-terminated C string.
     var nwords = 0;
     var i = 0;
-    while (i < slen && nwords < 16) {
+    while (i < slen) {
         while (i < slen && load8((&_HC_CMD_BUF) + i) == 32) { i = i + 1; }
         if (i >= slen) { break; }
+        # ⚠ REFUSE, DO NOT TRUNCATE. 1.14.0.
+        #
+        # This was `while (i < slen && nwords < 16)`, which silently DROPPED
+        # every word past the sixteenth and then ran the shortened command — the
+        # exact defect the length guard above exists to prevent, reintroduced one
+        # loop down. A command with more arguments than fit is a different
+        # command, and running it is worse than reporting the service unhealthy.
+        # Found by the over-long-argv assertion in tests/tcyr/health_exec.tcyr,
+        # which was written to check the refusal and instead caught the truncation.
+        if (nwords >= 16) { return 0; }
         var start = i;
         while (i < slen && load8((&_HC_CMD_BUF) + i) != 32) { i = i + 1; }
         store8((&_HC_CMD_BUF) + i, 0);
@@ -239,9 +282,20 @@ fn check_command(cmd_str, timeout_ms) {
     }
     if (nwords == 0) { return 0; }
 
-    var cmd = safe_cmd_new(str_from(load64(&_HC_WORDS)));
+    # Word lengths, for the reusable Str boxes. Each word is NUL-terminated in
+    # place inside _HC_CMD_BUF by the split above.
+    var w0 = load64(&_HC_WORDS);
+    var cmd = _HC_SAFE_CMD;
+    if (cmd == 0) {
+        cmd = safe_cmd_new(_hc_str(0, w0, strlen(w0)));
+        _HC_SAFE_CMD = cmd;
+    } else {
+        store64(cmd, _hc_str(0, w0, strlen(w0)));
+        vec_truncate(safe_cmd_args(cmd), 0);
+    }
     for (var j = 1; j < nwords; j = j + 1) {
-        safe_cmd_add_arg(cmd, str_from(load64((&_HC_WORDS) + j * 8)));
+        var wj = load64((&_HC_WORDS) + j * 8);
+        safe_cmd_add_arg(cmd, _hc_str(j, wj, strlen(wj)));
     }
 
     # A caller that passes 0/negative gets the HealthCheck default rather than

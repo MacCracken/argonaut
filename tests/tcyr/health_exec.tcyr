@@ -115,6 +115,41 @@ fn main() {
     # And the reachability wrapper still agrees with it.
     assert_eq(tcp_connect_ip(lo_ip, 9, 500), 0, "tcp_connect_ip: refused port is not reachable");
 
+    # ⚠ 1.14.0 — check_command ALLOCATES NOTHING PER CALL.
+    #
+    # It allocated **232 bytes per invocation** on 1.13.10: 184 of that was
+    # `safe_cmd_new` (an `alloc` struct plus a fresh `vec_new()` for the args,
+    # every single time) and 32 was `run_safe_cmd_timeout`'s argv/envp buffers.
+    # This runs once per health poll per service on PID 1's reactor path, in an
+    # arena init never resets — ~4 MB/day/service at a 5 s interval, which is the
+    # same slow-OOM-of-init class kybernet has now fixed five times over.
+    #
+    # The SafeCommand, its Str boxes and the argv/envp arrays are all reused now.
+    # Asserted rather than described, because "we made it cheaper" is exactly the
+    # claim that rots: this fails the moment someone reintroduces a per-call
+    # allocation anywhere down the chain.
+    var alloc_target = str_from("/bin/true");
+    check_command(alloc_target, 5000);          # warm every lazy slot first
+    var alloc_before = alloc_used();
+    var ai = 0;
+    while (ai < 50) { check_command(alloc_target, 5000); ai = ai + 1; }
+    var per_call = (alloc_used() - alloc_before) / 50;
+    assert_eq(per_call, 0, "check_command allocates nothing per call");
+
+    # And the same for a multi-word command, which takes the argv-building path.
+    var alloc_multi = str_from("/bin/sh -c true");
+    check_command(alloc_multi, 5000);
+    var multi_before = alloc_used();
+    var mi = 0;
+    while (mi < 50) { check_command(alloc_multi, 5000); mi = mi + 1; }
+    assert_eq((alloc_used() - multi_before) / 50, 0,
+      "a multi-word check_command allocates nothing per call either");
+
+    # An argv longer than the static buffer is REFUSED, never truncated — a
+    # silently shortened argv is a different command.
+    var too_many = str_from("/bin/true a b c d e f g h i j k l m n o p q r");
+    assert_eq(check_command(too_many, 5000), 0, "an over-long argv is refused, not truncated");
+
     # PATH resolution, asserted separately so it cannot silently stand in for
     # the timeout assertions above.
     var bare = check_command(str_from("true"), 5000);
