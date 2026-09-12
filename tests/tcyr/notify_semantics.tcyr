@@ -31,9 +31,12 @@ fn main() {
 
     # ---- the type round-trips through the config surface ----
     assert_eq(service_type_str(SVC_NOTIFY), "notify", "SVC_NOTIFY names itself");
-    var pr = service_type_parse(str_from("notify"));
-    assert(is_ok(pr) == 1, "\"notify\" parses");
-    assert_eq(result_unwrap(pr), SVC_NOTIFY, "parses to SVC_NOTIFY");
+    # v6.6.0 value form: the parse returns a (tag, payload) REGISTER PAIR.
+    # `var pr = ...` would bind the TAG ALONE and silently drop the payload,
+    # so both halves are bound and both halves are consumed.
+    var pr_t, pr_v = service_type_parse(str_from("notify"));
+    assert(is_ok(pr_t) == 1, "\"notify\" parses");
+    assert_eq(result_unwrap(pr_t, pr_v), SVC_NOTIFY, "parses to SVC_NOTIFY");
 
     # ⚠ Appended, not inserted: the three older values must keep their numbers
     # or every config written against an older argonaut silently changes type.

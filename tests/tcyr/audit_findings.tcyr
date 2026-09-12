@@ -458,8 +458,23 @@ fn main() {
 
     var nf_keys = map_keys(nf_fields);
     assert_eq(vec_len(nf_keys), 2, "notify: two keys");
-    var nf_k0 = vec_get(nf_keys, 0);
-    assert_eq(str_len(nf_k0), 5, "notify: first key is 5 bytes (READY), not the whole datagram");
+    # ⚠ ORDER-INDEPENDENT ON PURPOSE. This used to assert `str_len(key[0]) == 5`,
+    # which pinned map_keys' ITERATION ORDER — never a guaranteed property. cyrius
+    # 6.6.2 repaired map_u64's sentinel-key handling, the order changed, and
+    # "STATUS" (6 bytes) came back first: a GREEN-to-RED flip with no behaviour
+    # regression at all. The finding this guards is that a key is the KEY and not
+    # the whole datagram, so assert that over the key SET.
+    var nf_seen_ready = 0;
+    var nf_seen_status = 0;
+    var nf_ki = 0;
+    while (nf_ki < vec_len(nf_keys)) {
+        var nf_k = vec_get(nf_keys, nf_ki);
+        if (str_eq(nf_k, str_from("READY")) == 1) { nf_seen_ready = 1; }
+        if (str_eq(nf_k, str_from("STATUS")) == 1) { nf_seen_status = 1; }
+        nf_ki = nf_ki + 1;
+    }
+    assert_eq(nf_seen_ready, 1, "notify: READY is its own key, not the whole datagram");
+    assert_eq(nf_seen_status, 1, "notify: STATUS is its own key, not the whole datagram");
 
     # The parsed values must not alias the caller's buffer — overwrite it and
     # re-read. Before the fix these Strs pointed straight into nf_buf.

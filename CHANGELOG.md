@@ -3534,3 +3534,13 @@ All pre-1.0 features complete: boot sequencing, service lifecycle (simple/forkin
 Features implemented in the original Rust codebase (v0.2.0–v0.9.0) and ported to Cyrius at v0.95.0. See `docs/benchmarks-rust-baseline.md` for Rust performance comparison. The Rust source was removed at v0.96.1.
 
 Key milestones: v0.2.0 (hardening, `forbid(unsafe_code)`), v0.3.0 (process execution, ProcessTable), v0.4.0 (health check execution), v0.5.0 (runlevel switching), v0.6.0 (edge boot execution), v0.7.0 (API, audit, systemd integration), v0.8.0 (service types, resource limits, log rotation), v0.9.0 (seccomp, Landlock, capabilities, tmpfiles).
+
+## [Unreleased]
+
+## [1.15.1] - 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.35` → `6.6.2`.** Migrated to the `Result` value form:
+  2 first-party file(s) changed. Every surface re-verified — build, tests, and any
+  bench/fuzz/distlib target the repo ships.
