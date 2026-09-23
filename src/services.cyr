@@ -213,6 +213,23 @@ fn default_services(mode) {
 
     # Desktop-only services
     if (mode == BOOT_DESKTOP) {
+        # agnos-init (1.15.3): the AGNOS directory layout, run once before the
+        # compositor. /run is a fresh tmpfs every boot, and aethersafha binds its
+        # sockets in /run/agnos/agents and /run/agnos/plugins without creating
+        # either. The binary ships in the kybernet package (kybernet 1.7.6), the same
+        # package this default set is compiled into, so the dependency below can
+        # never reach a board without the program it names. It exits non-zero when
+        # the layout cannot be made, and the compositor is then not started.
+        var ainit = svc_def_new(
+          str_from("agnos-init"),
+          str_from("AGNOS directory layout"),
+          str_from("/usr/lib/agnos/agnos-init")
+          );
+        svc_def_set_service_type(ainit, SVC_ONESHOT);
+        svc_def_set_restart_policy(ainit, RESTART_NEVER);
+        vec_push(svc_def_modes(ainit), BOOT_DESKTOP);
+        vec_push(services, ainit);
+
         var comp = svc_def_new(
           str_from("aethersafha"),
           str_from("Wayland compositor"),
@@ -220,6 +237,7 @@ fn default_services(mode) {
           );
         map_set(svc_def_env(comp), "XDG_SESSION_TYPE", str_from("wayland"));
         vec_push(svc_def_deps(comp), str_from("daimon"));
+        vec_push(svc_def_deps(comp), str_from("agnos-init"));
         vec_push(svc_def_modes(comp), BOOT_DESKTOP);
         store64(comp + 56, RESTART_ALWAYS);
         store64(comp + 72, health_check_new(HC_PROCESS_ALIVE, 0, 0, 5000, 1000, 2));

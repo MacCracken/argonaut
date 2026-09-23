@@ -77,6 +77,8 @@ fn main() {
     assert(order_pos(dsk_o, "daimon") < order_pos(dsk_o, "llm-gateway"), "dai<gw");
     assert(order_pos(dsk_o, "daimon") < order_pos(dsk_o, "aethersafha"), "dai<comp");
     assert(order_pos(dsk_o, "aethersafha") < order_pos(dsk_o, "agnoshi"), "comp<shell");
+    # 1.15.3: the compositor's socket directories exist before it starts.
+    assert(order_pos(dsk_o, "agnos-init") < order_pos(dsk_o, "aethersafha"), "init<comp");
     assert(order_pos(dsk_o, "llm-gateway") < order_pos(dsk_o, "ifran"), "gw<ifran");
 
     return assert_summary();

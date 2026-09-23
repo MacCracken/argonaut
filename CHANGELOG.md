@@ -7,6 +7,61 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.15.3] — 2026-09-23
+
+**The desktop compositor now waits for its socket directories.**
+`default_services(BOOT_DESKTOP)` gains an `agnos-init` oneshot, and aethersafha
+`depends_on` it. 33 suites / 971 → **976** assertions, 0 failures, on x86_64 and under
+qemu-aarch64. Bench gate neutral: the desktop micros move about 1.2 to 1.6 µs for
+the extra service, which is in the ±2 µs noise band; no regression.
+
+### Fixed — aethersafha's socket directories did not exist on a kybernet desktop
+
+`/run` is a fresh tmpfs on every boot. aethersafha binds its sockets in
+`/run/agnos/agents` and `/run/agnos/plugins` and creates neither. Under systemd,
+agnosticos's `agnos-init.sh` ran first, and even it never made those two. With
+kybernet as PID 1, nothing made them at all.
+
+- **`agnos-init`**, a new default in `BOOT_DESKTOP` only: `/usr/lib/agnos/agnos-init`,
+  `type: oneshot`, `restart: never`. The program ships in the kybernet package
+  (kybernet 1.7.6), the same package this default set is compiled into, so the
+  dependency cannot reach a board without the program it names. It exits non-zero
+  when it cannot make the layout.
+- **aethersafha `depends_on` `agnos-init`**, beside `daimon`. A failed oneshot now
+  skips the compositor instead of starting it without its directories.
+
+It has to be here, not in kybernet's config: kybernet ignores a config service
+whose name collides with a built-in, so an operator could not add this edge.
+
+### Tests
+
+- `types_b`: the desktop set is 8 services and includes `agnos-init`, as a oneshot;
+  the server set does not; and aethersafha's `depends_on` contains `agnos-init`.
+  That last check is the one that counts. `agnos-init` is added to the set before
+  aethersafha, so an order check alone passes without the edge (verified: removing
+  the dependency left `init` at 32/32 and failed `types_b` 43/44).
+- `init`: the resolved desktop order puts `agnos-init` before aethersafha.
+
+### Performance
+
+Neutral. Against `1.15.2-cyrius-6.6.6`, single runs:
+
+| Bench | 1.15.2 | 1.15.3 | Δ µs |
+|---|---:|---:|---:|
+| init_new_desktop | 22.737 | 24.301 | +1.564 |
+| resolve_order_desktop | 9.681 | 10.888 | +1.207 |
+| resolve_waves_desktop | 12.503 | 13.839 | +1.336 |
+| plan_shutdown_reboot | 12.473 | 13.959 | +1.486 |
+| resolve_waves_chain_20 ⚠ | 53.947 | 57.857 | +3.910 |
+| init_new_minimal | 5.535 | 5.373 | −0.162 |
+
+The desktop rows grow by one service and one edge, within noise.
+⚠ `resolve_waves_chain_20` is a synthetic 20-service chain this change does not
+touch. Three unrecorded back-to-back runs on an idle host read 53.9, 64.4 and
+50.4 µs, so its own run-to-run spread (about ±7 µs) covers the +3.9.
+
+---
+
 ## [1.15.2] — 2026-09-22
 
 **Toolchain 6.6.2 → 6.6.6 and every dependency at its latest tag; `cyrius.cyml`

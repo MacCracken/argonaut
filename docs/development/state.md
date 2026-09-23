@@ -6,6 +6,12 @@
 
 ## Version
 
+**1.15.3** (`default_services(BOOT_DESKTOP)` adds an `agnos-init` oneshot and
+aethersafha `depends_on` it, so the compositor's `/run/agnos/{agents,plugins}`
+socket directories exist before it starts. The program ships in the kybernet package
+(kybernet 1.7.6). 33 suites / 976 assertions on x86_64 and under qemu-aarch64. Bench
+gate neutral.)
+
 **1.15.2** (toolchain cyrius **6.6.2 → 6.6.6**; libro **2.9.0 → 2.10.3**, which
 carries sigil 3.12.18 and patra 1.14.3; sakshi 2.5.2 and patra 1.14.3 from the
 6.6.6 fold — every library at its latest tag. `cyrius.cyml` cut back to a
@@ -489,9 +495,9 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Suites
 
-- **x86_64: 33 `.tcyr` suites / 971 assertions**, 0 failures (cyrius 6.6.6).
-- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 33 / 33, 971 assertions**,
-  identical to x86_64. Run on the dev host at 1.15.2; CI still runs the aarch64
+- **x86_64: 33 `.tcyr` suites / 976 assertions**, 0 failures (cyrius 6.6.6).
+- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 33 / 33, 976 assertions**,
+  identical to x86_64. Run on the dev host at 1.15.3; CI still runs the aarch64
   smoke only.
 - **qemu PID-1 harness** (`qemu/pid1-harness-test.sh`, `qemu/boot-test.sh`,
   KVM + `+invtsc`): M3 + L3 end-to-end and the supervisor-loop smoke pass at
@@ -500,6 +506,14 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 - **Benches**: `src/bench_main.cyr` — 29 micros, the release gate
   (`scripts/bench-history.sh`); `tests/bcyr/argonaut.bcyr` carries the same 29,
   `tests/bcyr/api.bcyr` 8 more. History in `bench-history.csv`.
+
+### Bench snapshot (1.15.3-agnos-init, 2026-09-23)
+
+**Verdict: neutral** against `1.15.2-cyrius-6.6.6`. The desktop micros grow about
+1.2 to 1.6 µs for one more service and edge (`init_new_desktop` 22.737 → 24.301,
+`resolve_order_desktop` 9.681 → 10.888). `resolve_waves_chain_20` read +3.9 µs, and
+three unrecorded reruns (53.9 / 64.4 / 50.4 µs) show that is its own noise. Full
+table in CHANGELOG [1.15.3]. The 1.15.2 snapshot below is kept for the long view.
 
 ### Bench snapshot (1.15.2-cyrius-6.6.6, 2026-09-22)
 
@@ -733,9 +747,9 @@ are single runs.
 
 ## Pending release (unreleased)
 
-- **1.15.2** (staged in the working tree, not yet tagged) — toolchain 6.6.6,
-  every dependency at its latest tag, `cyrius.cyml` cut back to a manifest. See
-  Version and CHANGELOG [1.15.2].
+- **1.15.3** (staged in the working tree, not yet tagged) — aethersafha depends on
+  the new `agnos-init` desktop oneshot. See Version and CHANGELOG [1.15.3]. kybernet
+  consumes it in the release after its 1.7.6, which ships the `agnos-init` program.
 
 ## Recent shipped
 

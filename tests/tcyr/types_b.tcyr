@@ -16,9 +16,30 @@ fn main() {
     assert(svcs_has_name(srv_v, "ifran"), "srv ifran");
 
     var dsk_v = default_services(BOOT_DESKTOP);
-    assert_eq(vec_len(dsk_v), 7, "dsk 7 svcs");
+    assert_eq(vec_len(dsk_v), 8, "dsk 8 svcs");
     assert(svcs_has_name(dsk_v, "aethersafha"), "dsk comp");
     assert(svcs_has_name(dsk_v, "agnoshi"), "dsk shell");
+    # 1.15.3: agnos-init makes /run/agnos/{agents,plugins} before the compositor.
+    assert(svcs_has_name(dsk_v, "agnos-init"), "dsk agnos-init");
+    assert(1 - svcs_has_name(srv_v, "agnos-init"), "srv no agnos-init (desktop only)");
+    # The dependency itself, not only the order: agnos-init is listed first, so an
+    # order check alone would pass without the edge.
+    var comp_has_init = 0;
+    var ainit_oneshot = 0;
+    for (var di = 0; di < vec_len(dsk_v); di = di + 1) {
+        var dsd = vec_get(dsk_v, di);
+        if (streq(str_data(svc_def_name(dsd)), "aethersafha")) {
+            var cdeps = svc_def_deps(dsd);
+            for (var dj = 0; dj < vec_len(cdeps); dj = dj + 1) {
+                if (streq(str_data(vec_get(cdeps, dj)), "agnos-init")) { comp_has_init = 1; }
+            }
+        }
+        if (streq(str_data(svc_def_name(dsd)), "agnos-init")) {
+            if (svc_def_service_type(dsd) == SVC_ONESHOT) { ainit_oneshot = 1; }
+        }
+    }
+    assert(comp_has_init, "aethersafha depends_on agnos-init");
+    assert(ainit_oneshot, "agnos-init is a oneshot");
 
     var edge_v = default_services(BOOT_EDGE);
     assert_eq(vec_len(edge_v), 1, "edge 1 svc");
