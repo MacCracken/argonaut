@@ -117,15 +117,9 @@ fn audit_log_entries(log) {
 # genuinely per-call. In kybernet this runs once per service start/stop/crash
 # and once per health probe, in an arena PID 1 never resets.
 #
-# ⚠ THIS IS A PARTIAL SAVING AND MEDIUM-10 IS NOT CLOSED BY IT. Measured on
-# libro 2.8.12: a streaming append costs **224 bytes**, of which 48 is these
-# three `str_from` and **176 is inside libro's `entry_new`** (an 88-byte struct
-# plus the timestamp, hash and algorithm Strs). Caching here removes 32. The
-# remaining 192 needs a libro change, and the obvious one does not work: making
-# a streaming chain reuse a scratch entry breaks `chain_append`'s contract that
-# the returned entry is the caller's, which libro's own suite asserts by holding
-# two entries at once (verified — four tests go red). That needs an opt-in API
-# and a libro minor release, not a patch. See kybernet's roadmap.
+# With libro >= 2.10.0 nothing inside libro allocates per record, so the
+# `details` box below is the whole per-record cost: 16 bytes, asserted as a
+# ceiling in tests/tcyr/audit_lifecycle.tcyr.
 var _audit_src_cached = 0;
 var _audit_action_cache[64];
 
@@ -161,6 +155,10 @@ fn audit_log_record(log, service, event_type) {
     # shape: it reuses one scratch entry per chain and returns the new head hash.
     # Linkage is byte-identical — `entry_compute_hash` reads only the struct's
     # fields — so `audit_persist` deployments verify across the change.
+    #
+    # On a streaming chain the returned hash lives in libro's two-slot scratch
+    # (libro 2.10.0): it is valid until the second subsequent append to the same
+    # chain. A caller that keeps it longer must copy it.
     return chain_append_nokeep(log, severity, source, action, details);
 }
 

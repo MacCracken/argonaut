@@ -83,12 +83,11 @@ fn test_audit_record_nokeep() {
     var i = 0;
     while (i < 100) { audit_log_record(wlog, "svc", EVT_STARTED); i = i + 1; }
     var per = (alloc_used() - before) / 100;
-    # 176 measured at 1.15.0, down from 224 at 1.13.9 (plus an 88-byte fl_alloc
-    # per record that is now zero). The remainder is Strs inherent to producing
-    # a link — the RFC3339 timestamp, the superseded head hash, the hasher's
-    # output — and closing it needs a fixed-buffer hash in libro. Asserted as a
-    # CEILING so the number cannot silently climb back.
-    assert(per <= 192, "audit_log_record stays at or below its measured per-record cost");
+    # 16 measured at 1.15.2: the `details` Str box audit_log_record allocates per
+    # call. Since libro 2.10.0 nothing inside libro allocates per record. Asserted
+    # as a CEILING, one 16-byte box above the measurement, so the number cannot
+    # silently climb back.
+    assert(per <= 32, "audit_log_record stays at or below its measured per-record cost");
     return 0;
 }
 

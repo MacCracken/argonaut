@@ -7,6 +7,172 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.15.2] — 2026-09-22
+
+**Toolchain 6.6.2 → 6.6.6 and every dependency at its latest tag; `cyrius.cyml`
+is a manifest again.** No code change in `src/`. 33 suites / 971 assertions, 0
+failures, on x86_64 and under qemu-aarch64. Bench gate win/neutral, no
+regression.
+
+| | 1.15.1 | 1.15.2 | via |
+|---|---|---|---|
+| cyrius | 6.6.2 | **6.6.6** | `[package].cyrius` |
+| libro | 2.9.0 | **2.10.3** | `[deps.libro]` |
+| sigil (thin) | 3.12.9 | **3.12.18** | libro's pin |
+| patra | 1.14.1 | **1.14.3** | stdlib fold |
+| sakshi | 2.5.1 | **2.5.2** | stdlib fold |
+
+### Changed
+
+- **`[package].cyrius` `6.6.2` → `6.6.6`** in `cyrius.cyml` and
+  `qemu/helpers/cyrius.cyml`.
+- **`[deps.libro]` `2.9.0` → `2.10.3`.** The 6.6.6 fold agrees with every pin:
+  `lib/libro.cyr`, `lib/sigil-mldsa.cyr`, `lib/patra.cyr` and `lib/sakshi.cyr`
+  are byte-identical to the `dist/` files of libro 2.10.3, sigil 3.12.18,
+  patra 1.14.3 and sakshi 2.5.2.
+- **`cyrius.lock` 58 → 60 entries**, still 3 commit-pinned. New leaves:
+  `lib/sys.cyr` (libro 2.10.2's sidecar) and `lib/alloc_cx.cyr` (a 6.6.6 stdlib
+  peer). The lock is now sorted and ends with a `cyrius 6.6.6` record, both
+  6.6.x formats, so most of this diff is a one-time reorder.
+- **`cyrius.cyml` 96 → 56 lines.** Its comments had become a ledger:
+  retirement stories with version numbers, source sizes measured under 6.5.35,
+  and a warning about two manifest-scanner quirks that cyrius fixed before
+  6.6.2. The history is already in this file (1.8.1, 1.8.3, 1.8.5), and current
+  figures now live in `docs/development/state.md`. Two rules stay, each
+  re-checked at 6.6.6:
+  - **Never name `"sigil"` in the stdlib array.** It still pulls the monolith:
+    28,084 lines of source against 5,698 for the thin surface. The x86_64
+    binary grows 403,672 → **900,472 B**, with a 444,496 B static-data warning
+    and 233 duplicate-fn warnings.
+  - **sakshi and patra come from the fold**, and the comment now says the
+    `refusing to overwrite stdlib leaf 'patra'` warning on every build is
+    expected. libro also resolves patra as a package, and since cyrius 6.5.39 a
+    dependency cannot overwrite a declared stdlib leaf, so the fold's copy wins.
+    At this pin the two copies are byte-identical anyway.
+
+  The note on why `atomic`, `sync` and `test` are left out was dropped because
+  it no longer holds: naming them at 6.6.6 changes nothing (same 60-entry lock,
+  same 2,428 unreachable fns, same binary).
+- **CLAUDE.md**: the rule that told each pin bump to record itself "as a comment
+  next to the code the constraint binds" now says such a comment states only
+  the rule in force. History goes in the CHANGELOG and figures in `state.md`.
+  That sentence is how the manifest turned into a ledger one bump at a time.
+- **qemu L3 helper re-cut under 6.6.6**, 18,456 → 10,456 B. `cyrius deps` now
+  copies `syscalls`' transitive closure into `qemu/helpers/lib/` (`alloc` and
+  its peers, `atomic`, `fnptr`), so seven new files land there. The helper
+  still names only `syscalls`, and it still prints the harmless
+  `undefined function 'alloc'` warning.
+- **`tests/tcyr/audit_lifecycle.tcyr`**: the per-record allocation ceiling
+  drops 192 → **32** bytes (see Performance). Checked with teeth: the tightened
+  assertion fails (23 / 24) against libro 2.9.0 under 6.6.6.
+- **`src/audit.cyr`, comments only.** The block above `audit_log_record` said
+  kybernet's MEDIUM-10 was still open and quoted libro 2.8.12's 224-byte cost;
+  it now states the current 16 bytes. A note on the returned hash's lifetime
+  is added — see below.
+
+### Security
+
+- **LOW, inherited from patra 1.14.3: on aarch64, a symlinked audit database or
+  WAL path was followed.** patra's `O_NOFOLLOW` carried the x86_64 value, which
+  is a different flag on aarch64. On an aarch64 build with
+  `config.audit_persist` enabled (default off), `patrastore_open` →
+  `patra_open` followed a symlink planted at the `.patra` path or at the WAL
+  that recovery replays. patra now takes the per-architecture value
+  from the stdlib (cyrius ≥ 6.6.4), so such a path is refused on aarch64, as it
+  always was on x86_64. Exploiting it needed write access to the audit-log
+  directory. patra's truncating open is in `wal_start`, which neither argonaut
+  nor libro reaches. The same release makes the WAL directory fsync actually
+  run on aarch64.
+- **Nothing else on the linked path.** sigil 3.12.10–3.12.18's fixes (LUKS
+  keyfile `O_NOFOLLOW`, dm-verity / cryptsetup / TPM fail-open propagation,
+  Argon2 SIGFPE and overflow, `agnosys_uname`) all sit outside the four thin
+  bundles argonaut links. Across that range those bundles change only in
+  whitespace and a version header. sakshi 2.5.2 has no source change.
+
+### ⚠ The head hash `audit_log_record` returns now has a lifetime
+
+On a streaming chain (the default) the hash comes from libro 2.10.0's two-slot
+scratch. It stays valid until the **second** subsequent append to the same
+chain; under libro 2.9.0 it was a fresh allocation that never changed. Nothing
+in argonaut or kybernet keeps it, so nothing breaks, but a consumer that stores
+it must copy it. A retaining chain is unaffected.
+
+### Performance
+
+Gate: `1.15.1-baseline` → `1.15.2-cyrius-6.6.6`. The baseline is the untouched
+1.15.1 tree on 6.6.2, recorded this cycle because the prior label,
+`1.13.2-exec-bounded`, was four releases old. The dev host's clocksource is
+HPET, so the two bench binaries were also run interleaved, 8 rounds each,
+pinned to one core. Medians:
+
+| | 1.15.1 (6.6.2) | 1.15.2 (6.6.6) | Δ |
+|---|---:|---:|---:|
+| **audit_log_record** | **7.213 µs** | **4.383 µs** | **−2.830 (−39 %)** |
+| resolve_order_chain_50 ⚠ | 110.316 µs | 90.952 µs | −19.364 |
+| resolve_order_chain_100 ⚠ | 232.963 µs | 213.245 µs | −19.718 |
+| resolve_waves_chain_20 | 64.392 µs | 59.004 µs | −5.389 |
+| mark_all_steps_complete | 45.648 µs | 45.578 µs | −0.070 |
+| init_new_desktop | 23.244 µs | 23.170 µs | −0.074 |
+| generate_tmpfile_cmds_20 | 12.729 µs | 12.853 µs | +0.123 |
+| resolve_waves_wide_20 | 13.150 µs | 13.611 µs | +0.461 |
+
+**Verdict: win / neutral.** No micro is slower beyond noise; the largest
+increase is +0.461 µs.
+
+- **`audit_log_record` −39 %, and arena bytes per record 176 → 16.** Both come
+  from libro 2.10.0's allocation-free canonical-JSON emitter and reused
+  streaming scratch. The time ranges do not overlap (6.81–7.43 µs against
+  4.19–4.41 µs). The 16 bytes left is the `details` box argonaut itself
+  allocates, so kybernet's MEDIUM-10 — per-record growth in an arena PID 1
+  never resets — is closed on libro's side.
+- ⚠ **`resolve_order_chain_*` is noise-bound on this host, in both directions.**
+  A first, unpinned A/B read `chain_50` 13.7 µs *slower*; the pinned rerun
+  reads it 19.4 µs *faster*, and the 6.6.2 binary alone spans 88.7–158.2 µs.
+  Neither direction is claimed. Its stdlib did not change behaviour on
+  x86_64: `hashmap` and `str` are byte-identical, and the `vec` / `alloc`
+  diffs are include lines and comments.
+- ⚠ **cyrius 6.6.5 reworked `lib/bench.cyr`, and the CSV changes meaning at this
+  label.** min/max now come only from windows the clock resolves to 1 %, and
+  otherwise report the mean. On this host (clock error ~2.3 µs) that is every
+  row. From `1.15.2-cyrius-6.6.6` on, `min_us` and `max_us` mostly equal
+  `avg_us`, and occasionally hold a single outlier window (`init_new_desktop`
+  min = max = 10.134 ms). Compare `avg_us` only across this boundary. The
+  rework also removed a per-window clamp that biased averages upward, so the
+  sub-µs micros read lower at 6.6.6 partly by construction; no win is claimed
+  for them.
+- **Binary sizes**, attributed by also building the 1.15.1 tree under 6.6.6:
+
+  | | 1.15.1 | + toolchain | 1.15.2 |
+  |---|---:|---:|---:|
+  | x86_64 DCE | 398,912 | 399,552 (+640) | **403,672** (+4,120 libro) |
+  | aarch64 | 1,566,096 | 1,697,768 (+131,672) | **1,697,792** (+24 libro) |
+
+  The aarch64 growth is the toolchain's: 6.6.5 routes x86_64 syscall numbers on
+  aarch64, at roughly 224 B per syscall site by cyrius's own count.
+
+### Verified
+
+- `cyrius deps --verify` 60 / 0; lint, `fmt --check` and vet clean over every
+  file CI gates; `--check-lib-sync` DCE build; ELF check; x86_64 and
+  qemu-aarch64 smoke.
+- 33 suites / **971 assertions**, 0 failures, native x86_64 and under
+  qemu-aarch64 (`scripts/aarch64-sweep.sh`, 33 / 33).
+- **qemu PID-1 harness under KVM**: `m3 ok`, `l3 marker: sid=59 pid=59`,
+  `l3 ok`, `done` with the re-cut L3 helper, and the supervisor-loop smoke
+  reaches `pid1 loop ready`. ⚠ **Only at `-m 512M`.** At the scripts' committed
+  `-m 256M` argonaut exits 1 before `main` with `alloc_init: mmap failed`, and
+  **the released 1.15.1 binary fails identically**, so this predates 1.15.2.
+  The cause is upstream: cyrius's heap reserves 256 MB in one mapping. Details
+  in `state.md` In-flight.
+
+## [1.15.1] — 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.35` → `6.6.2`.** Migrated to the `Result` value form:
+  2 first-party file(s) changed. Every surface re-verified — build, tests, and any
+  bench/fuzz/distlib target the repo ships.
+
 ## [1.15.0] — 2026-08-27
 
 **`audit_log_record` adopts libro 2.9.0's `chain_append_nokeep`.** Minor because its
@@ -3534,13 +3700,3 @@ All pre-1.0 features complete: boot sequencing, service lifecycle (simple/forkin
 Features implemented in the original Rust codebase (v0.2.0–v0.9.0) and ported to Cyrius at v0.95.0. See `docs/benchmarks-rust-baseline.md` for Rust performance comparison. The Rust source was removed at v0.96.1.
 
 Key milestones: v0.2.0 (hardening, `forbid(unsafe_code)`), v0.3.0 (process execution, ProcessTable), v0.4.0 (health check execution), v0.5.0 (runlevel switching), v0.6.0 (edge boot execution), v0.7.0 (API, audit, systemd integration), v0.8.0 (service types, resource limits, log rotation), v0.9.0 (seccomp, Landlock, capabilities, tmpfiles).
-
-## [Unreleased]
-
-## [1.15.1] - 2026-09-11
-
-### Changed
-
-- **Toolchain `6.5.35` → `6.6.2`.** Migrated to the `Result` value form:
-  2 first-party file(s) changed. Every surface re-verified — build, tests, and any
-  bench/fuzz/distlib target the repo ships.
