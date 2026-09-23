@@ -11,15 +11,6 @@ cyrius = "6.6.6"
 entry = "src/main.cyr"
 output = "build/argonaut"
 
-# Stdlib modules `cyrius deps` copies into lib/.
-#
-# sakshi and patra come from the stdlib fold and follow the `cyrius` pin.
-# libro also resolves patra as a package; cyrius keeps this copy, so the
-# "refusing to overwrite stdlib leaf 'patra'" build warning is expected.
-#
-# Never add "sigil": that name is the monolithic bundle (x509, RSA,
-# authenticode), none of which the audit chain reaches. libro's `deps.sigil`
-# block already resolves the thin sub-bundles argonaut links.
 [deps]
 stdlib = [
     "string",

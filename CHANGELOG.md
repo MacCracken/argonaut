@@ -18,7 +18,7 @@ regression.
 |---|---|---|---|
 | cyrius | 6.6.2 | **6.6.6** | `[package].cyrius` |
 | libro | 2.9.0 | **2.10.3** | `[deps.libro]` |
-| sigil (thin) | 3.12.9 | **3.12.18** | libro's pin |
+| sigil | 3.12.9 | **3.12.18** | libro's pin |
 | patra | 1.14.1 | **1.14.3** | stdlib fold |
 | sakshi | 2.5.1 | **2.5.2** | stdlib fold |
 
@@ -26,33 +26,17 @@ regression.
 
 - **`[package].cyrius` `6.6.2` → `6.6.6`** in `cyrius.cyml` and
   `qemu/helpers/cyrius.cyml`.
-- **`[deps.libro]` `2.9.0` → `2.10.3`.** The 6.6.6 fold agrees with every pin:
-  `lib/libro.cyr`, `lib/sigil-mldsa.cyr`, `lib/patra.cyr` and `lib/sakshi.cyr`
-  are byte-identical to the `dist/` files of libro 2.10.3, sigil 3.12.18,
-  patra 1.14.3 and sakshi 2.5.2.
+- **`[deps.libro]` `2.9.0` → `2.10.3`.** Every resolved library matches its
+  upstream release byte-for-byte: `lib/libro.cyr`, `lib/sigil-mldsa.cyr`,
+  `lib/patra.cyr` and `lib/sakshi.cyr` equal the `dist/` files of libro 2.10.3,
+  sigil 3.12.18, patra 1.14.3 and sakshi 2.5.2.
 - **`cyrius.lock` 58 → 60 entries**, still 3 commit-pinned. New leaves:
   `lib/sys.cyr` (libro 2.10.2's sidecar) and `lib/alloc_cx.cyr` (a 6.6.6 stdlib
   peer). The lock is now sorted and ends with a `cyrius 6.6.6` record, both
   6.6.x formats, so most of this diff is a one-time reorder.
-- **`cyrius.cyml` 96 → 56 lines.** Its comments had become a ledger:
-  retirement stories with version numbers, source sizes measured under 6.5.35,
-  and a warning about two manifest-scanner quirks that cyrius fixed before
-  6.6.2. The history is already in this file (1.8.1, 1.8.3, 1.8.5), and current
-  figures now live in `docs/development/state.md`. Two rules stay, each
-  re-checked at 6.6.6:
-  - **Never name `"sigil"` in the stdlib array.** It still pulls the monolith:
-    28,084 lines of source against 5,698 for the thin surface. The x86_64
-    binary grows 403,672 → **900,472 B**, with a 444,496 B static-data warning
-    and 233 duplicate-fn warnings.
-  - **sakshi and patra come from the fold**, and the comment now says the
-    `refusing to overwrite stdlib leaf 'patra'` warning on every build is
-    expected. libro also resolves patra as a package, and since cyrius 6.5.39 a
-    dependency cannot overwrite a declared stdlib leaf, so the fold's copy wins.
-    At this pin the two copies are byte-identical anyway.
-
-  The note on why `atomic`, `sync` and `test` are left out was dropped because
-  it no longer holds: naming them at 6.6.6 changes nothing (same 60-entry lock,
-  same 2,428 unreachable fns, same binary).
+- **`cyrius.cyml` is a plain manifest, 96 → 45 lines, no comments.** They had
+  become a ledger of problems long since fixed; the history is already in this
+  file (1.8.1, 1.8.3, 1.8.5). The dependency list itself is unchanged.
 - **CLAUDE.md**: the rule that told each pin bump to record itself "as a comment
   next to the code the constraint binds" now says such a comment states only
   the rule in force. History goes in the CHANGELOG and figures in `state.md`.
@@ -83,11 +67,10 @@ regression.
   directory. patra's truncating open is in `wal_start`, which neither argonaut
   nor libro reaches. The same release makes the WAL directory fsync actually
   run on aarch64.
-- **Nothing else on the linked path.** sigil 3.12.10–3.12.18's fixes (LUKS
+- **Nothing else reaches argonaut.** sigil 3.12.10–3.12.18's fixes (LUKS
   keyfile `O_NOFOLLOW`, dm-verity / cryptsetup / TPM fail-open propagation,
-  Argon2 SIGFPE and overflow, `agnosys_uname`) all sit outside the four thin
-  bundles argonaut links. Across that range those bundles change only in
-  whitespace and a version header. sakshi 2.5.2 has no source change.
+  Argon2 SIGFPE and overflow, `agnosys_uname`) are in code argonaut does not
+  call. sakshi 2.5.2 has no source change.
 
 ### ⚠ The head hash `audit_log_record` returns now has a lifetime
 
