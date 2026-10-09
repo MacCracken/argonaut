@@ -210,3 +210,13 @@ Retained for historical context.
   when)
 - **D-Bus interface** — only if AGNOS desktop requires it
 - **Timer-based services** — that's samay's domain
+
+## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
+
+cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
+applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
+6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
+
+- **(information, cyrius ≥ 6.6.16)** `src/syscall_compat.cyr` (~59): the comment "No stdlib wrapper
+  (sys_setsockopt has no peer)" is stale — `sys_setsockopt` resolves on every target since 6.6.16 (the agnos and
+  Windows peers decline with -38).
