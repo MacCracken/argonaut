@@ -23,7 +23,7 @@ fn boot_mode_str(mode) {
     return "unknown";
 }
 
-# Inverse of boot_mode_str. See restart_policy_parse for the rationale.
+# Inverse of boot_mode_str. See argonaut_restart_policy_parse for the rationale.
 fn boot_mode_parse(s) {
     if (str_eq_cstr(s, "server") == 1)   { return Ok(BOOT_SERVER); }
     if (str_eq_cstr(s, "desktop") == 1)  { return Ok(BOOT_DESKTOP); }
@@ -119,10 +119,16 @@ fn boot_step_new(stage, desc, required, timeout_ms) {
 # Restart policy
 # =========================================================================
 
+# Values are explicit and identical to agnostik's RestartPolicy (NEVER = 0,
+# ALWAYS = 1, ON_FAILURE = 2). kybernet compiles argonaut and agnostik into
+# one unit, where the two same-named enums meet and one value per constant
+# silently wins, so they must agree. Nothing here depends on the numbers:
+# every service definition sets its policy explicitly, and no serialized
+# struct carries it.
 enum RestartPolicy {
-    RESTART_ALWAYS;
-    RESTART_ON_FAILURE;
-    RESTART_NEVER;
+    RESTART_NEVER = 0;
+    RESTART_ALWAYS = 1;
+    RESTART_ON_FAILURE = 2;
 }
 
 fn restart_policy_str(p) {
@@ -133,7 +139,10 @@ fn restart_policy_str(p) {
 }
 
 # Inverse of restart_policy_str. Takes a Str, returns Ok(policy) or
-# Err(EINVAL).
+# Err(EINVAL). Named with the `argonaut_` prefix, unlike the other `*_parse`
+# here, because agnostik owns `restart_policy_parse` for its own PascalCase
+# spelling ("OnFailure"); kybernet links both, and a same-name, same-arity fn
+# is silently replaced by whichever definition comes last.
 #
 # Every enum here had a `*_str` and no inverse, so each consumer that reads
 # a service definition out of config had to hand-roll its own string ->
@@ -144,7 +153,7 @@ fn restart_policy_str(p) {
 # unrecognised string is an error, not a silent fallback to a default
 # policy, so a typo in config surfaces instead of quietly becoming
 # RESTART_ALWAYS.
-fn restart_policy_parse(s) {
+fn argonaut_restart_policy_parse(s) {
     if (str_eq_cstr(s, "always") == 1)     { return Ok(RESTART_ALWAYS); }
     if (str_eq_cstr(s, "on-failure") == 1) { return Ok(RESTART_ON_FAILURE); }
     if (str_eq_cstr(s, "never") == 1)      { return Ok(RESTART_NEVER); }
@@ -218,7 +227,7 @@ fn health_check_type_str(t) {
     return "unknown";
 }
 
-# Inverse of health_check_type_str. See restart_policy_parse for rationale.
+# Inverse of health_check_type_str. See argonaut_restart_policy_parse for rationale.
 fn health_check_type_parse(s) {
     if (str_eq_cstr(s, "http") == 1)          { return Ok(HC_HTTP_GET); }
     if (str_eq_cstr(s, "tcp") == 1)           { return Ok(HC_TCP_CONNECT); }
@@ -323,7 +332,7 @@ fn service_type_str(t) {
     return "unknown";
 }
 
-# Inverse of service_type_str. See restart_policy_parse for the rationale.
+# Inverse of service_type_str. See argonaut_restart_policy_parse for the rationale.
 fn service_type_parse(s) {
     if (str_eq_cstr(s, "simple") == 1)  { return Ok(SVC_SIMPLE); }
     if (str_eq_cstr(s, "forking") == 1) { return Ok(SVC_FORKING); }
@@ -493,10 +502,14 @@ enum SocketType {
 # Seccomp action
 # =========================================================================
 
+# Values are explicit and identical to the same constants in agnostik's
+# SeccompAction (KILL = 1, TRAP = 3, LOG = 4), for the same reason as
+# RestartPolicy: the two enums meet in kybernet's unit. agnostik's also has
+# ALLOW, KILL_PROCESS and NOTIFY.
 enum SeccompAction {
-    SECCOMP_KILL;
-    SECCOMP_TRAP;
-    SECCOMP_LOG;
+    SECCOMP_KILL = 1;
+    SECCOMP_TRAP = 3;
+    SECCOMP_LOG = 4;
 }
 
 # =========================================================================

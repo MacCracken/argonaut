@@ -7,6 +7,70 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+**`RestartPolicy` and `SeccompAction` are value-identical to agnostik's, and the restart-policy
+parser is renamed `argonaut_restart_policy_parse`, so argonaut and agnostik stop colliding inside
+kybernet.**
+
+### Why
+
+kybernet compiles argonaut and agnostik into one unit. Both libraries define `enum RestartPolicy`
+and `enum SeccompAction` with the same constant names but different values:
+
+| Constant | argonaut 1.15.3 | agnostik |
+|---|---:|---:|
+| `RESTART_ALWAYS` | 0 | 1 |
+| `RESTART_ON_FAILURE` | 1 | 2 |
+| `RESTART_NEVER` | 2 | 0 |
+| `SECCOMP_KILL` | 0 | 1 |
+| `SECCOMP_TRAP` | 1 | 3 |
+| `SECCOMP_LOG` | 2 | 4 |
+
+In that unit one value per constant silently wins, with no warning. kybernet works today only
+because both libraries compare these constants by name, never by number. agnostik 1.8.0 also adds
+`restart_policy_name` / `restart_policy_parse`, its F-018 pair, spelled `"OnFailure"`. argonaut's
+own one-argument `restart_policy_parse`, spelled `"on-failure"`, would then collide by name, and
+whichever definition came last would silently replace the other. agnostik's consumer sweep flagged
+exactly that in kybernet. This is the same lockstep as argonaut 1.11.0's `LinuxCapability`
+correction against agnostik 1.5.0.
+
+### Changed
+
+- `enum RestartPolicy` is now explicit and in agnostik's order: `RESTART_NEVER = 0`,
+  `RESTART_ALWAYS = 1`, `RESTART_ON_FAILURE = 2`. Nothing in argonaut depends on the numbers:
+  `svc_def_new` and every service built in `src/services.cyr` set the policy explicitly, and
+  `ServiceDefinition` is not a serialized struct, so no wire format changes. kybernet's own tests
+  pin `RESTART_NEVER` by name.
+- `enum SeccompAction` is now explicit, with agnostik's values: `SECCOMP_KILL = 1`,
+  `SECCOMP_TRAP = 3`, `SECCOMP_LOG = 4`. Nothing in argonaut uses these constants.
+
+### Breaking (one fn rename)
+
+- `restart_policy_parse` → **`argonaut_restart_policy_parse`**: same signature, same spelling
+  (`"always"`, `"on-failure"`, `"never"`), and still `Err(EINVAL)` on anything else. The prefix
+  follows agnostik 1.6.1's `health_check_new` → `agnostik_health_check_new`. **Migration:**
+  rename the call. kybernet's one call site is `src/lib/svc_config.cyr:530`.
+  ⚠ A consumer that also links agnostik 1.8.0+ and keeps the old name still **compiles**: the call
+  silently binds to agnostik's PascalCase parser, and every `"on-failure"` in a config fails to
+  parse. Rename the call in the same change that takes this release.
+
+### Tests
+
+`tests/tcyr/enum_parse.tcyr` calls the renamed parser and gains a lockstep block. It pins the six
+values to agnostik's and checks that `svc_def_new` still defaults to on-failure. 33 test files,
+**984 assertions, 0 failures** (976 before). Lint and fmt are clean; `cyrius vet` and
+`cyrius deps --verify` pass, 60 of 60. DCE build 403,736 B.
+
+### Verified downstream, before any release
+
+A scratch kybernet resolved this tree and the in-flight agnostik 1.8.0 (with its `RestartPolicy`
+pair) through `path` deps, with both vendored copies checked byte-identical to the sources.
+- **With the call renamed:** it builds with no duplicate or conflicting-value warning for these
+  names, and passes 876 of 876.
+- **With the call left unrenamed:** it still builds, and its config tests fail ("two services
+  parsed: got 1, expected 2"). That is the hazard the Breaking note describes.
+
 ## [1.15.3] — 2026-09-23
 
 **The desktop compositor now waits for its socket directories.**

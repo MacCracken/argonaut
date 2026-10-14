@@ -19,34 +19,34 @@ fn main() {
     # Err returned EINVAL, and only the value comparison stood between that and
     # a green test. `is_ok(t)` is free here, so the parse result is checked for
     # being Ok as well as for carrying the right member.
-    var rp_a_t, rp_a_v = restart_policy_parse(str_from("always"));
+    var rp_a_t, rp_a_v = argonaut_restart_policy_parse(str_from("always"));
     assert(is_ok(rp_a_t) == 1, "rp always is Ok");
     assert_eq(rp_a_v, RESTART_ALWAYS, "rp always");
-    var rp_f_t, rp_f_v = restart_policy_parse(str_from("on-failure"));
+    var rp_f_t, rp_f_v = argonaut_restart_policy_parse(str_from("on-failure"));
     assert(is_ok(rp_f_t) == 1, "rp on-failure is Ok");
     assert_eq(rp_f_v, RESTART_ON_FAILURE, "rp on-failure");
-    var rp_n_t, rp_n_v = restart_policy_parse(str_from("never"));
+    var rp_n_t, rp_n_v = argonaut_restart_policy_parse(str_from("never"));
     assert(is_ok(rp_n_t) == 1, "rp never is Ok");
     assert_eq(rp_n_v, RESTART_NEVER, "rp never");
     # Round-trip through _str for every member — this is the property that
     # keeps the two directions from drifting apart.
-    var rt_a_t, rt_a_v = restart_policy_parse(str_from(restart_policy_str(RESTART_ALWAYS)));
+    var rt_a_t, rt_a_v = argonaut_restart_policy_parse(str_from(restart_policy_str(RESTART_ALWAYS)));
     assert(is_ok(rt_a_t) == 1, "rp roundtrip always is Ok");
     assert_eq(rt_a_v, RESTART_ALWAYS, "rp roundtrip always");
-    var rt_f_t, rt_f_v = restart_policy_parse(str_from(restart_policy_str(RESTART_ON_FAILURE)));
+    var rt_f_t, rt_f_v = argonaut_restart_policy_parse(str_from(restart_policy_str(RESTART_ON_FAILURE)));
     assert(is_ok(rt_f_t) == 1, "rp roundtrip on-failure is Ok");
     assert_eq(rt_f_v, RESTART_ON_FAILURE, "rp roundtrip on-failure");
-    var rt_n_t, rt_n_v = restart_policy_parse(str_from(restart_policy_str(RESTART_NEVER)));
+    var rt_n_t, rt_n_v = argonaut_restart_policy_parse(str_from(restart_policy_str(RESTART_NEVER)));
     assert(is_ok(rt_n_t) == 1, "rp roundtrip never is Ok");
     assert_eq(rt_n_v, RESTART_NEVER, "rp roundtrip never");
 
     # An unrecognised string must ERROR, not fall back to a default policy —
     # a typo in config has to surface, not silently become RESTART_ALWAYS.
     # A 1-argument call receives rax, which IS the tag, so these stay as-is.
-    assert(is_err_result(restart_policy_parse(str_from("Always"))) == 1, "rp rejects case variant");
-    assert(is_err_result(restart_policy_parse(str_from("on_failure"))) == 1, "rp rejects underscore");
-    assert(is_err_result(restart_policy_parse(str_from(""))) == 1, "rp rejects empty");
-    assert(is_err_result(restart_policy_parse(str_from("unknown"))) == 1, "rp rejects _str fallback");
+    assert(is_err_result(argonaut_restart_policy_parse(str_from("Always"))) == 1, "rp rejects case variant");
+    assert(is_err_result(argonaut_restart_policy_parse(str_from("on_failure"))) == 1, "rp rejects underscore");
+    assert(is_err_result(argonaut_restart_policy_parse(str_from(""))) == 1, "rp rejects empty");
+    assert(is_err_result(argonaut_restart_policy_parse(str_from("unknown"))) == 1, "rp rejects _str fallback");
 
     # --- service type ---
     var st_s_t, st_s_v = service_type_parse(str_from("simple"));
@@ -132,6 +132,24 @@ fn main() {
     assert_eq(init_start_service(i2, "os-dep"), 0, "dep: oneshot completes (returns 0)");
     assert_eq(init_get_service_state(i2, "os-dep"), STATE_STOPPED, "dep: oneshot ends STOPPED");
     assert_eq(init_set_service_state(i2, "os-user", STATE_STARTING), 1, "dep: completed oneshot satisfies");
+
+    # --- agnostik lockstep (RestartPolicy, SeccompAction) ---
+    #
+    # kybernet compiles argonaut and agnostik into one unit, where these
+    # same-named enums meet and one value per constant silently wins. The
+    # values must therefore equal agnostik's, pinned here: RestartPolicy as in
+    # agnostik's src/agent.cyr, SeccompAction as in its src/security.cyr.
+    assert_eq(RESTART_NEVER, 0, "lockstep: RESTART_NEVER = 0 (agnostik)");
+    assert_eq(RESTART_ALWAYS, 1, "lockstep: RESTART_ALWAYS = 1 (agnostik)");
+    assert_eq(RESTART_ON_FAILURE, 2, "lockstep: RESTART_ON_FAILURE = 2 (agnostik)");
+    assert_eq(SECCOMP_KILL, 1, "lockstep: SECCOMP_KILL = 1 (agnostik)");
+    assert_eq(SECCOMP_TRAP, 3, "lockstep: SECCOMP_TRAP = 3 (agnostik)");
+    assert_eq(SECCOMP_LOG, 4, "lockstep: SECCOMP_LOG = 4 (agnostik)");
+    # The defaults that matter are set explicitly, so they hold under the
+    # renumbering: svc_def_new defaults to on-failure.
+    var lk = svc_def_new(str_from("lk"), str_from("t"), str_from("/bin/true"));
+    assert_eq(svc_def_restart_policy(lk), RESTART_ON_FAILURE, "lockstep: svc_def_new default on-failure");
+    assert(streq(restart_policy_str(svc_def_restart_policy(lk)), "on-failure"), "lockstep: default renders on-failure");
 
     return assert_summary();
 }
