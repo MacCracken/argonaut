@@ -7,7 +7,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [1.15.4] — 2026-10-14
 
 **`RestartPolicy` and `SeccompAction` are value-identical to agnostik's, and the restart-policy
 parser is renamed `argonaut_restart_policy_parse`, so argonaut and agnostik stop colliding inside
@@ -28,10 +28,11 @@ and `enum SeccompAction` with the same constant names but different values:
 | `SECCOMP_LOG` | 2 | 4 |
 
 In that unit one value per constant silently wins, with no warning. kybernet works today only
-because both libraries compare these constants by name, never by number. agnostik 1.8.0 also adds
+because both libraries compare these constants by name, never by number. agnostik is also adding
 `restart_policy_name` / `restart_policy_parse`, its F-018 pair, spelled `"OnFailure"`. argonaut's
-own one-argument `restart_policy_parse`, spelled `"on-failure"`, would then collide by name, and
-whichever definition came last would silently replace the other. agnostik's consumer sweep flagged
+own one-argument `restart_policy_parse`, spelled `"on-failure"`, would collide with it by name,
+and whichever definition came last would silently replace the other. agnostik holds the pair back
+(it is not in agnostik 1.8.0) until kybernet takes this release. agnostik's consumer sweep flagged
 exactly that in kybernet. This is the same lockstep as argonaut 1.11.0's `LinuxCapability`
 correction against agnostik 1.5.0.
 
@@ -51,7 +52,9 @@ correction against agnostik 1.5.0.
   (`"always"`, `"on-failure"`, `"never"`), and still `Err(EINVAL)` on anything else. The prefix
   follows agnostik 1.6.1's `health_check_new` → `agnostik_health_check_new`. **Migration:**
   rename the call. kybernet's one call site is `src/lib/svc_config.cyr:530`.
-  ⚠ A consumer that also links agnostik 1.8.0+ and keeps the old name still **compiles**: the call
+  ⚠ Against agnostik ≤ 1.8.x, keeping the old name fails the build (`undefined function`). Once
+  agnostik adds its own `restart_policy_parse` (planned after kybernet moves), a consumer that keeps
+  the old name still **compiles**: the call
   silently binds to agnostik's PascalCase parser, and every `"on-failure"` in a config fails to
   parse. Rename the call in the same change that takes this release.
 
@@ -62,14 +65,49 @@ values to agnostik's and checks that `svc_def_new` still defaults to on-failure.
 **984 assertions, 0 failures** (976 before). Lint and fmt are clean; `cyrius vet` and
 `cyrius deps --verify` pass, 60 of 60. DCE build 403,736 B.
 
-### Verified downstream, before any release
+### Performance
 
-A scratch kybernet resolved this tree and the in-flight agnostik 1.8.0 (with its `RestartPolicy`
-pair) through `path` deps, with both vendored copies checked byte-identical to the sources.
-- **With the call renamed:** it builds with no duplicate or conflicting-value warning for these
-  names, and passes 876 of 876.
-- **With the call left unrenamed:** it still builds, and its config tests fail ("two services
-  parsed: got 1, expected 2"). That is the hazard the Breaking note describes.
+The bench gate, `./scripts/bench-history.sh "1.15.4-agnostik-lockstep"`, ran against
+`1.15.3-agnos-init` at load 0.9. **Neutral.** 26 of 29 micros are within ±2 µs. Three read slower
+beyond it:
+
+| bench | 1.15.3 | 1.15.4 gate | Δ |
+|---|---:|---:|---:|
+| `resolve_waves_wide_20` | 11.881 µs | 14.606 µs | +2.725 µs |
+| `resolve_order_chain_50` | 86.571 µs | 90.122 µs | +3.551 µs |
+| `resolve_order_chain_100` | 189.686 µs | 196.775 µs | +7.089 µs |
+
+They are run-to-run noise, not a regression:
+- The 1.15.3 and 1.15.4 bench binaries (`CYRIUS_DCE=1` builds of `src/bench_main.cyr`) are
+  **byte-identical**: 0 differing bytes. The renumbered constants and the renamed parser reach no
+  benchmarked path.
+- 18 runs of that one binary span 11.757–16.065 µs, 85.577–94.734 µs and 189.843–203.534 µs on
+  these three. Both the 1.15.3 row and this gate run fall inside those ranges.
+
+### Verification
+
+- **Tests:** 33 suites, **984 assertions, 0 failures** on x86_64. The aarch64 sweep under
+  qemu-user (`scripts/aarch64-sweep.sh`) gives 33 of 33 and 984, within the known-failure budget.
+- **Clean build**, from a fresh copy of the tree with no `build/`: `cyrius deps` and
+  `cyrius deps --verify` give 60 of 60. `CYRIUS_DCE=1 cyrius build --check-lib-sync` gives
+  **403,736 B** (+64 B over 1.15.3), and aarch64 gives 1,697,848 B (+56 B). Lint, fmt and
+  `cyrius vet` are clean.
+- **Version:** `VERSION` reads 1.15.4, and `cyrius.cyml` reads it through `${file:VERSION}`.
+
+### Downstream: kybernet
+
+kybernet pins argonaut 1.15.3 and agnostik 1.6.3. A scratch kybernet resolved this release through
+a `path` dep, with the vendored copy checked byte-identical to the source:
+
+| kybernet setup | Result |
+|---|---|
+| argonaut 1.15.4 + agnostik 1.6.3, call renamed | builds (1,616,776 B, unchanged), **876 / 876** |
+| argonaut 1.15.4 + agnostik 1.6.3, call **not** renamed | **build fails loudly**: `undefined function 'restart_policy_parse'` |
+| argonaut 1.15.4 + agnostik with its planned `RestartPolicy` pair (in-flight tree), call renamed | builds with no duplicate or conflicting-value warning, **876 / 876** |
+| argonaut 1.15.4 + agnostik with that pair, call **not** renamed | builds, but config tests fail ("two services parsed: got 1, expected 2"): the silent case in the Breaking note |
+
+So taking this release is a two-line change in kybernet: bump `[deps.argonaut]` to `1.15.4`, and
+rename the call in `src/lib/svc_config.cyr:530`.
 
 ## [1.15.3] — 2026-09-23
 

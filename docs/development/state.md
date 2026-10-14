@@ -6,6 +6,14 @@
 
 ## Version
 
+**1.15.4** (`RestartPolicy` and `SeccompAction` made value-identical to agnostik's,
+NEVER = 0 / ALWAYS = 1 / ON_FAILURE = 2 and KILL = 1 / TRAP = 3 / LOG = 4, because the
+two same-named enums meet in kybernet's unit. `restart_policy_parse` renamed
+`argonaut_restart_policy_parse` (Breaking: one fn), so agnostik can add its own
+F-018 pair. 33 suites / 984 assertions on x86_64 and under qemu-aarch64. Bench gate
+neutral: the bench binaries are byte-identical to 1.15.3's. kybernet takes it with a
+tag bump plus one renamed call.)
+
 **1.15.3** (`default_services(BOOT_DESKTOP)` adds an `agnos-init` oneshot and
 aethersafha `depends_on` it, so the compositor's `/run/agnos/{agents,plugins}`
 socket directories exist before it starts. The program ships in the kybernet package
@@ -479,12 +487,13 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **x86_64: 403,672 B** statically linked ELF
+- **x86_64: 403,736 B** statically linked ELF at 1.15.4
   (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`);
-  2,428 unreachable fns, 802,499 B of dead code eliminated. +4,760 over 1.15.1:
+  2,426 unreachable fns, 802,307 B of dead code eliminated. +64 over 1.15.3, which was
+  403,672 B with 2,428 fns / 802,499 B eliminated. +4,760 over 1.15.1:
   +640 toolchain, +4,120 libro 2.10.x (attributed by building the 1.15.1 tree
   under 6.6.6).
-- **aarch64: 1,697,792 B** (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`);
+- **aarch64: 1,697,848 B** at 1.15.4 (+56; 1,697,792 B at 1.15.3) (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`);
   2,429 unreachable fns, 1,137,584 B NOPed. +131,696 over 1.15.1, all but 24 B
   of it toolchain: 6.6.5 routes x86_64 syscall numbers on aarch64 at roughly
   224 B per syscall site.
@@ -495,9 +504,10 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Suites
 
-- **x86_64: 33 `.tcyr` suites / 976 assertions**, 0 failures (cyrius 6.6.6).
-- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 33 / 33, 976 assertions**,
-  identical to x86_64. Run on the dev host at 1.15.3; CI still runs the aarch64
+- **x86_64: 33 `.tcyr` suites / 984 assertions**, 0 failures (cyrius 6.6.6); +8 at
+  1.15.4, the agnostik-lockstep block in `enum_parse.tcyr`.
+- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 33 / 33, 984 assertions**,
+  identical to x86_64. Run on the dev host at 1.15.4; CI still runs the aarch64
   smoke only.
 - **qemu PID-1 harness** (`qemu/pid1-harness-test.sh`, `qemu/boot-test.sh`,
   KVM + `+invtsc`): M3 + L3 end-to-end and the supervisor-loop smoke pass at
@@ -747,9 +757,10 @@ are single runs.
 
 ## Pending release (unreleased)
 
-- **1.15.3** (staged in the working tree, not yet tagged) — aethersafha depends on
-  the new `agnos-init` desktop oneshot. See Version and CHANGELOG [1.15.3]. kybernet
-  consumes it in the release after its 1.7.6, which ships the `agnos-init` program.
+- **1.15.4** (cut in the working tree, not yet tagged): the agnostik lockstep. See
+  Version and CHANGELOG [1.15.4]. kybernet takes it by bumping `[deps.argonaut]` to
+  `1.15.4` and renaming its one `restart_policy_parse` call
+  (`src/lib/svc_config.cyr:530`) to `argonaut_restart_policy_parse`.
 
 ## Recent shipped
 
