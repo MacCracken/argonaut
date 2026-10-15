@@ -100,22 +100,21 @@ fn steps_has_stage(steps, stage) {
 
 fn svcs_has_name(svcs, name) {
     for (var i = 0; i < vec_len(svcs); i = i + 1) {
-        if (streq(str_data(svc_def_name(vec_get(svcs, i))), name)) { return 1; }
+        if (str_eq_cstr(svc_def_name(vec_get(svcs, i)), name)) { return 1; }
     }
     return 0;
 }
 
 fn order_pos(order, name) {
     for (var i = 0; i < vec_len(order); i = i + 1) {
-        if (streq(str_data(vec_get(order, i)), name)) { return i; }
+        if (str_eq_cstr(vec_get(order, i), name)) { return i; }
     }
     return 0 - 1;
 }
 
 fn vec_contains_str(v, s) {
-    var target = str_data(s);
     for (var i = 0; i < vec_len(v); i = i + 1) {
-        if (streq(str_data(vec_get(v, i)), target)) { return 1; }
+        if (str_eq(vec_get(v, i), s)) { return 1; }
     }
     return 0;
 }

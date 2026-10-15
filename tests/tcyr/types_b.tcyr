@@ -28,13 +28,13 @@ fn main() {
     var ainit_oneshot = 0;
     for (var di = 0; di < vec_len(dsk_v); di = di + 1) {
         var dsd = vec_get(dsk_v, di);
-        if (streq(str_data(svc_def_name(dsd)), "aethersafha")) {
+        if (str_eq_cstr(svc_def_name(dsd), "aethersafha")) {
             var cdeps = svc_def_deps(dsd);
             for (var dj = 0; dj < vec_len(cdeps); dj = dj + 1) {
-                if (streq(str_data(vec_get(cdeps, dj)), "agnos-init")) { comp_has_init = 1; }
+                if (str_eq_cstr(vec_get(cdeps, dj), "agnos-init")) { comp_has_init = 1; }
             }
         }
-        if (streq(str_data(svc_def_name(dsd)), "agnos-init")) {
+        if (str_eq_cstr(svc_def_name(dsd), "agnos-init")) {
             if (svc_def_service_type(dsd) == SVC_ONESHOT) { ainit_oneshot = 1; }
         }
     }

@@ -41,7 +41,7 @@ fn main() {
     assert(str_contains(u5, str_from("NotifyAccess=main")), "u na");
 
     # --- Systemd filename ---
-    assert(streq(str_data(generate_unit_filename(sd)), "web.service"), "u fn");
+    assert(str_eq_cstr(generate_unit_filename(sd), "web.service"), "u fn");
 
     # --- Tmpfiles: directory with chown ---
     var te = vec_new();
@@ -54,8 +54,8 @@ fn main() {
     vec_push(te, e1);
     var tc = generate_tmpfile_commands(te);
     assert_eq(vec_len(tc), 2, "d+c 2");
-    assert(streq(str_data(safe_cmd_binary(vec_get(tc, 0))), "mkdir"), "d cmd");
-    assert(streq(str_data(safe_cmd_binary(vec_get(tc, 1))), "chown"), "c cmd");
+    assert(str_eq_cstr(safe_cmd_binary(vec_get(tc, 0)), "mkdir"), "d cmd");
+    assert(str_eq_cstr(safe_cmd_binary(vec_get(tc, 1)), "chown"), "c cmd");
 
     # --- Tmpfiles: symlink ---
     var se = vec_new();
@@ -66,7 +66,7 @@ fn main() {
     vec_push(se, e2);
     var sc = generate_tmpfile_commands(se);
     assert_eq(vec_len(sc), 1, "s 1");
-    assert(streq(str_data(safe_cmd_binary(vec_get(sc, 0))), "ln"), "s ln");
+    assert(str_eq_cstr(safe_cmd_binary(vec_get(sc, 0)), "ln"), "s ln");
 
     # --- Tmpfiles: empty entries ---
     assert_eq(vec_len(generate_tmpfile_commands(vec_new())), 0, "mt 0");

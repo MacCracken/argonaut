@@ -10,26 +10,26 @@ fn main() {
     assert(vec_len(cmds) > 0, "rootfs cmds");
     # First command should be mount
     var c0 = vec_get(cmds, 0);
-    assert(streq(str_data(safe_cmd_binary(c0)), "mount"), "rootfs mount");
+    assert(str_eq_cstr(safe_cmd_binary(c0), "mount"), "rootfs mount");
 
     # --- verify_rootfs_integrity ---
     var hash = str_from("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
     var vcmds = verify_rootfs_integrity(str_from("/dev/sda1"), str_from("/dev/sda2"), hash);
     assert(vec_len(vcmds) > 0, "verity cmds");
     var vc0 = vec_get(vcmds, 0);
-    assert(streq(str_data(safe_cmd_binary(vc0)), "veritysetup"), "verity bin");
+    assert(str_eq_cstr(safe_cmd_binary(vc0), "veritysetup"), "verity bin");
 
     # --- unlock_luks ---
     var lcmds = unlock_luks(str_from("/dev/sda3"), str_from("crypt-root"));
     assert(vec_len(lcmds) > 0, "luks cmds");
     var lc0 = vec_get(lcmds, 0);
-    assert(streq(str_data(safe_cmd_binary(lc0)), "cryptsetup"), "luks bin");
+    assert(str_eq_cstr(safe_cmd_binary(lc0), "cryptsetup"), "luks bin");
 
     # --- close_luks ---
     var clcmds = close_luks(str_from("crypt-root"));
     assert(vec_len(clcmds) > 0, "close cmds");
     var cl0 = vec_get(clcmds, 0);
-    assert(streq(str_data(safe_cmd_binary(cl0)), "cryptsetup"), "close bin");
+    assert(str_eq_cstr(safe_cmd_binary(cl0), "cryptsetup"), "close bin");
     # Verify 'close' is in the args
     var cl_args = safe_cmd_args(cl0);
     assert(vec_len(cl_args) >= 2, "close args");

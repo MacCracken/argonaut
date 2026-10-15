@@ -6,6 +6,14 @@
 
 ## Version
 
+**1.15.5** (toolchain cyrius **6.6.6 → 6.6.20**; libro **2.10.3 → 2.10.8**, which
+carries sigil 3.13.10 and patra 1.15.2; sakshi 2.5.7 and patra 1.15.2 from the 6.6.20
+fold. `src/` changes are comments only. With 6.6.8's `MAP_NORESERVE` heap, argonaut
+boots as PID 1 at `-m 256M` and down to `-m 128M`, which closes the 1.15.2
+In-flight item. 17 test comparisons moved off `streq(str_data(..))`. 33 suites / 984
+assertions on x86_64 and under qemu-aarch64. Bench gate neutral, with one micro
+outside ±2 µs explained as noise. kybernet takes it with a tag bump.)
+
 **1.15.4** (`RestartPolicy` and `SeccompAction` made value-identical to agnostik's,
 NEVER = 0 / ALWAYS = 1 / ON_FAILURE = 2 and KILL = 1 / TRAP = 3 / LOG = 4, because the
 two same-named enums meet in kybernet's unit. `restart_policy_parse` renamed
@@ -452,7 +460,7 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Toolchain
 
-- `cyrius = "6.6.6"` in `cyrius.cyml [package]` and `qemu/helpers/cyrius.cyml`.
+- `cyrius = "6.6.20"` in `cyrius.cyml [package]` and `qemu/helpers/cyrius.cyml`.
   The manifest is the only pin source (no `.cyrius-toolchain`); CI and release
   read it.
 - **`Result` is a `(tag, payload)` register pair** (6.6.0+). Bind both halves
@@ -466,7 +474,20 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
   the guard against a stale `./lib/`.
 - **`cyrius.lock`** is sorted (6.6.3+) and ends with a `cyrius <pin>` record
   (6.6.4+). A stdlib leaf that changes under an unchanged pin is refused until
-  `cyrius deps --relock`.
+  `cyrius deps --relock`. ⚠ From 6.6.20 a recorded commit pin survives later
+  resolves, so after a dependency's tag moves the old pin stays beside the new
+  one. `cyrius deps` also never deletes a stdlib file it no longer needs from
+  `lib/`, and the lock hashes whatever is there. At a pin move, delete both `cyrius.lock` and
+  `lib/`, then run `cyrius deps`.
+- **A stdlib-only project gets a `cyrius.lock` on every resolve** (6.6.9+).
+  `qemu/helpers/` writes one when it is re-cut. It is not tracked, because the
+  helper's `lib/` is committed.
+- **6.6.20 warns on `streq(str_data(..), ..)`.** `streq` reads to a NUL, and a
+  Str's bytes are not NUL-terminated at its length. Compare a Str with
+  `str_eq_cstr(s, "lit")` or `str_eq(a, b)`.
+- **6.6.20 binds every call to a redefined fn to its last definition.** The main
+  build defines no fn twice. The test and bench builds redefine eight `sakshi_*`
+  fns as stubs, which prints eight `duplicate fn` warnings per build, as on 6.6.6.
 - **`lib/bench.cyr`** (6.6.5+) takes min/max only from windows the clock
   resolves to 1 %, and otherwise reports the mean. On the dev host (HPET
   clocksource, ~2.3 µs clock error) that is every row, so compare `avg_us` only.
@@ -475,10 +496,10 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
   `.github/workflows/ci.yml`).
 - `freelist` is thread-safe, at a single-threaded alloc+free cost argonaut pays
   although it spawns no threads.
-- ⚠ **`alloc_init` reserves a 256 MB anonymous chunk** (`lib/alloc.cyr`, Linux
-  arm). Under the kernel's default heuristic overcommit, a machine with less
-  than ~256 MB of RAM + swap refuses it and the process exits 1 before `main`.
-  For argonaut as PID 1 that is a kernel panic. See In-flight.
+- **`alloc_init` maps its 256 MB first chunk `MAP_NORESERVE`** (6.6.8+), and
+  falls back to a 16 MB grain if the kernel still refuses it. Under KVM,
+  argonaut boots as PID 1 at `-m 256M`, `160M` and `128M`. At `-m 96M` the
+  kernel panics before argonaut runs.
 - The `cyrius build`/`test`/`bench` driver is the stable surface; the compiler
   is `cycc` (`cycc_aarch64` for the cross-build). Install layout is
   `~/.cyrius/versions/<V>/{bin,lib}`, symlinked from `~/.cyrius/{bin,lib}`.
@@ -487,35 +508,60 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **x86_64: 403,736 B** statically linked ELF at 1.15.4
-  (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`);
-  2,426 unreachable fns, 802,307 B of dead code eliminated. +64 over 1.15.3, which was
-  403,672 B with 2,428 fns / 802,499 B eliminated. +4,760 over 1.15.1:
-  +640 toolchain, +4,120 libro 2.10.x (attributed by building the 1.15.1 tree
-  under 6.6.6).
-- **aarch64: 1,697,848 B** at 1.15.4 (+56; 1,697,792 B at 1.15.3) (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`);
-  2,429 unreachable fns, 1,137,584 B NOPed. +131,696 over 1.15.1, all but 24 B
-  of it toolchain: 6.6.5 routes x86_64 syscall numbers on aarch64 at roughly
-  224 B per syscall site.
-- **L3 helper: 10,456 B** static ELF (`qemu/helpers/l3-helper`), re-cut under
-  6.6.6 at 1.15.2 (18,456 under 6.6.2); bundled into the qemu harness initramfs
-  as `/bin/l3-helper`. Its build warns `undefined function 'alloc'` — harmless,
-  since the helper names only `syscalls` and makes raw syscalls.
+- **x86_64: 426,936 B**, a statically linked ELF, at 1.15.5
+  (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`).
+  2,549 fns are unreachable and 848,190 B of dead code is eliminated. That is
+  +23,200 over 1.15.4's 403,736 B: +18,704 from the toolchain and +4,496 from
+  libro 2.10.8 plus sigil 3.13.10. The split comes from building the 1.15.4
+  tree under 6.6.20, which gives 422,440 B.
+- **aarch64: 1,503,976 B** at 1.15.5 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`).
+  2,551 fns are unreachable and 1,005,596 B is NOPed. That is −193,872 against
+  1,697,848 B at 1.15.4. The toolchain accounts for −194,264: 6.6.18's ESYSXLAT
+  compile-time fold stops inlining the x86 → aarch64 translation chain at a
+  syscall site whose number is a literal.
+- **L3 helper: 15,064 B**, a static ELF (`qemu/helpers/l3-helper`), re-cut under
+  6.6.20 at 1.15.5 (10,456 B under 6.6.6). It is bundled into the qemu harness
+  initramfs as `/bin/l3-helper`. Its build is warning-free; under 6.6.6 it
+  warned `undefined function 'alloc'`.
 
 ## Suites
 
-- **x86_64: 33 `.tcyr` suites / 984 assertions**, 0 failures (cyrius 6.6.6); +8 at
-  1.15.4, the agnostik-lockstep block in `enum_parse.tcyr`.
+- **x86_64: 33 `.tcyr` suites / 984 assertions**, 0 failures (cyrius 6.6.20).
+  The count is unchanged at 1.15.5.
 - **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 33 / 33, 984 assertions**,
-  identical to x86_64. Run on the dev host at 1.15.4; CI still runs the aarch64
-  smoke only.
+  identical to x86_64. Run on the dev host at 1.15.5. CI still runs only the
+  aarch64 smoke.
 - **qemu PID-1 harness** (`qemu/pid1-harness-test.sh`, `qemu/boot-test.sh`,
-  KVM + `+invtsc`): M3 + L3 end-to-end and the supervisor-loop smoke pass at
-  1.15.2 **at `-m 512M`**. At the scripts' committed `-m 256M` argonaut dies in
-  `alloc_init` before `main`, and 1.15.1 does too — see In-flight.
+  KVM + `+invtsc`): at 1.15.5, M3 + L3 end-to-end and the supervisor-loop smoke
+  pass at the scripts' committed `-m 256M`. The 1.15.4 binary, built on 6.6.6,
+  panics under the same harness.
 - **Benches**: `src/bench_main.cyr` — 29 micros, the release gate
   (`scripts/bench-history.sh`); `tests/bcyr/argonaut.bcyr` carries the same 29,
   `tests/bcyr/api.bcyr` 8 more. History in `bench-history.csv`.
+
+### Bench snapshot (1.15.5-cyrius-6.6.20, 2026-10-14)
+
+**Verdict: neutral** against `1.15.4-agnostik-lockstep`. The gate row was recorded at
+load 6.7 and reads the chain micros 7 to 57 µs slow. So the verdict rests on 24
+interleaved rounds, pinned to one core, of three bench binaries: 1.15.4 on 6.6.6, the
+1.15.4 tree on 6.6.20, and 1.15.5. Medians, µs:
+
+| Bench | 1.15.4 (6.6.6) | toolchain only | 1.15.5 | Δ |
+|---|---:|---:|---:|---:|
+| resolve_order_chain_50 ⚠ | 102.662 | 107.101 | 106.840 | +4.178 |
+| resolve_order_chain_100 | 222.250 | 225.080 | 221.983 | −0.267 |
+| resolve_waves_chain_20 | 62.408 | 61.602 | 62.898 | +0.489 |
+| resolve_order_desktop | 11.549 | 12.155 | 12.255 | +0.706 |
+| init_new_desktop | 24.657 | 25.131 | 25.064 | +0.407 |
+| plan_shutdown_reboot | 14.875 | 15.601 | 15.794 | +0.919 |
+| mark_all_steps_complete | 46.876 | 47.581 | 47.760 | +0.884 |
+| audit_log_record | 4.347 | 4.392 | 4.454 | +0.107 |
+
+- ⚠ **`resolve_order_chain_50` is the one micro outside ±2 µs, and it is noise.** Its
+  ranges overlap (91.4–111.2 µs against 93.5–138.4 µs). `chain_100`, which does the
+  same per-node work on twice the nodes, reads −0.267 µs.
+- The micros above 10 µs drift up 0.4–0.9 µs. The toolchain-only build drifts the same
+  way, so the drift is 6.6.20's. Full table in CHANGELOG [1.15.5].
 
 ### Bench snapshot (1.15.3-agnos-init, 2026-09-23)
 
@@ -568,53 +614,57 @@ are single runs.
   process hashmap tagged args bayan fnptr freelist chrono ct keccak thread
   thread_local random assert bench sakshi patra`, resolved by `cyrius deps` into
   the gitignored `lib/`.
-- **libro 2.10.3 — the sole git dep** (`modules = ["dist/libro.cyr"]`). It pins
-  sigil **3.12.18** and patra **1.14.3**; with libro these are the three commit
+- **libro 2.10.8 — the sole git dep** (`modules = ["dist/libro.cyr"]`). It pins
+  sigil **3.13.10** and patra **1.15.2**; with libro these are the three commit
   pins in `cyrius.lock`. No digest, proof or signature changed from 2.9.0 on.
   2.10.0 made a streaming append allocation-free, which is what takes
-  `audit_log_record` to 16 B / 4.38 µs.
+  `audit_log_record` to 16 B / ~4.4 µs.
   ⚠ On a streaming chain the head hash `chain_append_nokeep` returns — and
   `audit_log_record` passes through — is valid only until the second subsequent
   append.
-- **patra 1.14.3 and sakshi 2.5.2 come from the 6.6.6 fold**, byte-identical to
-  their upstream `dist/` files. libro also resolves patra 1.14.3 as a package,
-  and cyrius keeps the fold's copy (see Toolchain). patra 1.14.3 is the
-  aarch64 `O_NOFOLLOW` fix, which covers argonaut's `audit_persist` path on
-  that architecture (CHANGELOG [1.15.2] Security).
-- **sigil 3.12.18 — thin sub-bundles only, transitive via libro**:
+  From 2.10.7, libro's `dist/libro.deps` sidecar names only `hashmap`, so
+  argonaut's own `[deps] stdlib` must list every leaf argonaut calls. It does.
+  From 2.10.8, `patrastore_open` returns 0, instead of crashing, if
+  `patra_init()` has not run. argonaut runs `patra_init()` in `audit_ext_init`
+  before it opens a store.
+- **patra 1.15.2 and sakshi 2.5.7 come from the 6.6.20 fold**, byte-identical to
+  their upstream `dist/` files. libro also resolves patra 1.15.2 as a package,
+  and cyrius keeps the fold's copy (see Toolchain). patra 1.14.3's aarch64
+  `O_NOFOLLOW` fix still covers argonaut's `audit_persist` path on that
+  architecture (CHANGELOG [1.15.2] Security).
+- **sigil 3.13.10 — thin sub-bundles only, transitive via libro**:
   `lib/sigil-mldsa.cyr` (ed25519 + ML-DSA + hybrid + sha512),
-  `lib/sigil_sha256.cyr`, `lib/sigil_sha_ni.cyr` and `lib/sigil_hex.cyr` — 5,698
-  lines / 226,989 B of source. ⚠ **Never name `"sigil"` in the stdlib array.**
+  `lib/sigil_sha256.cyr`, `lib/sigil_sha_ni.cyr` and `lib/sigil_hex.cyr` — 6,354
+  lines / 263,504 B of source. ⚠ **Never name `"sigil"` in the stdlib array.**
   At 6.6.6 that pulls the 28,084-line / 1,106,698 B monolith (x509, RSA,
   authenticode), and the x86_64 binary grows 403,672 → 900,472 B with a
   444,496 B static-data warning and 233 duplicate-fn warnings. Test and bench
   files must not `include "lib/sigil.cyr"` either; that rule lives in
   `tests/test_header.cyr`.
-- **Security posture of the sigil 3.12.9 → 3.12.18 advance**: every fix in the
-  range (LUKS, dm-verity, cryptsetup, TPM, Argon2, `agnosys_uname`) is outside
-  the four thin bundles, which change only in whitespace and a version header.
-  Nothing on argonaut's path.
+- **Security posture of the sigil 3.12.18 → 3.13.10 advance**: the ECDSA
+  P-256 / P-384 timing fix (CYRIUS-2026-0023) is outside the four thin bundles.
+  Inside them, the SHA-NI register scrub (3.13.8) matters for hashing secrets,
+  and argonaut hashes audit entries. The thread-safe first-use init (3.13.6)
+  matters only with threads, and argonaut starts none. Nothing on argonaut's path.
 - **`cyrius.lock`** — `cyrius deps --verify` → **60 verified, 0 failed**,
-  3 commit-pinned (libro, sigil, patra), sorted, ending with `cyrius 6.6.6`.
+  3 commit-pinned (libro, sigil, patra), sorted, ending with `cyrius 6.6.20`.
+  It equals the lock a fresh copy of the tree resolves from nothing.
 
 ## In-flight
 
-### Found at 1.15.2 (not fixed)
+### Found at 1.15.5 (not fixed)
 
-- **argonaut cannot boot as PID 1 with less than ~256 MB of RAM + swap.**
-  `alloc_init` (cyrius `lib/alloc.cyr`, Linux arm) maps its first heap chunk as
-  one 256 MB `MAP_PRIVATE | MAP_ANONYMOUS` region. Under the default heuristic
-  overcommit (`vm.overcommit_memory = 0`) the kernel refuses any single request
-  larger than total RAM + swap, so the mmap fails, `alloc_init` prints
-  `alloc_init: mmap failed` and exits 1 before `main`, and the kernel panics
-  with `Attempted to kill init! exitcode=0x00000100`. `qemu/pid1-harness-test.sh`
-  and `qemu/boot-test.sh` boot with `-m 256M` and so fail this way. The released
-  1.15.1 binary fails identically, and both pass at `-m 512M`. The defect is
-  upstream and applies to any cyrius program that initialises the heap,
-  kybernet included. Candidate cyrius fixes: map the chunk with `MAP_NORESERVE`
-  (0x4000), which exempts it from the heuristic check (though not from
-  `overcommit_memory = 2`), or start with a smaller first chunk. Raising the
-  harness's `-m` would make it pass but hide the limit.
+- **Services with no ordering between them start in a different order on each
+  run.** `resolve_service_order` and `resolve_service_waves` (`src/services.cyr`)
+  fill Kahn's queue, and each wave, in `map_keys` order. cyrius's hashmap has
+  seeded itself per process since 6.5.39. In six x86_64 smoke runs the `startup
+  order` line came out four different ways; in four qemu-aarch64 runs, four ways.
+  Every dependency is still respected; only the order among unordered services
+  varies. ADR 008 says each wave is sorted alphabetically, but no sort exists.
+  1.15.4 on 6.6.6 behaves the same. On the roadmap.
+- The 1.15.2 item, that argonaut could not boot as PID 1 below ~256 MB of RAM +
+  swap, is **closed at 1.15.5** by cyrius 6.6.8's `MAP_NORESERVE` first chunk
+  (see Toolchain and CHANGELOG [1.15.5] Fixed).
 
 ### Filed by the 2026-08-24 P(-1) audit (not fixed in 1.8.6)
 
@@ -757,10 +807,9 @@ are single runs.
 
 ## Pending release (unreleased)
 
-- **1.15.4** (cut in the working tree, not yet tagged): the agnostik lockstep. See
-  Version and CHANGELOG [1.15.4]. kybernet takes it by bumping `[deps.argonaut]` to
-  `1.15.4` and renaming its one `restart_policy_parse` call
-  (`src/lib/svc_config.cyr:530`) to `argonaut_restart_policy_parse`.
+- **1.15.5** (cut in the working tree, not yet tagged): toolchain 6.6.20 and libro
+  2.10.8. See Version and CHANGELOG [1.15.5]. kybernet, which pins 1.15.4, takes it
+  with a tag bump; `src/` changes only in comments.
 
 ## Recent shipped
 
@@ -793,7 +842,7 @@ are single runs.
 ## Consumers
 
 - **AGNOS boot** — PID 1 / systemd-delegate role
-- **kybernet** — uses argonaut as a library for service orchestration in the kybernet shell. Vendors argonaut's `src/` modules directly; pins argonaut **1.15.0** on cyrius 6.6.2 with libro 2.10.0. 1.15.2's `src/` diff is comment-only, so it drops in without source changes there.
+- **kybernet** — uses argonaut as a library for service orchestration in the kybernet shell. Vendors argonaut's `src/` modules directly; pins argonaut **1.15.4** on cyrius 6.6.6 with libro 2.10.3. 1.15.5's `src/` diff is comment-only. A scratch kybernet resolving this tree by `path` builds at an unchanged 719,752 B and passes 882 / 882.
 - **stiva, sutra, daimon** — service definitions and lifecycle hooks consume the audit chain
 
 (Track downstream build status against this version when bumping minors.)
@@ -801,8 +850,8 @@ are single runs.
 ## Verification
 
 - Linux x86_64 (Arch, kernel 7.2, AMD Ryzen 7 5800H, HPET clocksource) — primary dev host; CI on `ubuntu-latest`
-- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **33 / 33, 971 assertions at 1.15.2** (cyrius 6.6.6), identical to x86_64. CI runs the aarch64 smoke only. Real-hardware validation (RPi4, Apple Silicon, Graviton / Ampere) is still the native-aarch64-CI item, gated on runner allocation. See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
-- qemu PID-1 harness under KVM — passes at 1.15.2 with `-m 512M`; fails at the scripts' `-m 256M` (see In-flight).
+- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **33 / 33, 984 assertions at 1.15.5** (cyrius 6.6.20), identical to x86_64. CI runs the aarch64 smoke only. Real-hardware validation (RPi4, Apple Silicon, Graviton / Ampere) is still the native-aarch64-CI item, gated on runner allocation. See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
+- qemu PID-1 harness under KVM — passes at 1.15.5 at the scripts' committed `-m 256M`; the boot test also boots at `-m 128M`.
 
 ## Audit cadence
 

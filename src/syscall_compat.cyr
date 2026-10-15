@@ -44,8 +44,9 @@
 # before changing one; a wrong number here is silent on x86 and fatal on ARM.
 
 # sendto(fd, buf, len, flags, dest_addr, addrlen) — used by the sd_notify
-# client. No stdlib wrapper; no `SYS_SENDTO` in either arch peer.
-# x86_64 44 (native) / aarch64 206 (native, ladder-safe).
+# client. x86_64 44 (native) / aarch64 206 (native, ladder-safe).
+# The stdlib's `sys_sendto` issues these same two numbers through `SYS_SENDTO`;
+# this wrapper is not a gap any more and is due to move to it (roadmap).
 fn ag_sys_sendto(fd, buf, len, flags, dest_addr, addrlen): i64 {
     #ifdef CYRIUS_ARCH_X86
     return syscall(44, fd, buf, len, flags, dest_addr, addrlen);
@@ -56,7 +57,8 @@ fn ag_sys_sendto(fd, buf, len, flags, dest_addr, addrlen): i64 {
 }
 
 # getsockopt(fd, level, optname, optval, optlen) — SO_ERROR readback after a
-# non-blocking connect. No stdlib wrapper (sys_setsockopt has no peer).
+# non-blocking connect. No stdlib wrapper: the stdlib has `sys_setsockopt` on
+# every target but no `sys_getsockopt`.
 # x86_64 55 (native) / aarch64 209 (native, ladder-safe).
 fn ag_sys_getsockopt(fd, level, optname, optval, optlen): i64 {
     #ifdef CYRIUS_ARCH_X86
@@ -104,8 +106,10 @@ fn ag_sys_getsid(pid): i64 {
 }
 
 # fcntl(fd, cmd, arg) — F_SETFL O_NONBLOCK on the notify and health sockets.
-# No stdlib wrapper, but `SYS_FCNTL` IS defined in both arch peers (x86 72 /
-# aarch64 25), so the enum does the dispatch and no #ifdef is needed here.
+# `SYS_FCNTL` is defined in both arch peers (x86 72 / aarch64 25), so the enum
+# does the dispatch and no #ifdef is needed here. The stdlib's `sys_fcntl` has
+# this exact body; like `ag_sys_sendto`, this wrapper is due to move to it
+# (roadmap).
 fn ag_sys_fcntl(fd, cmd, arg): i64 {
     return syscall(SYS_FCNTL, fd, cmd, arg);
 }

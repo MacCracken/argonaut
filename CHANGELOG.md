@@ -7,6 +7,197 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.15.5] — 2026-10-14
+
+**Toolchain 6.6.6 → 6.6.20 and libro 2.10.3 → 2.10.8. argonaut now boots as PID 1 on a 256 MB
+machine.** In `src/`, only comments change. 33 suites / 984 assertions, 0 failures, on x86_64 and
+under qemu-aarch64. The bench gate is neutral: one micro is outside ±2 µs, explained under
+Performance.
+
+| | 1.15.4 | 1.15.5 | via |
+|---|---|---|---|
+| cyrius | 6.6.6 | **6.6.20** | `[package].cyrius` |
+| libro | 2.10.3 | **2.10.8** | `[deps.libro]` |
+| sigil | 3.12.18 | **3.13.10** | libro's pin |
+| patra | 1.14.3 | **1.15.2** | stdlib fold (and libro's pin) |
+| sakshi | 2.5.2 | **2.5.7** | stdlib fold |
+
+### Fixed
+
+- **argonaut boots as PID 1 on a 256 MB machine.** Found at 1.15.2: cyrius's `alloc_init` mapped
+  its first heap chunk as one 256 MB anonymous region. Under the default overcommit heuristic the
+  kernel refuses a single mapping larger than RAM + swap. So on a small machine argonaut exited 1
+  before `main`, and the kernel panicked. cyrius 6.6.8 maps that chunk `MAP_NORESERVE`. If the kernel
+  still refuses it, the allocator drops to a 16 MB grain. There is no argonaut change. Measured under
+  KVM:
+  - `qemu/pid1-harness-test.sh` and `qemu/boot-test.sh` pass at their committed `-m 256M`, printing
+    `m3 ok`, `l3 ok`, `done` and `pid1 loop ready`. Under the same harness the 1.15.4 binary, built on
+    6.6.6, still panics (`Attempted to kill init! exitcode=0x00000100`).
+  - The boot test's qemu command also boots at `-m 160M` and `-m 128M`. At `-m 96M` the kernel
+    panics (`System is deadlocked on memory`) before argonaut prints anything. That limit comes from
+    the kernel and initramfs, not from argonaut's heap.
+
+### Changed
+
+- **`[package].cyrius` `6.6.6` → `6.6.20`** in `cyrius.cyml` and `qemu/helpers/cyrius.cyml`.
+- **`[deps.libro]` `2.10.3` → `2.10.8`.** Every resolved library equals its upstream release
+  byte-for-byte:
+  - `lib/libro.cyr` is libro 2.10.8's `dist/libro.cyr`.
+  - The four `lib/sigil*.cyr` files are sigil 3.13.10's.
+  - `lib/patra.cyr` is patra 1.15.2's `dist/`.
+  - `lib/sakshi.cyr` is sakshi 2.5.7's.
+- **libro's sidecar needed no manifest change.** At 2.10.7, libro's `dist/libro.deps` dropped from
+  27 stdlib leaves to 1 (`hashmap`), so each consumer must declare every leaf it calls. argonaut's
+  `[deps] stdlib` already lists all 26 it uses. The build reports no undefined function.
+- **`cyrius.lock` stays at 60 entries** and is still 3 commit-pinned: libro 2.10.8, patra 1.15.2
+  and sigil 3.13.10. It ends with `cyrius 6.6.20`. One leaf arrives and one leaves:
+  - `lib/poison.cyr` is new; 6.6.18's `freelist` includes it.
+  - `lib/test.cyr` is gone. It came in through libro 2.10.3's 27-leaf sidecar, and nothing in
+    argonaut includes it.
+
+  ⚠ **Both `cyrius.lock` and the gitignored `lib/` were deleted and resolved again.** Two things
+  break an in-place resolve:
+  - From 6.6.20, `cyrius deps` keeps a commit pin once it is recorded (the CYRIUS-2026-0030 fix, see
+    Security). Resolving over the old lock left six pins, each old tag beside its new one.
+  - `cyrius deps` does not remove leaves that are no longer needed, and the lock hashes whatever is
+    in `lib/`. So a stale `lib/test.cyr` became a 61st entry that a fresh checkout never has.
+
+  The committed lock equals the one a copy of the tree resolves from nothing. Do the same at the next
+  pin move.
+- **The qemu L3 helper is re-cut under 6.6.20**, 10,456 → 15,064 B. `cyrius deps` re-vendors 12 files
+  in `qemu/helpers/lib/` and adds `poison.cyr`. The build no longer prints the
+  `undefined function 'alloc'` warning it had carried since 1.15.2. From cyrius 6.6.9 on, every
+  resolve writes a `cyrius.lock` for a stdlib-only project. The helper's lock was deleted rather than
+  committed, because its `lib/` is committed directly.
+- **17 test comparisons no longer pass a Str's data pointer to `streq`.** 6.6.20 warns on
+  `streq(str_data(x), …)`, because `streq` reads up to a NUL and a Str's bytes are not NUL-terminated
+  at its length. These now call `str_eq_cstr`, which compares by length:
+  - the 14 call sites in `api_a`, `edge_exec`, `parity`, `security` and `types_b`;
+  - `svcs_has_name` and `order_pos` in `tests/test_header.cyr`.
+
+  `vec_contains_str` compares two Strs and now calls `str_eq`. Every comparison already passed; the
+  change removes the warning and the reliance on a terminator. Test-build warnings now match 6.6.6's
+  exactly: the eight sakshi stub duplicates and nothing else.
+- **`src/syscall_compat.cyr`, comments only.** Three claims were stale:
+  - `ag_sys_getsockopt` said the stdlib's setsockopt has no peer. `sys_setsockopt` has existed on
+    every target since 6.6.16; there is still no `sys_getsockopt`. This item came over from cyrius's
+    roadmap for this pin move.
+  - `ag_sys_sendto` and `ag_sys_fcntl` said no stdlib wrapper exists. `sys_sendto` (6.6.5) and
+    `sys_fcntl` (6.6.8) now issue the same numbers. Moving the call sites onto them is a roadmap
+    item, because the file's header requires a `qemu-aarch64 -strace` re-check first.
+
+### Security
+
+**No fix in this advance changes argonaut's shipped binary.** Checked against cyrius's security
+ledger (`docs/audit/2026-10-08-security-ledger.md` in the cyrius repo) and the dependency
+CHANGELOGs:
+
+- **CYRIUS-2026-0028** (6.6.18). `fmt_int_buf` wrote 24 bytes whatever the number's length.
+  argonaut reaches it only through `lib/bench.cyr`, so only in the bench binaries. Its other caller,
+  patra's JSONL builder, is called by neither argonaut nor libro.
+- **CYRIUS-2026-0030** (6.6.20). A resolve that skipped a tagged dep dropped that dep's commit pin,
+  so a repointed tag was then accepted. None of argonaut's deps has a shape that triggers it: no
+  `optional`, `target` or `path` dep. The fix is why the lock had to be regenerated.
+- **libro 2.10.8.** `patrastore_open` no longer crashes when `patra_init()` has not run, and a failed
+  open no longer leaks its 32-byte handle. argonaut runs `patra_init()` in `audit_ext_init` before
+  it opens a store, and it checks for a 0 store. So only the leak fix reaches it, after a failed open
+  on the `audit_persist` path (off by default).
+- **sigil 3.12.18 → 3.13.10.** The ECDSA P-256 / P-384 timing fix (CYRIUS-2026-0023) is outside the
+  four thin bundles argonaut takes. Inside them, 3.13.8's SHA-NI register scrub matters for hashing
+  secrets, and argonaut hashes audit entries. 3.13.6's thread-safe first-use init matters only with
+  threads, and argonaut starts none.
+- **patra 1.14.3 → 1.15.2.** 1.15.0's security fix is macOS-only. 1.15.1 changes only the fallback
+  used when `getrandom` fails.
+
+### Performance
+
+The gate ran `./scripts/bench-history.sh "1.15.5-cyrius-6.6.20"` against
+`1.15.4-agnostik-lockstep`. It started at load 6.7, just after the qemu runs, and four micros read
+slower beyond noise:
+
+| bench | 1.15.4 | 1.15.5 gate | Δ |
+|---|---:|---:|---:|
+| `resolve_order_chain_10` | 10.661 µs | 17.637 µs | +6.976 µs |
+| `resolve_order_chain_50` | 90.122 µs | 141.845 µs | +51.723 µs |
+| `resolve_order_chain_100` | 196.775 µs | 253.936 µs | +57.161 µs |
+| `resolve_waves_chain_20` | 57.353 µs | 84.487 µs | +27.134 µs |
+
+So the verdict rests on an interleaved A/B, as at 1.15.2. Three bench binaries ran in turn, pinned
+to one core, for 24 rounds: two batches of 12, on cores 7 and 9. They were 1.15.4 on 6.6.6, 1.15.4 on
+6.6.20 with libro 2.10.3 (the toolchain alone), and 1.15.5. Medians in µs:
+
+| bench | 1.15.4 (6.6.6) | toolchain only | 1.15.5 | Δ |
+|---|---:|---:|---:|---:|
+| resolve_order_chain_10 | 12.346 | 12.552 | 12.590 | +0.243 |
+| resolve_order_chain_50 ⚠ | 102.662 | 107.101 | 106.840 | +4.178 |
+| resolve_order_chain_100 | 222.250 | 225.080 | 221.983 | −0.267 |
+| resolve_waves_chain_20 | 62.408 | 61.602 | 62.898 | +0.489 |
+| resolve_order_desktop | 11.549 | 12.155 | 12.255 | +0.706 |
+| resolve_waves_desktop | 14.985 | 15.712 | 15.688 | +0.704 |
+| init_new_desktop | 24.657 | 25.131 | 25.064 | +0.407 |
+| plan_shutdown_reboot | 14.875 | 15.601 | 15.794 | +0.919 |
+| mark_all_steps_complete | 46.876 | 47.581 | 47.760 | +0.884 |
+| audit_log_record | 4.347 | 4.392 | 4.454 | +0.107 |
+
+**Verdict: neutral.** 28 of 29 micros are within ±2 µs. The one outside it is noise, not a
+regression:
+
+- ⚠ **`resolve_order_chain_50` reads +4.178 µs (+4.1 %).** Its 24 runs span 91.4–111.2 µs on 1.15.4
+  and 93.5–138.4 µs on 1.15.5, so the ranges overlap almost completely. `resolve_order_chain_100`
+  runs the same per-node code over twice as many nodes and reads −0.267 µs; a real per-node cost
+  would show there at about twice the size. This micro was already called noise-bound at 1.15.2 (one
+  binary spanned 88.7–158.2 µs) and at 1.15.4.
+- **The micros above 10 µs drift up 0.4–0.9 µs.** That is inside the noise band, but all in one
+  direction. The toolchain-only build drifts the same way, so the cause is 6.6.20, not libro. It was
+  not narrowed further. One plausible source is the hashmap's tombstone accounting, a correctness fix
+  upstream: `map_set` now reads the tombstone count and may rebuild the table in place, and the
+  resolver micros lean on the hashmap.
+- **Binary sizes.** To attribute them, the 1.15.4 tree was also built under 6.6.20 with libro 2.10.3:
+
+  | | 1.15.4 | + toolchain | 1.15.5 |
+  |---|---:|---:|---:|
+  | x86_64 DCE | 403,736 | 422,440 (+18,704) | **426,936** (+4,496 libro + sigil) |
+  | aarch64 | 1,697,848 | 1,503,584 (−194,264) | **1,503,976** (+392) |
+
+  The aarch64 drop comes from cyrius 6.6.18's ESYSXLAT compile-time fold. A syscall site with a
+  literal number no longer inlines the whole x86 → aarch64 translation chain. That more than undoes
+  the +131,672 B that 6.6.5's syscall routing added at 1.15.2.
+- `bench-history.csv` still records every bench twice per label.
+
+### Verification
+
+- **Tests:** 33 suites, **984 assertions, 0 failures** on x86_64. The aarch64 sweep under qemu-user
+  (`scripts/aarch64-sweep.sh`) gives 33 of 33 and 984.
+- **Build:** `cyrius deps --verify` passes 60 of 60. `CYRIUS_DCE=1 cyrius build --check-lib-sync`
+  gives **426,936 B**, with 2,549 unreachable fns and 848,190 B of dead code eliminated. A copy of
+  the tree with no `build/` and no `lib/` resolves to the same lock and builds a byte-identical
+  binary. The ELF magic
+  checks out, and the smoke run prints `all systems nominal`. The aarch64 build is 1,503,976 B. Lint,
+  `fmt --check` and `cyrius vet` are clean on every file CI gates.
+- **qemu PID-1 harness under KVM**, at the committed `-m 256M`: see Fixed.
+- **6.6.20 binds every call to a redefined fn to its last definition.** argonaut's main build defines
+  no fn twice. The test and bench builds redefine the eight sakshi fns as stubs, as they did under
+  6.6.6, so every call in them now reaches the stubs.
+- **Version:** `VERSION` reads 1.15.5, and `cyrius.cyml` reads it through `${file:VERSION}`.
+
+### Found, not fixed
+
+- **Services with no ordering between them start in a different order on each run.**
+  `resolve_service_order` and `resolve_service_waves` (`src/services.cyr`) fill Kahn's queue, and
+  each wave, in `map_keys` order. cyrius's hashmap has seeded itself per process since 6.5.39, which
+  predates 1.15.2. In six x86_64 smoke runs the `startup order` line came out four different ways; in
+  four aarch64 runs, four ways. Kahn's algorithm still keeps every dependency in order. ADR 008 says
+  each wave is sorted alphabetically, but the code does not sort. 1.15.4 on 6.6.6 behaves the same.
+  It is now a roadmap item.
+
+### Downstream: kybernet
+
+kybernet pins argonaut 1.15.4, cyrius 6.6.6 and libro 2.10.3. A scratch kybernet resolved this tree
+through a `path` dep. Its twelve vendored argonaut modules are byte-identical to `src/`. On its own
+6.6.6 pin it builds at 719,752 B, the same size as its stock 1.15.4 build, and passes **882 / 882**.
+Since `src/` changed only in comments, taking this release is a tag bump. Moving kybernet itself to
+6.6.20 and libro 2.10.8 is kybernet's call.
+
 ## [1.15.4] — 2026-10-14
 
 **`RestartPolicy` and `SeccompAction` are value-identical to agnostik's, and the restart-policy

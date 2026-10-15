@@ -211,12 +211,17 @@ Retained for historical context.
 - **D-Bus interface** — only if AGNOS desktop requires it
 - **Timer-based services** — that's samay's domain
 
-## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
+## Follow-ups from the cyrius 6.6.20 pin move (1.15.5)
 
-cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
-applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
-6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
+The one item moved here from cyrius's roadmap on 2026-10-08 (the stale `sys_setsockopt` comment in
+`src/syscall_compat.cyr`) was fixed at 1.15.5. What changes past 6.6.20 is in cyrius's `CHANGELOG.md` and
+`docs/development/ecosystem-migration.md`.
 
-- **(information, cyrius ≥ 6.6.16)** `src/syscall_compat.cyr` (~59): the comment "No stdlib wrapper
-  (sys_setsockopt has no peer)" is stale — `sys_setsockopt` resolves on every target since 6.6.16 (the agnos and
-  Windows peers decline with -38).
+- [ ] **Move `ag_sys_sendto` and `ag_sys_fcntl` onto the stdlib's `sys_sendto` / `sys_fcntl`.**
+  `src/syscall_compat.cyr` exists only for syscalls the stdlib does not wrap, and both are wrapped now, with the
+  same numbers on x86_64 and aarch64. Re-verify each call under `qemu-aarch64 -strace` first, as that file's header
+  requires. `ag_sys_getsockopt` stays: the stdlib still has no `sys_getsockopt`.
+- [ ] **Make the startup order deterministic.** `resolve_service_order` and `resolve_service_waves`
+  (`src/services.cyr`) break ties in `map_keys` order, and cyrius's hashmap is seeded per process, so services with
+  no ordering between them start in a different order on each boot. ADR 008 says each wave is sorted
+  alphabetically; the code does not sort. See `state.md` In-flight.

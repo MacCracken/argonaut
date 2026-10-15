@@ -32,7 +32,7 @@ fn main() {
     vec_push(caps, CAP_NET_BIND_SERVICE);
     vec_push(caps, CAP_SYS_ADMIN);
     var cmd = capability_setpriv_cmd(caps, str_from("/usr/bin/myapp"), vec_new());
-    assert(streq(str_data(safe_cmd_binary(cmd)), "setpriv"), "cap bin");
+    assert(str_eq_cstr(safe_cmd_binary(cmd), "setpriv"), "cap bin");
     var disp = safe_cmd_display(cmd);
     assert(str_contains(disp, str_from("--no-new-privs")), "cap nnp");
     assert(str_contains(disp, str_from("bounding")), "cap bound");

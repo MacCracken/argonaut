@@ -145,13 +145,13 @@ fn main() {
 
     # --- shruti service definition ---
     var sh = shruti_service();
-    assert(streq(str_data(svc_def_name(sh)), "shruti"), "sh name");
+    assert(str_eq_cstr(svc_def_name(sh), "shruti"), "sh name");
     assert(svc_def_health_check(sh) != 0, "sh hc");
     # Shruti should NOT be in default services for any mode
     var dsvc = default_services(BOOT_DESKTOP);
     var has_shruti = 0;
     for (var i = 0; i < vec_len(dsvc); i = i + 1) {
-        if (streq(str_data(svc_def_name(vec_get(dsvc, i))), "shruti")) {
+        if (str_eq_cstr(svc_def_name(vec_get(dsvc, i)), "shruti")) {
             has_shruti = 1;
         }
     }
