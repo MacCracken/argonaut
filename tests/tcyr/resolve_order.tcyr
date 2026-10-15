@@ -129,6 +129,14 @@ fn main() {
     vec_push(cmpset, dummy_svc(str_from("ab"), 0));
     expect_str(join_order(resolve_service_order(cmpset)), "Zed,a,ab,abc", "bytewise, prefix first");
 
+    # Bytes compare unsigned: a UTF-8 name (lead byte 0xC3) sorts after every ASCII name. A
+    # sign-extending byte load would put it first.
+    var utf = vec_new();
+    vec_push(utf, dummy_svc(str_from("zz"), 0));
+    vec_push(utf, dummy_svc(str_from("é"), 0));
+    vec_push(utf, dummy_svc(str_from("a"), 0));
+    expect_str(join_order(resolve_service_order(utf)), "a,zz,é", "bytes compare unsigned");
+
     # --- A wide wave: past vec_sort_by's 16-element insertion cutoff, into its partitioning ---
     # 40 independent services, defined in the order i * 17 mod 40 (17 is coprime to 40, so
     # every name appears once), zero-padded so bytewise order is numeric order.

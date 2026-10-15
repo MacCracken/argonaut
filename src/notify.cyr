@@ -121,7 +121,7 @@ fn notify_bind(path) {
     }
 
     # Set non-blocking
-    ag_sys_fcntl(fd, 4, 2048);  # F_SETFL O_NONBLOCK
+    sys_fcntl(fd, 4, 2048);  # F_SETFL O_NONBLOCK
 
     # M1: enable SO_PASSCRED so recvmsg() with SCM_CREDENTIALS gives us
     # the kernel-stamped sender credentials. notify_try_recv_authenticated

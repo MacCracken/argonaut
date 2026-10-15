@@ -77,7 +77,7 @@ CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut    # release build
 - Do not use `break` in `while` loops with `var` declarations — flag + `continue`
 - Do not write negative literals as `(0 - N)` — `-N` works since cyrius 3.10.3
 - Do not mix `&&` / `||` in one expression — nest `if` blocks instead
-- Do not use `match` as a variable name (reserved)
+- Do not use a reserved word (`match`, `trait`, `const`, `true`, `false`, `do`, `dyn`) as a name
 - Do not use `return;` without a value — always `return 0;`
 - Do not use `sys_system()` with unsanitized input — command injection
 - Do not trust external data (file content, network, args) without validation
@@ -177,7 +177,8 @@ Rationale: argonaut is PID 1 — boot sequencing, dependency resolution, and hea
 - Heap-allocate large buffers — `var buf[N]` inside a function is **static data** (not stack), bloats the binary, and consecutive calls clobber any returned Str/buf-borrowing values. The build's "large static data (N bytes)" warning is the upstream tell
 - 5.x stdlib lookup helpers (`toml_get`, `toml_get_sections`, …) take **cstr keys**; passing `str_from("…")` silently returns 0. JSON helpers (`json_get`) still take `Str`
 - `break` in while loops with `var` declarations is unreliable — flag + `continue`
-- `match` is reserved; `return;` without value is invalid (use `return 0;`); all `var` declarations are function-scoped
+- `match`, `trait`, `const`, `true`, `false`, `do` and `dyn` are reserved words; `return;` without value is invalid (use `return 0;`); all `var` declarations are function-scoped
+- `!` is a real operator (cyrius 6.7.3+; earlier toolchains silently dropped a lone `!`). argonaut spells negation `== 0`, so a lone `!` in this tree is new code, not a carry-over
 - Per-compilation-unit limits: 4,096 variables, 1,024 functions, 4,096 initialized globals, 16,384 fixups (cc5 5.4.2+)
 - Counting rule: only a top-level `var NAME = <non-literal>;` (call / identifier / expression initializer) consumes an initialized-globals slot; a bare integer-literal init (`var x = 42;`) takes the static-init fast path and enum members are const-folded, so neither counts. See the cyrius guide's **Global Initializers** section (`docs/guides/cyrius-guide.md` in the cyrius repo)
 - **Module-level `var X[N]` is N *slots*, not N bytes** — a top-level `var buf[N]` reserves N eight-byte slots (8N bytes of static data); only a *function-local* `var buf[N]` is N bytes. Measured upstream in sigil 3.12.9, whose de-banking freed 9,994,240 bytes = 1,249,280 declared units x 8, exactly. Size every module-level buffer as 8N when auditing static footprint

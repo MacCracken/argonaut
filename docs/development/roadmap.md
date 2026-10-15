@@ -211,23 +211,24 @@ Retained for historical context.
 - **D-Bus interface** — only if AGNOS desktop requires it
 - **Timer-based services** — that's samay's domain
 
-## Next — v1.16.0 — cyrius 6.7.9
+## Open — after 1.16.0
 
-The toolchain minor. What changes between 6.6.20 and 6.7.9 is in cyrius's `CHANGELOG.md` and
-`docs/development/ecosystem-migration.md` (its 6.7.x sections). Read those before moving the pin.
+- [ ] **`ag_sys_poll` → the stdlib's `sys_ppoll`** (cyrius 6.7.9+). `ag_sys_poll` issues x86 `poll` (7) on both
+  architectures and relies on the aarch64 translation to turn it into `ppoll` with a ms → timespec conversion. The
+  stdlib's `sys_ppoll` reaches `ppoll` directly on every Linux target. The move needs the conversion done in
+  argonaut (a negative timeout becomes a NULL timespec), and the same `qemu -strace` check that 1.15.6 and 1.16.0
+  ran for `sendto` / `fcntl`. Optional: the current path is correct, just indirect.
+- [ ] **The next toolchain move** starts from cyrius's `ecosystem-migration.md`, at the 6.7.10 section. Delete
+  `cyrius.lock` and `lib/` before `cyrius deps`, re-cut the qemu L3 helper, and repeat 1.16.0's 6.7.x
+  silent-semantics audit for whatever the new releases change.
 
-- [ ] **Toolchain 6.6.20 → 6.7.9**, in `cyrius.cyml` and `qemu/helpers/cyrius.cyml`. Refresh libro (and through it
-  sigil and patra) to the tags that match 6.7.9's folds in the same step. Delete `cyrius.lock` and `lib/` before
-  `cyrius deps`, or stale pins and leaves survive (see `state.md` Toolchain). Re-cut the qemu L3 helper.
-- [ ] **Move `ag_sys_fcntl`'s four call sites onto the stdlib's `sys_fcntl`, and delete `ag_sys_fcntl`.** The call
-  sites are `src/notify.cyr` (1) and `src/health.cyr` (3). This was deferred from 1.15.6: `sys_fcntl` exists only
-  from cyrius 6.6.8, and kybernet compiles argonaut's `src/` under its own 6.6.6 pin. 1.16.0 raises the floor anyway.
-  Repeat 1.15.6's check: the `fcntl` lines that `qemu-x86_64 -strace` and `qemu-aarch64 -strace` record for
-  `notify`, `audit_findings` and `health_exec` must not change.
-- [ ] **Delete the `ag_sys_sendto` forwarder**, deprecated at 1.15.6.
-- [ ] **Breaking note for consumers:** a consumer that compiles argonaut's `src/` needs cyrius ≥ 6.6.8 (in practice
-  6.7.9), and any remaining `ag_sys_sendto` / `ag_sys_fcntl` call must move to `sys_sendto` / `sys_fcntl`. Check
-  kybernet against the release through a scratch `path` dep, as 1.15.5 and 1.15.6 did.
+## Done at 1.16.0 — cyrius 6.7.9
+
+- [x] **Toolchain 6.6.20 → 6.7.9, libro 2.10.8 → 2.11.0.** No source change was needed, and the 6.7.x audit found
+  nothing (CHANGELOG [1.16.0] Audited).
+- [x] **`fcntl` uses the stdlib's `sys_fcntl`; `ag_sys_fcntl` and `ag_sys_sendto` are removed.** A consumer
+  compiling argonaut's `src/` needs cyrius ≥ 6.6.8 (CHANGELOG [1.16.0] Breaking).
+- [x] **Closeout pass** for the minor (CHANGELOG [1.16.0]).
 
 ## Done at 1.15.6 — follow-ups from the cyrius 6.6.20 pin move
 

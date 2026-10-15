@@ -5,7 +5,7 @@ description = "Init system and service manager for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/argonaut"
 language = "cyrius"
-cyrius = "6.6.20"
+cyrius = "6.7.9"
 
 [build]
 entry = "src/main.cyr"
@@ -43,5 +43,5 @@ stdlib = [
 
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
-tag = "2.10.8"
+tag = "2.11.0"
 modules = ["dist/libro.cyr"]

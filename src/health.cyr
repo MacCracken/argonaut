@@ -98,12 +98,12 @@ fn connect_bounded(ip, port, timeout_ms) {
 
     # Non-blocking so the connect can be bounded.
     # fcntl(fd, F_SETFL=4, O_NONBLOCK=2048)
-    ag_sys_fcntl(fd, 4, 2048);
+    sys_fcntl(fd, 4, 2048);
 
     var ret = sys_connect(fd, &addr, 16);
 
     if (ret == 0) {
-        ag_sys_fcntl(fd, 4, 0);          # back to blocking
+        sys_fcntl(fd, 4, 0);          # back to blocking
         return fd;
     }
 
@@ -131,7 +131,7 @@ fn connect_bounded(ip, port, timeout_ms) {
                 # getsockopt(fd, SOL_SOCKET=1, SO_ERROR=4, &val, &len)
                 var so_ret = ag_sys_getsockopt(fd, 1, 4, &so_err, &so_len);
                 if (so_ret == 0 && load32(&so_err) == 0) {
-                    ag_sys_fcntl(fd, 4, 0);      # back to blocking
+                    sys_fcntl(fd, 4, 0);      # back to blocking
                     return fd;
                 }
             }
