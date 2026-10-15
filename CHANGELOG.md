@@ -7,6 +7,147 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.15.6] — 2026-10-14
+
+**The startup order is the same on every boot, and the sd_notify client sends through the
+stdlib's `sys_sendto`.** Both items were roadmapped at 1.15.5. 34 suites / 1,016 assertions, 0
+failures, on x86_64 and under qemu-aarch64. The bench gate shows one regression with a written
+justification: the new sort costs `resolve_waves_wide_20` about 3–4 µs. kybernet takes it on its
+6.6.6 pin with a tag bump.
+
+### Fixed
+
+- **Services with no ordering between them started in a different order on each boot.** Found at
+  1.15.5. `resolve_service_order` and `resolve_service_waves` (`src/services.cyr`) took ready
+  services in `map_keys` order, and cyrius's hashmap has seeded itself per process since 6.5.39. Six
+  x86_64 smoke runs printed four different `startup order:` lines, and four aarch64 runs printed
+  four. ADR 008 said each wave is sorted alphabetically, but nothing sorted.
+  - **Each wave is now sorted bytewise by service name.** Byte order, not locale order: `Zed` sorts
+    before `alpha`, and a name sorts before its extensions.
+  - **`resolve_service_order` is now a level-synchronous Kahn's algorithm** with the same levels and
+    the same sort. Its linear order is the wave plan read wave by wave, and neither result depends on
+    the order services were defined in.
+  - **The desktop profile now always starts** `agnos-init, postgres, redis, daimon, aethersafha,
+    llm-gateway, agnoshi, ifran`, in waves `[agnos-init, postgres, redis] [daimon] [aethersafha,
+    llm-gateway] [agnoshi, ifran]`. Ten x86_64 and six aarch64 smoke runs all print that line.
+  - **What a consumer sees:** only the order among services the graph leaves unordered changes.
+    Every dependency is still respected, as before.
+  - ADR 008 gains an amendment that states the rule and the current desktop plan.
+
+### Changed
+
+- **`send_notify` calls the stdlib's `sys_sendto`**, and so do the two `audit_findings` test sites.
+  `src/syscall_compat.cyr` is for syscalls the stdlib does not wrap, and `sys_sendto` (cyrius 6.6.5+)
+  issues the same numbers as argonaut's wrapper did, x86_64 44 and aarch64 206. Checked as the
+  file's header requires, on both architectures. `notify`, `notify_semantics`, `audit_findings` and
+  `health_exec` were built for x86_64 and aarch64 and run under `qemu-x86_64 -strace` and
+  `qemu-aarch64 -strace`. Every `sendto` and `fcntl` line they record is identical before and after
+  the change. That covers two `sendto` calls with a destination address (one delivered, one refused
+  with ENOENT), two without one, and `fcntl(F_SETFL, O_NONBLOCK)`.
+- **`ag_sys_fcntl` stays argonaut's own wrapper until 1.16.0.** The stdlib's `sys_fcntl` has the same
+  body, but it exists only from cyrius 6.6.8. kybernet compiles argonaut's `src/` under its 6.6.6 pin,
+  and a scratch kybernet with the call sites on `sys_fcntl` fails with
+  `undefined function 'sys_fcntl'`. The move is on the roadmap for 1.16.0, which takes cyrius 6.7.9.
+
+### Deprecated
+
+- **`ag_sys_sendto`** is now a `#deprecated` forwarder to `sys_sendto`, with the same arguments and
+  the same syscall. It is removed at 1.16.0. **Migration:** call `sys_sendto`. Each remaining call
+  warns `'ag_sys_sendto' is deprecated: use the stdlib's sys_sendto; ag_sys_sendto is removed at
+  argonaut 1.16.0`. A scratch probe confirmed the forwarder still issues the syscall and that the
+  warning prints. Nothing in argonaut calls it, so DCE drops it. kybernet never called it.
+
+### Tests
+
+- **New `tests/tcyr/resolve_order.tcyr`, 26 assertions.** It was written before the fix. Against
+  1.15.5's resolver, 11 or 12 of its first 23 assertions failed on each run, depending on the seed.
+  It pins:
+  - eight independent services, defined out of order, coming back alphabetical;
+  - level order rather than smallest-ready-first (`b,c,a` when `a` needs `b`);
+  - a diamond, and the same graphs with their definitions reversed;
+  - the comparator (`Zed,a,ab,abc`);
+  - a 40-service wave, past `vec_sort_by`'s 16-element insertion cutoff and into its partitioning;
+  - that the linear order equals the waves read in sequence, for every default profile;
+  - the desktop plan.
+
+  Mutation-checked: removing the wave sort fails 9 assertions, removing the level sort fails 7, and
+  reversing the comparator fails 14.
+- **`tests/tcyr/notify.tcyr` +6.** `send_notify` had no caller and no test, so the one `sendto` with
+  a destination address was unexercised. The suite now sends `READY=1` / `MAINPID=77` to a bound
+  notify socket and parses it back. A send to a path with no listener returns -1. The suite also
+  asserts that the bind succeeded; before, a failed bind silently skipped the socket block.
+
+### Performance
+
+**Verdict: one regression, shipped with a written justification.** The cost is
+`resolve_waves_wide_20`, +3.3 to +4.3 µs. The desktop resolver micros sit at the edge of the
+±2 µs band, and everything else is neutral.
+
+The gate row, `1.15.6-deterministic-order`, was recorded while another job held every core (load
+16.7). Its absolute numbers are inflated about 1.5× and are not compared here. The verdict rests on
+interleaved runs of the 1.15.5 tag against 1.15.6, pinned to one core, where contention hits both
+binaries alike:
+
+- **A:** a 24-round A/B at load ~2, with the first version of the fix. That version's comparator
+  went through `str_len` / `str_data`, so it is slower than the final one.
+- **B:** a 24-round A/B of the final code at load ~14. Medians.
+- **C:** a 16-round four-way run at load ~17: 1.15.5, the first fix, the final code and a rejected
+  variant. Contention swamped the medians, so only the minima are used, and the minima flatter
+  1.15.5 a little: its minimum is the luckiest of 16 random tie orders, while 1.15.6 always runs the
+  same one.
+
+| bench | A: 1.15.5 → first fix | B: Δ, final | C: min, 1.15.5 → final |
+|---|---:|---:|---:|
+| `resolve_waves_wide_20` ⚠ | 13.28 → 17.58 µs (+32 %) | +34 % | 12.35 → 15.64 µs (+27 %) |
+| `resolve_waves_desktop` | 15.20 → 16.85 µs (+11 %) | +9 % | 14.52 → 16.59 µs (+14 %) |
+| `resolve_order_desktop` | 11.97 → 13.21 µs (+10 %) | +8 % | 11.01 → 12.80 µs (+16 %) |
+| `plan_shutdown_reboot` | 15.37 → 16.67 µs (+8 %) | +14 % | 14.17 → 16.36 µs (+15 %) |
+| `resolve_order_chain_*`, `resolve_waves_chain_20` | the sign flips between runs | | |
+| the other 20 micros | within ±2 µs, the sign flips | | |
+
+So `resolve_waves_wide_20` costs about +3.3 to +4.3 µs, which is beyond the ±2 µs band. The desktop
+resolver and shutdown-plan micros cost about +1.2 to +2.2 µs, at the band's edge. The medians of
+run C, and of an earlier four-way run discarded for the same load, read the wide wave at only +8 %
+and +18 %; contention dominates them.
+
+- ⚠ **Why `resolve_waves_wide_20` ships slower.** The bench resolves 20 services that share one wave,
+  so every call now sorts 20 names (about 80 comparisons). That sort is the fix: it is what makes
+  the boot order reproducible. A real boot resolves its services a handful of times (start, shutdown
+  planning), so the cost is a few microseconds per boot, against an order that used to change every
+  boot. The desktop micros pay the same cost in miniature: waves of 3, 1, 2 and 2 services.
+- **Cheaper sorts were tried.** The comparator reads the Str fields directly instead of calling
+  `str_len` / `str_data` four times per comparison, and that helped. A hand-written insertion sort
+  that calls the comparator directly, instead of through `vec_sort_by`'s fn pointer, was measured
+  slower on the 20-name wave (min 18.19 µs against 15.64 µs) and was dropped. Each level and wave
+  goes through the stdlib's `vec_sort_by`.
+- The chain micros sort one-element levels, which `vec_sort_by` returns from at once.
+- **Binary size:** x86_64 **431,032 B**, +4,096 over 1.15.5. Ten more fns are live (2,549 → 2,539
+  unreachable), mostly `vec_sort_by`'s introsort, which is 4,482 B more code. The file grows by one
+  4 KiB page because the data segment is page-aligned. aarch64 stays **1,503,976 B**: its DCE fills
+  dead code with NOPs instead of compacting, so code that becomes live does not change the size.
+
+### Verification
+
+- **Tests:** 34 suites, **1,016 assertions, 0 failures** on x86_64. The aarch64 sweep under qemu-user
+  gives 34 of 34 and 1,016. Test-build warnings are the same kinds as at 1.15.5.
+- **Order:** ten x86_64 and six aarch64 smoke runs print the same `startup order:` line, the same on
+  both architectures.
+- **Syscalls:** the `sendto` / `fcntl` traces match before and after, on both architectures (see
+  Changed).
+- **Build:** `cyrius deps --verify` passes 60 of 60. `CYRIUS_DCE=1 cyrius build --check-lib-sync`
+  gives 431,032 B. The ELF magic checks out, and the smoke run prints `all systems nominal`. Lint,
+  `fmt --check` and `cyrius vet` are clean on every file CI gates.
+- **qemu PID-1 harness under KVM** at `-m 256M`: `m3 ok`, `l3 ok`, `done`, and the boot test reaches
+  `pid1 loop ready`.
+- **Version:** `VERSION` reads 1.15.6, and `cyrius.cyml` reads it through `${file:VERSION}`.
+
+### Downstream: kybernet
+
+kybernet pins argonaut 1.15.4 on cyrius 6.6.6. A scratch kybernet resolved this tree through a
+`path` dep, and its twelve vendored argonaut modules are byte-identical to `src/`. On its own 6.6.6
+pin it builds at 723,920 B (+4,168 over 1.15.5) and passes **882 / 882**. Taking 1.15.6 is a tag
+bump. Its boot order among unordered services becomes the fixed order above.
+
 ## [1.15.5] — 2026-10-14
 
 **Toolchain 6.6.6 → 6.6.20 and libro 2.10.3 → 2.10.8. argonaut now boots as PID 1 on a 256 MB

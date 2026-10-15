@@ -283,7 +283,7 @@ fn send_notify(socket_path, message) {
     var msg_len = str_len(message);
 
     # sendto(fd, msg, len, 0, &addr, addrlen)
-    var ret = ag_sys_sendto(fd, msg_data, msg_len, 0, &addr, 2 + path_len + 1);
+    var ret = sys_sendto(fd, msg_data, msg_len, 0, &addr, 2 + path_len + 1);
     sys_close(fd);
 
     if (ret < 0) { return 0 - 1; }

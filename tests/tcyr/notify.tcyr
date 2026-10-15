@@ -55,6 +55,7 @@ fn main() {
     # Remove any old socket
     sys_unlink(str_data(sock_path));  # unlink
     var fd = notify_bind(sock_path);
+    assert(fd >= 0, "bind real socket");
     if (fd >= 0) {
         # try_recv should return 0 (nothing pending)
         var msg = notify_try_recv(fd);
@@ -63,6 +64,21 @@ fn main() {
         # drain should return empty vec
         var msgs = notify_drain(fd, 10);
         assert_eq(vec_len(msgs), 0, "drain 0");
+
+        # 1.15.6: the client side meets the server side. `send_notify` is argonaut's only
+        # sendto with a destination address, and no suite reached it until now.
+        assert_eq(send_notify(sock_path, str_from("READY=1\nMAINPID=77\n")), 0, "send_notify ok");
+        var got = notify_try_recv(fd);
+        assert(got != 0, "recv after send");
+        if (got != 0) {
+            assert_eq(load64(got), 1, "sent ready");
+            assert_eq(load64(got + 16), 77, "sent main pid");
+        }
+
+        # A path nobody listens on is refused: -1, not a silent 0.
+        var nobody = str_from("/tmp/argonaut-test-notify-nobody.sock");
+        sys_unlink(str_data(nobody));
+        assert_eq(send_notify(nobody, str_from("READY=1\n")), 0 - 1, "send to nobody fails");
 
         sys_close(fd);
         sys_unlink(str_data(sock_path));  # cleanup

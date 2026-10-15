@@ -174,7 +174,7 @@ fn main() {
 
         # Send a notify datagram from sfd; kernel stamps sender PID.
         var msg = "READY=1\n";
-        ag_sys_sendto(sfd, msg, 8, 0, 0, 0);   # sendto(sfd, msg, 8, 0, NULL, 0)
+        sys_sendto(sfd, msg, 8, 0, 0, 0);   # sendto(sfd, msg, 8, 0, NULL, 0)
 
         # Recv with expected = [my_pid] → cred matches → parse + return msg.
         var my_pid = sys_getpid();
@@ -185,7 +185,7 @@ fn main() {
         assert_eq(load64(nm_ok), 1, "m1: parsed READY=1");
 
         # Send again; recv with wrong pid set → drop, return 0.
-        ag_sys_sendto(sfd, msg, 8, 0, 0, 0);
+        sys_sendto(sfd, msg, 8, 0, 0, 0);
         var bad_pids = vec_new();
         vec_push(bad_pids, my_pid + 99999);
         var nm_bad = notify_try_recv_authenticated(rfd, bad_pids);

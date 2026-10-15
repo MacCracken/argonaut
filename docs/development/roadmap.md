@@ -211,17 +211,27 @@ Retained for historical context.
 - **D-Bus interface** — only if AGNOS desktop requires it
 - **Timer-based services** — that's samay's domain
 
-## Follow-ups from the cyrius 6.6.20 pin move (1.15.5)
+## Next — v1.16.0 — cyrius 6.7.9
 
-The one item moved here from cyrius's roadmap on 2026-10-08 (the stale `sys_setsockopt` comment in
-`src/syscall_compat.cyr`) was fixed at 1.15.5. What changes past 6.6.20 is in cyrius's `CHANGELOG.md` and
-`docs/development/ecosystem-migration.md`.
+The toolchain minor. What changes between 6.6.20 and 6.7.9 is in cyrius's `CHANGELOG.md` and
+`docs/development/ecosystem-migration.md` (its 6.7.x sections). Read those before moving the pin.
 
-- [ ] **Move `ag_sys_sendto` and `ag_sys_fcntl` onto the stdlib's `sys_sendto` / `sys_fcntl`.**
-  `src/syscall_compat.cyr` exists only for syscalls the stdlib does not wrap, and both are wrapped now, with the
-  same numbers on x86_64 and aarch64. Re-verify each call under `qemu-aarch64 -strace` first, as that file's header
-  requires. `ag_sys_getsockopt` stays: the stdlib still has no `sys_getsockopt`.
-- [ ] **Make the startup order deterministic.** `resolve_service_order` and `resolve_service_waves`
-  (`src/services.cyr`) break ties in `map_keys` order, and cyrius's hashmap is seeded per process, so services with
-  no ordering between them start in a different order on each boot. ADR 008 says each wave is sorted
-  alphabetically; the code does not sort. See `state.md` In-flight.
+- [ ] **Toolchain 6.6.20 → 6.7.9**, in `cyrius.cyml` and `qemu/helpers/cyrius.cyml`. Refresh libro (and through it
+  sigil and patra) to the tags that match 6.7.9's folds in the same step. Delete `cyrius.lock` and `lib/` before
+  `cyrius deps`, or stale pins and leaves survive (see `state.md` Toolchain). Re-cut the qemu L3 helper.
+- [ ] **Move `ag_sys_fcntl`'s four call sites onto the stdlib's `sys_fcntl`, and delete `ag_sys_fcntl`.** The call
+  sites are `src/notify.cyr` (1) and `src/health.cyr` (3). This was deferred from 1.15.6: `sys_fcntl` exists only
+  from cyrius 6.6.8, and kybernet compiles argonaut's `src/` under its own 6.6.6 pin. 1.16.0 raises the floor anyway.
+  Repeat 1.15.6's check: the `fcntl` lines that `qemu-x86_64 -strace` and `qemu-aarch64 -strace` record for
+  `notify`, `audit_findings` and `health_exec` must not change.
+- [ ] **Delete the `ag_sys_sendto` forwarder**, deprecated at 1.15.6.
+- [ ] **Breaking note for consumers:** a consumer that compiles argonaut's `src/` needs cyrius ≥ 6.6.8 (in practice
+  6.7.9), and any remaining `ag_sys_sendto` / `ag_sys_fcntl` call must move to `sys_sendto` / `sys_fcntl`. Check
+  kybernet against the release through a scratch `path` dep, as 1.15.5 and 1.15.6 did.
+
+## Done at 1.15.6 — follow-ups from the cyrius 6.6.20 pin move
+
+- [x] **The startup order is deterministic.** Each wave is sorted bytewise by name, and `resolve_service_order` is
+  the waves read in sequence (ADR 008 amendment, `tests/tcyr/resolve_order.tcyr`).
+- [x] **`sendto` uses the stdlib's `sys_sendto`.** `ag_sys_sendto` remains as a deprecated forwarder until 1.16.0.
+  `fcntl` moved to the 1.16.0 list above.

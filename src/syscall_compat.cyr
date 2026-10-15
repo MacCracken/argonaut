@@ -42,19 +42,11 @@
 # Every number in this file was verified by cross-building a probe and reading
 # the actual kernel entry under `qemu-aarch64 -strace`. Re-verify that way
 # before changing one; a wrong number here is silent on x86 and fatal on ARM.
-
-# sendto(fd, buf, len, flags, dest_addr, addrlen) — used by the sd_notify
-# client. x86_64 44 (native) / aarch64 206 (native, ladder-safe).
-# The stdlib's `sys_sendto` issues these same two numbers through `SYS_SENDTO`;
-# this wrapper is not a gap any more and is due to move to it (roadmap).
-fn ag_sys_sendto(fd, buf, len, flags, dest_addr, addrlen): i64 {
-    #ifdef CYRIUS_ARCH_X86
-    return syscall(44, fd, buf, len, flags, dest_addr, addrlen);
-    #endif
-    #ifdef CYRIUS_ARCH_AARCH64
-    return syscall(206, fd, buf, len, flags, dest_addr, addrlen);
-    #endif
-}
+#
+# sendto is no longer a gap. argonaut calls the stdlib's `sys_sendto` (x86 44 /
+# aarch64 206, through `SYS_SENDTO`), and `ag_sys_sendto` survives at the bottom
+# of this file as a deprecated forwarder, for a consumer that compiles this file
+# in. `ag_sys_fcntl` stays a live wrapper for now: see its comment.
 
 # getsockopt(fd, level, optname, optval, optlen) — SO_ERROR readback after a
 # non-blocking connect. No stdlib wrapper: the stdlib has `sys_setsockopt` on
@@ -107,9 +99,21 @@ fn ag_sys_getsid(pid): i64 {
 
 # fcntl(fd, cmd, arg) — F_SETFL O_NONBLOCK on the notify and health sockets.
 # `SYS_FCNTL` is defined in both arch peers (x86 72 / aarch64 25), so the enum
-# does the dispatch and no #ifdef is needed here. The stdlib's `sys_fcntl` has
-# this exact body; like `ag_sys_sendto`, this wrapper is due to move to it
-# (roadmap).
+# does the dispatch and no #ifdef is needed here.
+# The stdlib's `sys_fcntl` has this exact body but exists only from cyrius
+# 6.6.8, and kybernet compiles this file under its own, older pin. The call
+# sites move to `sys_fcntl` at argonaut 1.16.0, which requires cyrius 6.7.9.
 fn ag_sys_fcntl(fd, cmd, arg): i64 {
     return syscall(SYS_FCNTL, fd, cmd, arg);
+}
+
+# =========================================================================
+# Deprecated — removed at 1.16.0
+# =========================================================================
+# A forwarder kept for one release so a consumer that compiles this file in
+# keeps building. Nothing in argonaut calls it, so a DCE build drops it.
+
+#deprecated("use the stdlib's sys_sendto; ag_sys_sendto is removed at argonaut 1.16.0")
+fn ag_sys_sendto(fd, buf, len, flags, dest_addr, addrlen): i64 {
+    return sys_sendto(fd, buf, len, flags, dest_addr, addrlen);
 }

@@ -294,8 +294,34 @@ fn build_dep_graph(svc_defs, in_degree, dependents) {
     }
 }
 
+# Bytewise order of two service-name Strs: <0, 0 or >0, shorter first on a shared
+# prefix. The tie-break for services the dependency graph leaves unordered; a
+# `vec_sort_by` comparator. It reads the Str fields directly (data at +0, length
+# at +8) because it runs once per comparison inside the sort.
+fn _svc_name_cmp(a, b): i64 {
+    var pa = load64(a);
+    var pb = load64(b);
+    var la = load64(a + 8);
+    var lb = load64(b + 8);
+    var n = la;
+    if (lb < n) { n = lb; }
+    for (var i = 0; i < n; i = i + 1) {
+        var ca = load8(pa + i);
+        var cb = load8(pb + i);
+        if (ca != cb) { return ca - cb; }
+    }
+    return la - lb;
+}
+
 # Resolve startup order for services. Returns vec of service name Strs.
 # Returns 0 on error (cycle or missing dependency).
+#
+# Level-synchronous Kahn's algorithm. A service's level is one more than its
+# deepest dependency's. Levels run in sequence, each sorted by `_svc_name_cmp`, so
+# the order is `resolve_service_waves`' plan read wave by wave, and it depends on
+# the graph alone. It does not depend on definition order, or on `map_keys`, whose
+# order follows the hashmap's per-process seed and so changed on every boot until
+# 1.15.6.
 fn resolve_service_order(svc_defs) {
     var count = vec_len(svc_defs);
     if (count == 0) { return vec_new(); }
@@ -304,35 +330,43 @@ fn resolve_service_order(svc_defs) {
     var dependents = map_new();
     build_dep_graph(svc_defs, in_degree, dependents);
 
-    # BFS: start with in-degree 0 nodes
-    var queue = vec_new();
+    # Level 0: every node with in-degree 0.
+    var level = vec_new();
+    var next = vec_new();
+    var spent = 0;
     var keys = map_keys(in_degree);
     for (var i = 0; i < vec_len(keys); i = i + 1) {
         var key = vec_get(keys, i);
         if (map_get(in_degree, key) == 0) {
-            vec_push(queue, str_from(key));
+            vec_push(level, str_from(key));
         }
     }
 
     var ordered = vec_new();
-    var qi = 0;
-    while (qi < vec_len(queue)) {
-        var current = vec_get(queue, qi);
-        qi = qi + 1;
-        vec_push(ordered, current);
+    while (vec_len(level) > 0) {
+        vec_sort_by(level, &_svc_name_cmp);
+        vec_truncate(next, 0);
+        for (var li = 0; li < vec_len(level); li = li + 1) {
+            var current = vec_get(level, li);
+            vec_push(ordered, current);
 
-        var dep_list = map_get(dependents, str_data(current));
-        if (dep_list != 0) {
-            for (var j = 0; j < vec_len(dep_list); j = j + 1) {
-                var dep_name = str_data(vec_get(dep_list, j));
-                var deg = map_get(in_degree, dep_name);
-                deg = deg - 1;
-                map_set(in_degree, dep_name, deg);
-                if (deg == 0) {
-                    vec_push(queue, str_from(dep_name));
+            # A dependent whose last dependency starts in this level joins the next.
+            var dep_list = map_get(dependents, str_data(current));
+            if (dep_list != 0) {
+                for (var j = 0; j < vec_len(dep_list); j = j + 1) {
+                    var dep_name = str_data(vec_get(dep_list, j));
+                    var deg = map_get(in_degree, dep_name) - 1;
+                    map_set(in_degree, dep_name, deg);
+                    if (deg == 0) {
+                        vec_push(next, str_from(dep_name));
+                    }
                 }
             }
         }
+        # Swap, so the drained vec holds the level after next.
+        spent = level;
+        level = next;
+        next = spent;
     }
 
     # Cycle detection: compare against total graph nodes (includes external deps)
@@ -372,6 +406,9 @@ fn resolve_service_waves(svc_defs) {
         if (vec_len(wave) == 0) {
             return 0;  # cycle detected
         }
+
+        # ADR 008: a wave is sorted by name, never left in `map_keys` order.
+        vec_sort_by(wave, &_svc_name_cmp);
 
         # Remove processed nodes and decrement dependents
         for (var i = 0; i < vec_len(wave); i = i + 1) {

@@ -1,0 +1,185 @@
+# resolve_order.tcyr — the startup order is a function of the dependency graph alone (1.15.6)
+#
+# `resolve_service_order` and `resolve_service_waves` filled Kahn's queue, and each wave, in
+# `map_keys` order. cyrius's hashmap seeds itself per process (6.5.39+), so services with no
+# ordering between them started in a different order on each boot: six x86_64 smoke runs
+# printed four different `startup order:` lines. ADR 008 promised alphabetical waves.
+#
+# The rule pinned here: services start level by level, where a service's level is one more
+# than its deepest dependency's, and alphabetically (bytewise) within a level. The linear
+# order is therefore the wave plan read in sequence. Neither depends on the order the
+# services were defined in.
+include "tests/test_header.cyr"
+
+fn join_order(v) {
+    var sb = str_builder_new();
+    for (var i = 0; i < vec_len(v); i = i + 1) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add(sb, vec_get(v, i));
+    }
+    return str_builder_build(sb);
+}
+
+fn join_waves(w) {
+    var sb = str_builder_new();
+    for (var i = 0; i < vec_len(w); i = i + 1) {
+        if (i > 0) { str_builder_add_cstr(sb, "|"); }
+        str_builder_add(sb, join_order(vec_get(w, i)));
+    }
+    return str_builder_build(sb);
+}
+
+# Flatten the waves into one linear order.
+fn flatten_waves(w) {
+    var out = vec_new();
+    for (var i = 0; i < vec_len(w); i = i + 1) {
+        var wave = vec_get(w, i);
+        for (var j = 0; j < vec_len(wave); j = j + 1) {
+            vec_push(out, vec_get(wave, j));
+        }
+    }
+    return out;
+}
+
+# Assert that `got` (a Str) reads `want` (a cstring); print what it read when it does not.
+fn expect_str(got, want, name) {
+    var ok = str_eq_cstr(got, want);
+    if (ok == 0) {
+        sys_write(2, "    got: ", 9);
+        sys_write(2, str_data(got), str_len(got));
+        sys_write(2, "\n", 1);
+    }
+    return assert(ok, name);
+}
+
+fn deps1(a) {
+    var d = vec_new();
+    vec_push(d, str_from(a));
+    return d;
+}
+
+fn deps2(a, b) {
+    var d = vec_new();
+    vec_push(d, str_from(a));
+    vec_push(d, str_from(b));
+    return d;
+}
+
+fn reversed(v) {
+    var out = vec_new();
+    for (var i = vec_len(v) - 1; i >= 0; i = i - 1) { vec_push(out, vec_get(v, i)); }
+    return out;
+}
+
+fn main() {
+    alloc_init();
+    test_group("resolve-order");
+
+    # --- Eight independent services, defined out of order ---
+    # Under the seeded hashmap the chance of reading these back alphabetically by accident is
+    # 1 in 8! = 40,320, so the pre-1.15.6 resolver fails these two on practically every run.
+    var indep = vec_new();
+    vec_push(indep, dummy_svc(str_from("hotel"), 0));
+    vec_push(indep, dummy_svc(str_from("bravo"), 0));
+    vec_push(indep, dummy_svc(str_from("golf"), 0));
+    vec_push(indep, dummy_svc(str_from("alpha"), 0));
+    vec_push(indep, dummy_svc(str_from("echo"), 0));
+    vec_push(indep, dummy_svc(str_from("delta"), 0));
+    vec_push(indep, dummy_svc(str_from("foxtrot"), 0));
+    vec_push(indep, dummy_svc(str_from("charlie"), 0));
+    expect_str(join_order(resolve_service_order(indep)),
+        "alpha,bravo,charlie,delta,echo,foxtrot,golf,hotel", "indep order alphabetical");
+    expect_str(join_waves(resolve_service_waves(indep)),
+        "alpha,bravo,charlie,delta,echo,foxtrot,golf,hotel", "indep wave alphabetical");
+
+    # --- Level order, not smallest-ready-first ---
+    # `a` depends on `b`; `c` is free. Level 0 is {b, c} and level 1 is {a}, so `c` starts
+    # before `a` even though `a` sorts first. (Smallest-ready-first would give b,a,c.)
+    var lv = vec_new();
+    vec_push(lv, dummy_svc(str_from("a"), deps1("b")));
+    vec_push(lv, dummy_svc(str_from("c"), 0));
+    vec_push(lv, dummy_svc(str_from("b"), 0));
+    expect_str(join_order(resolve_service_order(lv)), "b,c,a", "level order b,c,a");
+    expect_str(join_waves(resolve_service_waves(lv)), "b,c|a", "level waves b,c|a");
+
+    # --- Diamond plus a free service ---
+    # d needs b and c; b and c need a; z needs nothing.
+    var dia = vec_new();
+    vec_push(dia, dummy_svc(str_from("d"), deps2("c", "b")));
+    vec_push(dia, dummy_svc(str_from("c"), deps1("a")));
+    vec_push(dia, dummy_svc(str_from("z"), 0));
+    vec_push(dia, dummy_svc(str_from("b"), deps1("a")));
+    vec_push(dia, dummy_svc(str_from("a"), 0));
+    expect_str(join_order(resolve_service_order(dia)), "a,z,b,c,d", "diamond order");
+    expect_str(join_waves(resolve_service_waves(dia)), "a,z|b,c|d", "diamond waves");
+
+    # --- Definition order does not matter ---
+    expect_str(join_order(resolve_service_order(reversed(dia))), "a,z,b,c,d",
+        "diamond order, reversed defs");
+    expect_str(join_waves(resolve_service_waves(reversed(dia))), "a,z|b,c|d",
+        "diamond waves, reversed defs");
+    expect_str(join_order(resolve_service_order(reversed(indep))),
+        "alpha,bravo,charlie,delta,echo,foxtrot,golf,hotel", "indep order, reversed defs");
+
+    # --- The comparator: bytewise, and a prefix sorts before its extensions ---
+    var cmpset = vec_new();
+    vec_push(cmpset, dummy_svc(str_from("abc"), 0));
+    vec_push(cmpset, dummy_svc(str_from("a"), 0));
+    vec_push(cmpset, dummy_svc(str_from("Zed"), 0));
+    vec_push(cmpset, dummy_svc(str_from("ab"), 0));
+    expect_str(join_order(resolve_service_order(cmpset)), "Zed,a,ab,abc", "bytewise, prefix first");
+
+    # --- A wide wave: past vec_sort_by's 16-element insertion cutoff, into its partitioning ---
+    # 40 independent services, defined in the order i * 17 mod 40 (17 is coprime to 40, so
+    # every name appears once), zero-padded so bytewise order is numeric order.
+    var big = vec_new();
+    var want_sb = str_builder_new();
+    for (var bi = 0; bi < 40; bi = bi + 1) {
+        var k = (bi * 17) % 40;
+        var nsb = str_builder_new();
+        str_builder_add_cstr(nsb, "s");
+        if (k < 10) { str_builder_add_cstr(nsb, "0"); }
+        str_builder_add_int(nsb, k);
+        vec_push(big, dummy_svc(str_builder_build(nsb), 0));
+
+        if (bi > 0) { str_builder_add_cstr(want_sb, ","); }
+        str_builder_add_cstr(want_sb, "s");
+        if (bi < 10) { str_builder_add_cstr(want_sb, "0"); }
+        str_builder_add_int(want_sb, bi);
+    }
+    var want_big = str_builder_build(want_sb);
+    var big_order = join_order(resolve_service_order(big));
+    var big_waves = join_waves(resolve_service_waves(big));
+    assert(str_eq(big_order, want_big), "40 names: order sorted");
+    assert(str_eq(big_waves, want_big), "40 names: wave sorted");
+
+    # --- The linear order is the waves read in sequence ---
+    var modes = vec_new();
+    vec_push(modes, BOOT_MINIMAL);
+    vec_push(modes, BOOT_SERVER);
+    vec_push(modes, BOOT_DESKTOP);
+    vec_push(modes, BOOT_EDGE);
+    for (var m = 0; m < vec_len(modes); m = m + 1) {
+        var svcs = default_services(vec_get(modes, m));
+        var o = resolve_service_order(svcs);
+        var w = resolve_service_waves(svcs);
+        assert(o != 0, "default set resolves");
+        assert(w != 0, "default set has waves");
+        assert(str_eq(join_order(o), join_order(flatten_waves(w))), "order == flattened waves");
+    }
+
+    # --- The desktop boot order, pinned ---
+    # The order the desktop profile starts in. Changing the default service set changes it;
+    # update this line with the change, not to quiet the test.
+    var dsk = default_services(BOOT_DESKTOP);
+    expect_str(join_waves(resolve_service_waves(dsk)),
+        "agnos-init,postgres,redis|daimon|aethersafha,llm-gateway|agnoshi,ifran",
+        "desktop waves pinned");
+    expect_str(join_order(resolve_service_order(dsk)),
+        "agnos-init,postgres,redis,daimon,aethersafha,llm-gateway,agnoshi,ifran",
+        "desktop order pinned");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

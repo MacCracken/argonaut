@@ -39,3 +39,20 @@ Wave 3: [agnoshi, synapse]        — after their deps
 - **Async executor in library**: Would force a runtime (tokio/async-std) on all consumers. Rejected — library should be runtime-agnostic.
 - **Thread pool in library**: Same coupling problem. Rejected.
 - **Depth annotation on linear sort**: Return `Vec<(String, usize)>` with depth. Workable but less ergonomic than pre-grouped waves.
+
+## Amendment — 1.15.6 (2026-10-14): the sort, implemented
+
+The Decision says each wave is sorted alphabetically. Until 1.15.6 nothing sorted. Both functions took ready services in `map_keys` order. cyrius's hashmap has seeded itself per process since cyrius 6.5.39, so that order, and therefore the boot order of unordered services, changed from boot to boot.
+
+From 1.15.6:
+
+- **Each wave is sorted bytewise by service name.** The comparison is byte order, not locale order: `Zed` sorts before `alpha`, and a name sorts before its extensions (`a`, `ab`, `abc`).
+- **`resolve_service_order` uses the same levels and the same sort.** It is a level-synchronous Kahn's algorithm: every service a level releases joins the next level, and each level is sorted before it runs. So the linear order is exactly the wave plan read wave by wave. The two functions still compute their result independently (the Negative above stands), and `tests/tcyr/resolve_order.tcyr` asserts that they agree for every default profile.
+- **The desktop profile today:**
+  ```
+  Wave 0: [agnos-init, postgres, redis]
+  Wave 1: [daimon]
+  Wave 2: [aethersafha, llm-gateway]
+  Wave 3: [agnoshi, ifran]
+  ```
+  The same test pins this plan and the matching linear order. Neither depends on the order services were defined in.

@@ -6,6 +6,14 @@
 
 ## Version
 
+**1.15.6** (the startup order is deterministic. Each wave is sorted bytewise by
+name, and `resolve_service_order` is the waves read in sequence, as ADR 008
+always said. `send_notify` uses the stdlib's `sys_sendto`. `ag_sys_sendto` is a
+deprecated forwarder, and `ag_sys_fcntl` stays until 1.16.0, because kybernet is
+still on cyrius 6.6.6. 34 suites / 1,016 assertions on x86_64 and under
+qemu-aarch64. Bench: `resolve_waves_wide_20` +3–4 µs for the sort, shipped with a
+written justification. kybernet takes it with a tag bump.)
+
 **1.15.5** (toolchain cyrius **6.6.6 → 6.6.20**; libro **2.10.3 → 2.10.8**, which
 carries sigil 3.13.10 and patra 1.15.2; sakshi 2.5.7 and patra 1.15.2 from the 6.6.20
 fold. `src/` changes are comments only. With 6.6.8's `MAP_NORESERVE` heap, argonaut
@@ -508,17 +516,20 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **x86_64: 426,936 B**, a statically linked ELF, at 1.15.5
+- **x86_64: 431,032 B**, a statically linked ELF, at 1.15.6
   (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`).
-  2,549 fns are unreachable and 848,190 B of dead code is eliminated. That is
-  +23,200 over 1.15.4's 403,736 B: +18,704 from the toolchain and +4,496 from
-  libro 2.10.8 plus sigil 3.13.10. The split comes from building the 1.15.4
-  tree under 6.6.20, which gives 422,440 B.
-- **aarch64: 1,503,976 B** at 1.15.5 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`).
-  2,551 fns are unreachable and 1,005,596 B is NOPed. That is −193,872 against
-  1,697,848 B at 1.15.4. The toolchain accounts for −194,264: 6.6.18's ESYSXLAT
-  compile-time fold stops inlining the x86 → aarch64 translation chain at a
-  syscall site whose number is a literal.
+  2,539 fns are unreachable and 843,708 B of dead code is eliminated. That is
+  +4,096 over 1.15.5's 426,936 B. The resolver's sort made `vec_sort_by`'s
+  introsort live (4,482 B more code), and the file grows by one page because
+  the data segment is page-aligned. 1.15.5 itself was +23,200 over 1.15.4:
+  +18,704 from toolchain 6.6.20 and +4,496 from libro 2.10.8 plus sigil 3.13.10.
+- **aarch64: 1,503,976 B** at 1.15.6, unchanged from 1.15.5
+  (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`). 2,541 fns are unreachable
+  and 1,000,496 B is NOPed. aarch64 DCE fills dead code with NOPs instead of
+  compacting, so code that becomes live does not change the size. 1.15.5 was
+  −193,872 against 1.15.4 because 6.6.18's ESYSXLAT compile-time fold stops
+  inlining the x86 → aarch64 translation chain at a syscall site whose number is
+  a literal.
 - **L3 helper: 15,064 B**, a static ELF (`qemu/helpers/l3-helper`), re-cut under
   6.6.20 at 1.15.5 (10,456 B under 6.6.6). It is bundled into the qemu harness
   initramfs as `/bin/l3-helper`. Its build is warning-free; under 6.6.6 it
@@ -526,18 +537,38 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Suites
 
-- **x86_64: 33 `.tcyr` suites / 984 assertions**, 0 failures (cyrius 6.6.20).
-  The count is unchanged at 1.15.5.
-- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 33 / 33, 984 assertions**,
-  identical to x86_64. Run on the dev host at 1.15.5. CI still runs only the
+- **x86_64: 34 `.tcyr` suites / 1,016 assertions**, 0 failures (cyrius 6.6.20).
+  +32 at 1.15.6: the new `resolve_order.tcyr` (26) and the `send_notify` round
+  trip in `notify.tcyr` (6).
+- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 34 / 34, 1,016 assertions**,
+  identical to x86_64. Run on the dev host at 1.15.6. CI still runs only the
   aarch64 smoke.
 - **qemu PID-1 harness** (`qemu/pid1-harness-test.sh`, `qemu/boot-test.sh`,
-  KVM + `+invtsc`): at 1.15.5, M3 + L3 end-to-end and the supervisor-loop smoke
-  pass at the scripts' committed `-m 256M`. The 1.15.4 binary, built on 6.6.6,
-  panics under the same harness.
+  KVM + `+invtsc`): at 1.15.6, M3 + L3 end-to-end and the supervisor-loop smoke
+  pass at the scripts' committed `-m 256M`. They have passed there since 1.15.5;
+  the 1.15.4 binary, built on 6.6.6, panics under the same harness.
 - **Benches**: `src/bench_main.cyr` — 29 micros, the release gate
   (`scripts/bench-history.sh`); `tests/bcyr/argonaut.bcyr` carries the same 29,
   `tests/bcyr/api.bcyr` 8 more. History in `bench-history.csv`.
+
+### Bench snapshot (1.15.6-deterministic-order, 2026-10-14)
+
+**Verdict: one regression, with a written justification**, against the 1.15.5 tag.
+The gate row was recorded at load 16.7, with another job on every core, so it is
+inflated about 1.5×. The verdict rests on interleaved A/B runs pinned to one core.
+
+| Bench | 1.15.5 → 1.15.6 | read |
+|---|---|---|
+| resolve_waves_wide_20 ⚠ | +27 % to +34 % (≈ +3.3 to +4.3 µs) | the sort of a 20-name wave |
+| resolve_waves_desktop, resolve_order_desktop, plan_shutdown_* | +8 % to +16 % (≈ +1.2 to +2.2 µs) | band edge |
+| chain micros and the other 20 | the sign flips between runs | neutral |
+
+- ⚠ **`resolve_waves_wide_20` is the cost of the fix**: sorting each wave is what
+  makes the boot order reproducible, and a boot resolves a handful of times. A
+  direct-call insertion sort was measured slower and dropped. Full tables are in
+  CHANGELOG [1.15.6] Performance.
+- ⚠ The next gate should compare against this label only with a quiet host; its row
+  is load-inflated.
 
 ### Bench snapshot (1.15.5-cyrius-6.6.20, 2026-10-14)
 
@@ -652,19 +683,22 @@ are single runs.
 
 ## In-flight
 
-### Found at 1.15.5 (not fixed)
+### Open for 1.16.0
 
-- **Services with no ordering between them start in a different order on each
-  run.** `resolve_service_order` and `resolve_service_waves` (`src/services.cyr`)
-  fill Kahn's queue, and each wave, in `map_keys` order. cyrius's hashmap has
-  seeded itself per process since 6.5.39. In six x86_64 smoke runs the `startup
-  order` line came out four different ways; in four qemu-aarch64 runs, four ways.
-  Every dependency is still respected; only the order among unordered services
-  varies. ADR 008 says each wave is sorted alphabetically, but no sort exists.
-  1.15.4 on 6.6.6 behaves the same. On the roadmap.
-- The 1.15.2 item, that argonaut could not boot as PID 1 below ~256 MB of RAM +
-  swap, is **closed at 1.15.5** by cyrius 6.6.8's `MAP_NORESERVE` first chunk
-  (see Toolchain and CHANGELOG [1.15.5] Fixed).
+- **`ag_sys_fcntl` still wraps a syscall the stdlib now wraps.** The four call
+  sites move to `sys_fcntl` at 1.16.0. They can't move sooner because
+  `sys_fcntl` exists only from cyrius 6.6.8 and kybernet compiles argonaut's
+  `src/` under 6.6.6. The deprecated `ag_sys_sendto` forwarder is deleted in the
+  same release. See the roadmap.
+
+### Closed recently
+
+- **1.15.6:** the boot order of services with no ordering between them changed
+  on every boot (found at 1.15.5). Waves are now sorted bytewise and the linear
+  order is the waves in sequence (CHANGELOG [1.15.6] Fixed, ADR 008 amendment).
+- **1.15.5:** argonaut could not boot as PID 1 below ~256 MB of RAM + swap
+  (found at 1.15.2). Closed by cyrius 6.6.8's `MAP_NORESERVE` first chunk (see
+  Toolchain and CHANGELOG [1.15.5] Fixed).
 
 ### Filed by the 2026-08-24 P(-1) audit (not fixed in 1.8.6)
 
@@ -807,9 +841,11 @@ are single runs.
 
 ## Pending release (unreleased)
 
-- **1.15.5** (cut in the working tree, not yet tagged): toolchain 6.6.20 and libro
-  2.10.8. See Version and CHANGELOG [1.15.5]. kybernet, which pins 1.15.4, takes it
-  with a tag bump; `src/` changes only in comments.
+- **1.15.6** (cut in the working tree, not yet tagged): deterministic startup order,
+  and `sendto` moved onto the stdlib's `sys_sendto`. See Version and CHANGELOG [1.15.6].
+  kybernet, which pins 1.15.4 on cyrius 6.6.6, takes it with a tag bump.
+- **1.16.0** (planned): cyrius 6.7.9, the `fcntl` move, and removal of the
+  `ag_sys_sendto` forwarder. See the roadmap.
 
 ## Recent shipped
 
@@ -842,7 +878,7 @@ are single runs.
 ## Consumers
 
 - **AGNOS boot** — PID 1 / systemd-delegate role
-- **kybernet** — uses argonaut as a library for service orchestration in the kybernet shell. Vendors argonaut's `src/` modules directly; pins argonaut **1.15.4** on cyrius 6.6.6 with libro 2.10.3. 1.15.5's `src/` diff is comment-only. A scratch kybernet resolving this tree by `path` builds at an unchanged 719,752 B and passes 882 / 882.
+- **kybernet** — uses argonaut as a library for service orchestration in the kybernet shell. Vendors argonaut's `src/` modules directly; pins argonaut **1.15.4** on cyrius 6.6.6 with libro 2.10.3. At 1.15.6, a scratch kybernet resolving this tree by `path` builds on its 6.6.6 pin at 723,920 B and passes 882 / 882. It must reach cyrius ≥ 6.6.8 before it can take 1.16.0 (`sys_fcntl`).
 - **stiva, sutra, daimon** — service definitions and lifecycle hooks consume the audit chain
 
 (Track downstream build status against this version when bumping minors.)
@@ -850,7 +886,7 @@ are single runs.
 ## Verification
 
 - Linux x86_64 (Arch, kernel 7.2, AMD Ryzen 7 5800H, HPET clocksource) — primary dev host; CI on `ubuntu-latest`
-- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **33 / 33, 984 assertions at 1.15.5** (cyrius 6.6.20), identical to x86_64. CI runs the aarch64 smoke only. Real-hardware validation (RPi4, Apple Silicon, Graviton / Ampere) is still the native-aarch64-CI item, gated on runner allocation. See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
+- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **34 / 34, 1,016 assertions at 1.15.6** (cyrius 6.6.20), identical to x86_64. CI runs the aarch64 smoke only. Real-hardware validation (RPi4, Apple Silicon, Graviton / Ampere) is still the native-aarch64-CI item, gated on runner allocation. See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
 - qemu PID-1 harness under KVM — passes at 1.15.5 at the scripts' committed `-m 256M`; the boot test also boots at `-m 128M`.
 
 ## Audit cadence
