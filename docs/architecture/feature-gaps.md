@@ -1,76 +1,73 @@
 # Feature Gap Analysis
 
-Based on research into s6, dinit, systemd, runit, OpenRC, and other production init systems.
+This is a checklist of what production init systems (s6, dinit, systemd, runit, OpenRC)
+provide, and where each item stands in argonaut today. "Consumer" means the work is done
+in kybernet, through argonaut's pre-exec hook or kybernet's own config loading
+([ADR-013](../adrs/013-policy-enforcement-in-the-consumer.md)). Work that is still open
+is pinned in [`roadmap.md`](../development/roadmap.md).
 
 ## P0 — Required Before Production
 
-| Feature | Why | Status |
-|---------|-----|--------|
-| Zombie reaping (SIGCHLD) | PID 1 MUST reap all children, not just tracked services. Orphans become zombies. | Deferred to kybernet (PID 1 binary) — **kybernet 1.0.1 depends on argonaut 1.2.0** |
-| Signal forwarding | PID 1 receives all signals. Must forward SIGTERM/SIGINT/SIGHUP to services. | Deferred to kybernet (PID 1 binary) |
-| Parallel service startup | Independent services should start concurrently. Toposort gives the data; need wave-based executor. | **Implemented** (v0.8.0) — `resolve_service_waves`, `boot_execution_plan_waves` |
-| Cgroup-per-service | Clean process killing (kill cgroup, not PID), resource accounting, OOM priority. | Deferred to kybernet (PID 1 binary) |
-| Resource limits (rlimits) | RLIMIT_NOFILE, RLIMIT_AS, RLIMIT_NPROC, RLIMIT_CORE per service. | **Implemented** (v0.8.0) — `ResourceLimits` + prlimit commands |
-| Privilege drop (uid/gid) | Services must run as non-root. Library errors on uid/gid set. | Deferred to kybernet (PID 1 binary) — requires pre-exec hook at OS level |
-| Forking service type | PostgreSQL and other daemons fork; parent exits. Need to track child PID via sd_notify or PID file. | **Implemented** (v0.8.0) — `ServiceType::Forking`, `read_pid_file` |
+| Feature | Status |
+|---------|--------|
+| Zombie reaping | **Implemented.** `init_reap_services` plus the orphan sweep `proc_table_reap_orphans`, with PR_SET_CHILD_SUBREAPER enrolment (1.5.0). argonaut's own PID-1 loop reaps on SIGCHLD from a signalfd (1.6.0+) |
+| Signals and shutdown | **Implemented.** argonaut's PID 1 treats SIGTERM as poweroff and SIGINT (Ctrl-Alt-Del) as reboot, and syncs first. `init_execute_shutdown` / `init_stop_all` stop services in reverse dependency waves within one budget (1.16.2) |
+| Parallel startup | **Implemented.** `init_boot_execution_plan_waves`: one Kahn's pass, deterministic order inside each wave (1.15.6 / 1.16.1). The consumer runs the waves |
+| Cgroup per service | **Consumer.** argonaut stores an opaque `cgroup_limits` (1.13.0); kybernet joins the cgroup in its pre-exec hook |
+| Resource limits (rlimits) | **Not applied.** `to_prlimit_commands` generates `prlimit` commands that nothing runs, and nothing reads `svc_def_rlimits` (see ADR-010). kybernet limits services through `cgroup_limits` instead |
+| Privilege drop (uid / gid) | **Consumer.** argonaut has no uid / gid field; kybernet drops privileges in its pre-exec hook |
+| Forking services | **Implemented.** `SVC_FORKING`: the PID is read from the PID file strictly (no symlinks or FIFOs; numeric only; 1.16.1), and the start is bounded by a 90 s default timeout |
 
 ## P1 — Should Have
 
-| Feature | Why | Status |
-|---------|-----|--------|
-| Socket activation | Zero-downtime restarts, on-demand start, breaks circular deps. Pass fd 3+ via LISTEN_FDS/LISTEN_PID. | **Implemented** (v0.9.0) — `SocketActivationConfig`, LISTEN_FDS env |
-| sd_notify WATCHDOG=1 | Many daemons send WATCHDOG=1 keepalive. Without handling this, watchdog-reliant services fail. | **Implemented** (v0.7.0) — `NotifyMessage.watchdog` |
-| sd_notify credential verification | SO_PASSCRED prevents spoofed READY=1 from arbitrary processes. | **Implemented** (v0.7.0) — `enable_credentials()` |
-| Log rotation | Current append-only log files will fill disks. Need rotation or ring buffer. | **Implemented** (v0.8.0) — `LogConfig`, size-based rotation |
-| Environment file loading | `/etc/argonaut/env.d/<service>` — every production init supports this. | **Implemented** (v0.8.0) — `load_environment_file`, implicit env.d |
-| tmpfiles.d equivalent | Create dirs, symlinks, device nodes at boot. Critical for `/run`, `/tmp`. | **Implemented** (v0.9.0) — `TmpfileEntry`, `generate_tmpfile_commands` |
-| Seccomp/Landlock per service | Boot stage exists but no implementation. Drop capabilities, apply filters. | **NOT IMPLEMENTED — descriptive only.** Corrected 1.8.6 (audit DOC-1); previously claimed "Implemented (v0.9.0) … + agnosys integration", which was wrong twice over. `src/security.cyr` contains **zero syscalls**: `seccomp_description` / `landlock_description` build human-readable strings and `capability_setpriv_cmd` builds a `setpriv` command nothing executes. `svc_def_new` stores `0` for all three fields and no spawn path reads them, so every service `fork_exec_service` starts inherits PID 1's **full root privileges**. agnosys, named as the integration, was dropped from the dependency graph at 1.8.4. `SeccompConfig` / `LandlockConfig` / `CapabilityConfig` are data + rendering only. Real enforcement is roadmap work. |
+| Feature | Status |
+|---------|--------|
+| sd_notify readiness | **Implemented.** `SVC_NOTIFY` (1.13.6) stays STARTING until an authenticated `READY=1` |
+| sd_notify `WATCHDOG=1` | **Implemented.** An authenticated keepalive refreshes the deadline from `watchdog_ms`, and `init_enforce_watchdog` kills a service that misses it |
+| sd_notify sender authentication | **Implemented.** `notify_bind` sets `SO_PASSCRED`. `notify_try_recv_authenticated` matches the sender against the service's pids, drops truncated datagrams and closes passed descriptors. The unauthenticated `notify_try_recv` / `notify_drain` are deprecated, with removal at 1.17.0 |
+| sd_notify `RELOADING=1`, `STOPPING=1`, `MAINPID=`, `STATUS=` | **Parsed, not acted on.** Only `READY=1` and `WATCHDOG=1` change state |
+| Socket activation | **Not implemented.** `socket_env_listen_fds` builds `LISTEN_FDS` / `LISTEN_PID` strings, but nothing creates or passes sockets, and the `socket_activation` field is never read |
+| Log rotation | **Not implemented.** `LogConfig` is a struct with a default and no reader. Service stdout and stderr go to `/dev/null` |
+| Environment files | **Helpers only.** `load_env_file` / `load_env_files` parse files, but the spawn path does not call them, and there is no implicit `env.d`. kybernet loads env files into the definition's environment map. The service environment itself is built by `build_service_envp`, and service-defined values override the defaults |
+| tmpfiles.d equivalent | **Implemented.** `tmpfiles_apply` creates directories, symlinks and device nodes natively, without following a symlink in any path component (1.16.2). `generate_tmpfile_commands` still renders the command form |
+| Seccomp / Landlock / capabilities | **Consumer.** argonaut models the policy (opaque fields, description renderers) and enforces none of it. `fork_exec_service` passes each definition to the pre-exec hook, which fails closed (exit 126). kybernet's hook applies `no_new_privs`, capabilities, Landlock and seccomp per service. **With no hook, a service runs with PID 1's full root privileges** |
+| Health-check commands under policy | **Gap.** A command health check runs without the pre-exec hook, so a confined service's check command runs unconfined (roadmap 1.18.0) |
 
 ## P2 — Nice to Have
 
-| Feature | Why |
-|---------|-----|
-| D-Bus interface | Desktop components query service status via D-Bus. Only if AGNOS needs it. |
-| Timer-based services | Cron equivalent — OnCalendar/OnBootSec triggers. |
-| On-demand lazy start | Start service on first socket connection. Depends on socket activation. |
-| Transient units | One-off commands in cgroups with resource limits (like `systemd-run`). |
-| SBOM generation | Software Bill of Materials for supply chain compliance. |
-| Reproducible builds | SLSA level 3+ provenance. |
+| Feature | Note |
+|---------|------|
+| D-Bus interface | Only if the AGNOS desktop needs it (roadmap non-goal) |
+| Timer-based services | samay's domain (roadmap non-goal) |
+| On-demand lazy start | Depends on socket activation |
+| Transient units | One-off commands in cgroups (like `systemd-run`) |
+| SBOM generation | Supply-chain compliance |
+| Reproducible builds / provenance | SLSA; releases publish SHA256SUMS only today |
 
-## Research-Driven Fixes (Resolved)
+## Edge boot and sd_notify details
 
-### dm-verity — all resolved in v0.7.0
-- ~~Remove redundant `veritysetup verify`~~ — Done, `open` already verifies on read
-- ~~`--restart-on-corruption` for edge mode~~ — Done
-- ~~Verity failure fatal in edge mode~~ — Done
-- FEC support (`--fec-device`) — deferred (P2, no edge storage reliability issues yet)
+### dm-verity
+- `veritysetup open` verifies on read; there is no redundant `verify` pass.
+- `--restart-on-corruption` is used in edge mode, and a verity failure is fatal there.
+- FEC (`--fec-device`) is not implemented; it is gated in the roadmap.
 
-### LUKS2 + TPM2 — all resolved in v0.7.0
-- ~~`--token-id=0` and `--tries=1`~~ — Done
-- ~~Default `tpm_attestation` to `true`~~ — Done
-- ~~PCR binding configuration~~ — Done (`pcr_bindings` field)
+### LUKS2 + TPM2
+- The unlock is `cryptsetup open --type luks2 --token-only --token-id 0 --tries 1 --`:
+  the key comes only from the LUKS2 token, with one attempt and no passphrase fallback.
+- `pcr_bindings` is **not** a sealing policy. It is a read-out set that kybernet compares
+  for drift, and argonaut has no TPM code. Which boot states the TPM releases the key to
+  is set at enrolment: see
+  [architecture note 005](005-edge-boot-tpm-key-policy.md).
 
-### sd_notify — all resolved in v0.7.0
-- ~~WATCHDOG=1 keepalive~~ — Done
-- ~~SO_PASSCRED credential verification~~ — Done
-- ~~RELOADING=1 and STOPPING=1~~ — Done
-- Abstract socket namespace — deferred (P2, no consumer needs it yet)
+### sd_notify
+- The abstract socket namespace is not supported; it is gated in the roadmap.
 
-## Architecture Recommendation
+## Process shape
 
-The research confirms the standard pattern for modern init systems:
+kybernet links argonaut's `src/` **in-process**. It is one PID-1 process with its own
+event loop, config loading and policy hook. There is no separate "argonaut-manager"
+process. A two-process split (a minimal PID 1 that execs a manager) was the original
+recommendation from this analysis, and it was not adopted.
 
-```
-kybernet (PID 1 binary — Cyrius):
-  mount /proc, /sys, /dev, /run
-  set up signalfd for SIGCHLD + SIGTERM + SIGPWR
-  exec argonaut-manager
-
-argonaut-manager (uses argonaut Cyrius library):
-  epoll event loop: signalfd, timerfd, notify socket, control socket
-  parallel service startup from dependency graph
-  cgroup-per-service
-  socket activation
-```
-
-This two-process split means a bug in the service manager doesn't kernel-panic the system. s6, dinit, and systemd all use this pattern. kybernet 1.0.1 boots QEMU with real AGNOS binaries using the argonaut 1.2.0 library.
+argonaut's own binary is a minimal PID 1. It mounts, takes signals from a signalfd,
+reaps, syncs and powers off. It does not run the service lifecycle.

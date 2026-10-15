@@ -38,3 +38,19 @@ The reasoning above remains valid: memory safety and type-encoded state invarian
 - `cargo audit` / `cargo deny` → replaced by Cyrius build toolchain and AGNOS dependency management
 - Supply chain security is enforced at the OS layer, not via Cargo
 - Privilege dropping (`setuid`/`setgid`) remains deferred to kybernet (PID 1 binary), same constraint, different mechanism
+
+## Update (2026-10-14)
+
+The post-port claim that "the argonaut library module itself contains no direct
+syscalls" no longer holds, and has not since the PID-1 work. argonaut performs OS
+primitives itself:
+- process: fork, execve, wait, kill, process groups;
+- notify: socket, bind, recvmsg, sendto;
+- PID 1: mount, signalfd, prctl, reboot;
+- tmpfiles: the `*at` family.
+
+Each goes through a stdlib `sys_*` wrapper, or an arch-dispatched `ag_sys_*` entry in
+`src/syscall_compat.cyr`; never a literal syscall number.
+
+Privilege dropping and sandboxing remain the consumer's. They now go through the pre-exec
+hook (ADR-013), which kybernet implements.

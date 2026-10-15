@@ -1,6 +1,6 @@
 # ADR-011: Per-Service Security Model (Seccomp, Landlock, Capabilities)
 
-**Status**: Accepted — carried forward in Cyrius port; dual-path architecture unchanged
+**Status**: Superseded by ADR-013 — the agnosys enforcement path was never built
 **Date**: 2026-04-02
 
 ## Context
@@ -54,3 +54,18 @@ Capabilities use `setpriv` (from util-linux) instead of `capsh`:
 - **Global security policy only**: Single system-wide seccomp filter. Rejected — per-service policies are more precise and follow the principle of least privilege.
 - **External policy files (seccomp JSON profiles)**: More flexible but adds a file format dependency. Rejected for initial implementation — can be added later as a config loading layer.
 - **Direct `prctl` syscalls in the library**: The library avoids direct syscalls. Rejected — delegated to agnosys which encapsulates the OS-level operations.
+
+## Update (2026-10-14)
+
+The dual-path architecture described here does not exist.
+- **No agnosys enforcement layer:** agnosys left at 1.8.4. There is no `apply_seccomp`,
+  `apply_landlock` or `syscall_name_to_nr`.
+- **No typed configs:** there are no `SeccompConfig` / `LandlockConfig` /
+  `CapabilityConfig` / `SocketActivationConfig` types. The `seccomp`, `landlock` and
+  `capabilities` fields are opaque pointers that the consumer defines.
+- **What argonaut has:** description renderers, `capability_setpriv_cmd` (no caller) and
+  `socket_env_listen_fds` (an environment helper; nothing passes sockets).
+
+Enforcement is the consumer's, through the pre-exec hook: see ADR-013. kybernet's hook
+applies cgroup placement, `no_new_privs`, capabilities, the uid/gid drop, Landlock and
+seccomp. With no hook, a service runs with PID 1's full root privileges.

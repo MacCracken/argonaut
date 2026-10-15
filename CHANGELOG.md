@@ -7,6 +7,84 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Documentation
+
+A full sweep for stale information, plus a roadmap reorganised into pinned releases. No
+code changes: the only `src/` and `tests/` edits are comments, and the DCE binary is
+byte-identical to 1.16.2's (448,448 B). 41 suites and 1,662 assertions pass.
+
+**Roadmap** (`docs/development/roadmap.md`): remaining work is pinned to releases.
+- **1.17.0:** the next cyrius pin (target open), the announced removals, and a
+  remove-or-wire decision on inert helpers.
+- **1.17.1:** `0 - N` → `-N`, alone.
+- **1.17.2:** CI and doc-tree conformance.
+- **1.18.0:** pidfd identity, and health-check commands under the pre-exec hook.
+- **Gated:** items that wait on someone else.
+
+The old "Security enforcement" section planned for argonaut to apply seccomp / Landlock /
+capabilities itself. 1.9.0 had already decided against that, so it is replaced by a
+standing rule.
+
+**New: ADR-013**, "Service policy is enforced by the consumer, through a pre-exec hook".
+It records the 1.9.0 decision, which until now lived only in CHANGELOG [1.9.0].
+ADR-010 and ADR-011 are marked superseded by it.
+
+**Corrected claims** (each checked against the tree):
+- **Enforcement:** "argonaut enforces seccomp / Landlock / capabilities" was wrong in
+  README, SECURITY.md, `docs/security/posture.md`, `docs/standards/compliance.md` and
+  ADR-011. "Nothing can confine services" was wrong in CLAUDE.md, state.md and
+  feature-gaps.md. Both now read: argonaut does not enforce; kybernet does, through
+  argonaut's fail-closed pre-exec hook; with no hook, services run as root.
+- **Features documented as implemented that are not:** log rotation, socket
+  activation, env-file loading, applied rlimits, and `RELOADING` / `STOPPING` handling
+  (`docs/architecture/feature-gaps.md`, `posture.md`).
+- **Functions that do not exist:**
+  - in `posture.md`: `exec_argv`, `register_service`, `create_service_from_request`,
+    `spawn_process`, `enable_credentials`, `secure_defaults`;
+  - in the quickstart: `restart_config_new`, `edge_config_new`;
+  - in ADR-012: `ServiceCreateRequest`.
+- **Quickstart snippets that were wrong:** a shutdown-step offset (+8 is the action;
+  the description is +0), and start order taken from hash-map order. The snippets also
+  missed that the default audit chain streams, so `chain_query` and
+  `audit_log_verify` see nothing.
+- **"The library makes no syscalls"** (ADR-001, ADR-006, ADR-010, posture,
+  compliance), and **"the toolchain translates x86 syscall numbers, no source changes
+  needed"** (note 001, `ci.yml`). Both contradict 1.13.1.
+- **Stale versions, sizes and counts:** libro 1.0.3, sakshi_full 0.7.0, cyrius 3.9.8+,
+  `.cyrius-toolchain`, `cyrius.toml`, "378 KB", "607 / 868 assertions", and the
+  supported-versions table.
+- **compliance.md:** overclaims withdrawn. SLSA 3 "Full", a coverage step that does not
+  exist, AU-3 record fields, and the shutdown residual-information controls (only `sync`
+  runs).
+- **CLAUDE.md:**
+  - `docs/adr/` → `docs/adrs/`; the missing `docs/examples/` dropped;
+  - `--check-lib-sync` added to the release-build commands;
+  - `cc5` → `cycc`;
+  - `constant_time_eq_str` is libro's, not sigil's;
+  - the retired 4,096 / 1,024 compiler caps replaced by `cyrius capacity`;
+  - the "release hook" that does not exist;
+  - the actual CI and release job order.
+- **Rewritten whole:** README, SECURITY.md, CONTRIBUTING.md, the quickstart,
+  `docs/security/posture.md`, `docs/standards/compliance.md`,
+  `docs/architecture/overview.md` and `feature-gaps.md`.
+- **state.md trimmed:** the Version section had grown 480 lines of per-release history
+  (every entry is in this file). The older bench snapshots are in `bench-history.csv`.
+
+**Closed:**
+- **`docs/issues/cc3-readfile-cap.md`:** fixed upstream by cc3 3.6.2; both regression
+  tests still pass.
+- **`docs/development/issues/2026-05-11-edgebootconfig-deployment-paths.md`:**
+  withdrawn by kybernet at 1.5.7. `execute_edge_boot` has always taken the device paths
+  as parameters.
+
+Both are kept as historical records.
+
+**Not changed:** CI behaviour and scripts. The sweep found that CI's bench step runs a
+bash script under `sh` (dash) and silently records nothing, and that `scripts/version.sh`
+edits a `Cargo.toml` that no longer exists. Both are pinned to roadmap 1.17.2.
+
 ## [1.16.2] — 2026-10-14
 
 **The 2026-10-14 audit's deferred findings, repaired.** The fixes:

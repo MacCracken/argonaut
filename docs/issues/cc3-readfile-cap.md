@@ -1,5 +1,11 @@
 # cc3 Compiler Issues Blocking Full Libro Integration
 
+> **Closed — historical record.** Every issue here was fixed upstream by cc3 3.6.2. The
+> compiler is now `cycc`, the manifest is `cyrius.cyml`, and libro is consumed whole as
+> `dist/libro.cyr`. The two regression tests still pass on the current toolchain:
+> `tests/tcyr/cc3_readfile_cap.tcyr` and `tests/tcyr/cc3_ptr_regression.tcyr`. Version
+> names, counts and paths below are as of the original report.
+
 ## Issue 1: `undefined variable 'ptr'` (3.5.2+)
 
 **Introduced:** cc3 3.5.2

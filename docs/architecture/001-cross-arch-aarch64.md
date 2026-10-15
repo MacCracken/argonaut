@@ -4,12 +4,17 @@ Status: Active (since 1.5.4, 2026-05-10)
 
 ## Summary
 
-Argonaut cross-builds to aarch64 via cyrius's
-`cycc_aarch64` translator (renamed from `cc5_aarch64` in
-Cyrius 6.0, when the host compiler renamed `cc5` → `cycc`). No
-argonaut source changes are required — the toolchain converts
-x86_64 syscall numbers + ABI to aarch64 at codegen time.
-Binary ships in CI / release artifacts as
+Argonaut cross-builds to aarch64 with cyrius's `cycc_aarch64`.
+
+**Portability is argonaut's job, not the compiler's.** The aarch64 backend does carry an
+x86-compat translation ladder for some syscall numbers, but relying on it is a trap: at
+1.13.1, nine literal x86 numbers were found landing on the wrong aarch64 syscall. Every
+syscall goes through a stdlib `sys_*` wrapper, or through an arch-dispatched `ag_sys_*`
+entry in `src/syscall_compat.cyr`. That file's header records the ESYSXLAT rules, and
+each of its numbers was verified under `qemu-aarch64 -strace`. A literal `syscall(N, …)`
+is a defect.
+
+The binary ships in CI / release artifacts as
 `argonaut-<VER>-aarch64-linux` alongside the x86_64 build,
 **best-effort** (skipped without failing the run when the
 toolchain release didn't bundle `cycc_aarch64`).
@@ -20,9 +25,9 @@ toolchain release didn't bundle `cycc_aarch64`).
 CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/argonaut-aarch64
 ```
 
-Binary size at 1.5.4 ship: ~1.14 MB (x86_64 is ~1.00 MB).
-The +140 KB delta tracks aarch64's 32-bit fixed-width
-instruction encoding vs. x86_64's variable-length.
+The aarch64 binary is about 3.5× the x86_64 one. Most of the gap is DCE: on aarch64 it
+fills dead code with NOPs instead of compacting it, because there is no compaction repair
+model yet. Current sizes are in `docs/development/state.md` (Binary).
 
 ## Smoke (CI)
 
@@ -36,8 +41,9 @@ CI runs `qemu-aarch64` on the cross-built binary and grep-asserts
 
 ## Known-failure surface
 
-**None as of 1.13.1.** The aarch64 qemu-user sweep is 30/30 suites /
-872 assertions — identical to native x86_64.
+**None since 1.13.1.** `scripts/aarch64-sweep.sh` runs every `.tcyr` suite under
+qemu-user with no known-failure allowance, so any failure is a regression. The current
+count, identical to x86_64, is in `docs/development/state.md` (Suites).
 
 ### Superseded: the "qemu-user emulation limits" claim (1.5.4 - 1.13.0)
 
@@ -83,15 +89,10 @@ received.
 
 ## Real-hardware validation
 
-Out of scope for CI as of 1.5.4 — gated on allocation of an
-aarch64 CI runner. Manual validation paths:
+Not in CI yet; native aarch64 CI is roadmap 1.17.2. Manual paths:
 
-- **RPi4 (Cortex-A72)** — Raspberry Pi OS 64-bit; build the
-  static aarch64 binary on x86_64, scp to the Pi, run.
-- **Apple Silicon (Cortex-A76 / M-series)** — Asahi Linux
-  arm64; same flow.
-- **Cloud aarch64** — AWS Graviton, Hetzner ARM64, OCI Ampere
-  Altra; static binary works directly.
-
-The 1.5.4 ship has been validated under qemu-user only. Real-hw
-boot smoke is on the 1.6.x roadmap once a runner is allocated.
+- **RPi4 (Cortex-A72):** `scripts/aarch64-pi-smoke.sh` builds the static binary on
+  x86_64, copies it to the Pi and runs it. It has been validated by hand (argonaut
+  initialises in ~536 µs).
+- **Apple Silicon (Asahi Linux arm64)** and **cloud aarch64** (Graviton, Ampere): the
+  same static binary runs directly.

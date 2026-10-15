@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # aarch64-sweep.sh — build + run the full .tcyr sweep on aarch64
-# via qemu-user. Best-effort developer aid; CI ships smoke-only
-# until a native aarch64 runner is allocated (see
+# via qemu-user. A developer and release gate; CI runs the smoke only
+# until native aarch64 CI lands (roadmap 1.17.2; see
 # docs/architecture/001-cross-arch-aarch64.md).
 #
 # Usage:
 #   scripts/aarch64-sweep.sh            # build + sweep
 #   scripts/aarch64-sweep.sh smoke      # smoke only
 #
-# Requires: cycc_aarch64 in $PATH (cyrius toolchain; renamed from
-# cc5_aarch64 in Cyrius 6.0), qemu-aarch64 (qemu-user package).
+# Requires: cycc_aarch64 in $PATH (cyrius toolchain), qemu-aarch64
+# (qemu-user package).
 # Builds drop into /tmp/argonaut-aa/.
 
 set -uo pipefail
@@ -65,13 +65,10 @@ for t in tests/tcyr/*.tcyr; do
         asserts=$((asserts + n))
     else
         fail=$((fail + 1))
-        # No known-failure allowance as of 1.13.1. The two suites that used
-        # to be excused here (audit_findings, audit_extended) were failing on
-        # the x86_64 syscall numbers and struct-stat offsets fixed in that
-        # release, NOT on qemu-user limits as arch doc 001 claimed. The sweep
-        # is now 30/30 with 872 assertions, identical to native x86_64 — so
-        # any failure below is a real regression. Do not re-add an excuse arm
-        # without first proving the cause is genuinely emulator-side.
+        # No known-failure allowance: the sweep matches native x86_64, so any
+        # failure here is a real regression. Do not add an excuse arm without
+        # first proving the cause is emulator-side; the last two "emulator"
+        # failures were real aarch64 defects (arch note 001).
         echo "FAIL: $name -> ${sum:-no summary}"
     fi
 done

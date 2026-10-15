@@ -35,3 +35,15 @@ HTTP health checks use raw TCP sockets with hand-written HTTP/1.1 request/respon
 - **HTTP client library**: Not applicable in Cyrius — no external library registry. Even if available, any HTTP client would pull TLS, compression, connection pool dependencies. Rejected.
 - **`curl` via command**: Shell out to `curl`. Works but adds process spawn overhead per check and reintroduces shell injection risk.
 - **TCP-only (no HTTP parsing)**: Even simpler — just check if the port accepts connections. Rejected because many services are TCP-reachable before they are ready to handle requests.
+
+## Update (2026-10-14)
+
+- **Request:** the request line is `GET <path> HTTP/1.0`, with a sanitised `Host:` header.
+  Control bytes in the path are refused.
+- **Size:** the client is no longer ~40 lines. It has one deadline for the whole check,
+  a multi-read status line, a ports range check and allocation-free buffers.
+- **Targets:** they are no longer localhost-only. Since 1.5.2 a check resolves an IPv4
+  literal or an `/etc/hosts` name (`resolve_host_ipv4`). Plaintext HTTP is acceptable
+  only for loopback or a trusted segment; `is_localhost_target` has no caller.
+
+The decision (no external HTTP dependency) is unchanged.

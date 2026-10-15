@@ -15,11 +15,17 @@ kybernet at runtime.
 ## Files
 
 ```
+src/pid1_harness.cyr        — the M3 / L3 self-test mode (`argonaut.harness=1` on the kernel cmdline)
 qemu/
-├── build-initramfs.sh   — stage argonaut binary as /sbin/init
-├── boot-test.sh         — qemu-system-x86_64 + marker assertion
-├── initramfs/           — staging tree (gitignored)
-└── initramfs.cpio.gz    — final cpio (gitignored)
+├── build-initramfs.sh      — stage argonaut as /sbin/init, plus /bin/l3-helper and busybox
+├── boot-test.sh            — boot under qemu-system-x86_64; assert the boot markers
+├── pid1-harness-test.sh    — boot with argonaut.harness=1; assert `m3 ok` and `l3 ok`
+├── helpers/
+│   ├── l3-helper.cyr       — static helper that records getsid(0) for the L3 check
+│   ├── cyrius.cyml, lib/   — its own stdlib-only manifest and committed lib/
+│   └── l3-helper           — the committed static binary
+├── initramfs/              — staging tree (gitignored)
+└── initramfs.cpio.gz       — final cpio (gitignored)
 ```
 
 ## Producer
@@ -27,20 +33,31 @@ qemu/
 ```
 qemu/build-initramfs.sh
 qemu/boot-test.sh
+qemu/pid1-harness-test.sh
 ```
 
-`build-initramfs.sh` rebuilds the argonaut binary first if its
-manifest is newer, then stages `/sbin/init` (argonaut), bundles
-busybox if present (`/usr/lib/initcpio/busybox`,
-`/usr/bin/busybox`, or `/bin/busybox`), installs minimal
-`/etc/hosts` (localhost only — argonaut's resolver path needs
-it during boot), creates `/dev/console` + `/dev/null` +
-`/dev/ttyS0` device nodes (needs sudo, skipped silently
-otherwise — boot smoke still works).
+**`build-initramfs.sh`:**
+- rebuilds the argonaut binary first if its manifest is newer;
+- stages `/sbin/init` (argonaut) and `/bin/l3-helper`;
+- bundles busybox when present, with its dynamic loader and libc if busybox is
+  dynamically linked;
+- installs a minimal `/etc/hosts` (the resolver path reads it);
+- creates `/dev/console`, `/dev/null` and `/dev/ttyS0`. This needs sudo, and is skipped
+  without it; the boot smoke still works.
 
-`boot-test.sh` runs the cpio under `qemu-system-x86_64`, greps
-stdout for three boot-completion markers, fails the run if any
-is missing or if the kernel panics on "Attempted to kill init".
+**`boot-test.sh`** runs the cpio under `qemu-system-x86_64` and greps stdout for the
+boot markers below. It fails if any is missing, or if the kernel panics with "Attempted
+to kill init".
+
+**`pid1-harness-test.sh`** boots the same cpio with `argonaut.harness=1`. argonaut then
+runs its self-tests inline as the real PID 1, and powers off.
+- **M3:** an orphaned grandchild is reaped through PID-1 reparenting.
+- **L3:** `fork_exec_service` runs `/bin/l3-helper`, which records `getsid(0)`. The
+  session id must equal the child's pid, which proves `setsid`.
+
+The script asserts `argonaut: harness m3 ok` and `argonaut: harness l3 ok`; any
+`FAIL` line is fatal. The unit-level versions are the `audit-m3-reaper-orphans` and
+`audit-l3-fork-setsid` groups in `tests/tcyr/audit_findings.tcyr`.
 
 ## Boot-completion markers
 
@@ -53,14 +70,19 @@ via the qemu serial console (`-serial mon:stdio`):
 | `argonaut: all systems nominal`  | `argonaut_init_new` ran end-to-end; boot info / shutdown plan printed |
 | `argonaut: pid1 loop ready`      | `sys_getpid() == 1` detected; supervisor loop entered (post-1.6.0 PID-1 path) |
 
-Missing the third marker = `getpid() != 1` (running outside
-qemu) OR argonaut exited from `main()` before the loop. Missing
-the first two = argonaut crashed during init.
+Missing the third marker means one of:
+- `getpid() != 1` (running outside qemu);
+- argonaut exited from `main()` before the loop;
+- `signalfd` failed. It then prints `argonaut: signalfd failed` and falls back to a
+  reap-only loop.
+
+Harness mode never prints it either. Missing the first two means argonaut crashed during
+init.
 
 ## CPU requirement — invariant TSC
 
-sakshi's `_sk_clock_init` (the tracing/timing stdlib argonaut
-pulls transitively via libro 2.6.2) panics if CPUID 0x80000007
+sakshi's `_sk_clock_init` (the tracing / timing library in argonaut's stdlib
+list) panics if CPUID 0x80000007
 EDX bit 8 (invariant TSC) is absent. qemu's TCG emulation
 **does not expose this bit** even with `-cpu max,+invtsc`;
 only KVM with `-cpu host,+invtsc` faithfully passes it
@@ -71,17 +93,14 @@ through from the host CPU. Practical consequence:
   accordingly; runs that fall through to TCG print a clear
   "harness needs KVM" diagnostic and fail with the
   invariant-TSC panic.
-- **CI:** GitHub Actions ubuntu-runners have `/dev/kvm`
-  available on Linux runners since the 2023 nested-virt
-  rollout; the workflow uses the same KVM-required path.
+- **CI:** no workflow runs the harness yet. It is a local gate run at every release,
+  and running it in CI (where KVM is available) is roadmap 1.17.2.
 - **Real-hardware:** any modern x86_64 host has the bit;
   not an issue.
 
-The TCG / qemu-user limitation here mirrors the 1.5.4
-`audit-m3-reaper-orphans` / `audit-l3-fork-setsid`
-known-failures documented in
-[`001-cross-arch-aarch64.md`](001-cross-arch-aarch64.md):
-emulator-only gaps that don't apply to real hardware.
+This TCG gap is a real emulator limitation. The aarch64 failures once excused as "qemu-user
+limits" were not: they were real defects, fixed at 1.13.1 (see
+[`001-cross-arch-aarch64.md`](001-cross-arch-aarch64.md)).
 
 ## Kernel + initramfs sizing
 
@@ -90,44 +109,20 @@ emulator-only gaps that don't apply to real hardware.
 `/boot/vmlinuz-$(uname -r)`, `/boot/vmlinuz`). Override
 explicitly as the first positional argument.
 
-Current sizing at 1.6.0 ship:
+Memory: the scripts boot at `-m 256M`, which they have passed since 1.15.5 (cyrius
+6.6.8's `MAP_NORESERVE` heap). The boot test has also booted at `-m 128M`. Binary sizes
+and the latest pass are in `docs/development/state.md`. The initramfs size depends on the
+host's busybox.
 
-- argonaut binary: ~1.00 MB statically linked ELF x86_64
-  (`CYRIUS_DCE=1`)
-- initramfs.cpio.gz: ~376 KB (argonaut + busybox)
-- qemu memory: 256 MB (`-m 256M`) — comfortable headroom;
-  argonaut's working set is ~few KB
-
-Boot wall time: ~0.3 s under KVM, ~2.5 s under TCG (kernel
-load + decompress dominates; argonaut's init_new is ~50 µs).
-
-## Future end-to-end M3 / L3 coverage
-
-The 1.6.0 harness validates **boot reaches the supervisor
-loop** — proves the PID-1 graduation path works without
-landing the M3 (orphan reap under real-PID-1 reparenting) and
-L3 (controlling-TTY decoupling) end-to-end variants the
-2026-04-26 audit gated on this work. Those land in 1.6.1+:
-
-- **M3 end-to-end:** spawn a busybox helper from inside
-  qemu that forks a grandchild + exits; assert argonaut's
-  `proc_table_reap_orphans` collects the grandchild via
-  the supervisor-loop tick.
-- **L3 end-to-end:** invoke `fork_exec_service` against a
-  test service that writes its `getsid(0)` to a tmpfs
-  marker; assert the marker reads the child's own PID
-  (decoupled session).
-
-Shape exists in `tests/tcyr/audit_findings.tcyr`
-(`audit-m3-reaper-orphans`, `audit-l3-fork-setsid`) as
-unit-level mock-ups; the end-to-end shape lifts them inside
-qemu under real PID 1.
+Boot wall time is ~0.3 s under KVM, dominated by kernel load and decompression. Under
+TCG the boot panics on the invariant-TSC check (above), so there is no TCG timing.
 
 ## Re-audit trigger
 
-Per `docs/audit/2026-04-26-audit.md`, "argonaut graduating to
-true PID 1" is one of the four re-audit triggers. 1.6.0 ships
-the harness; the corresponding P(-1) re-audit pass is the
-**1.6.x arc closeout** item, mirroring the 1.5.x arc shape
-(scaffold lands first, closeout audit at end of the minor).
-Track in `docs/development/roadmap.md`.
+The 2026-04-26 audit's "argonaut graduates to true PID 1" trigger closed at 1.6.3, with
+the closeout audit (`docs/audit/2026-05-11-audit.md`).
+
+The live trigger is different. The shipped PID-1 loop still does not call the service
+lifecycle. The day it calls `init_start_service`, `init_poll_health` or
+`init_notify_bind`, re-rate the severities bounded by that fact (roadmap, Standing
+rules).

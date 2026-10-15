@@ -81,5 +81,6 @@ the verified root hash into PCR 15, unlock, then cap PCR 15.
 ## Verification
 
 None in argonaut: there is no TPM code to test. The kybernet-side steps need real hardware
-(a TPM2 and a LUKS2 TPM token), which kybernet's roadmap tracks under "Blocked on hardware".
-The roadmap's Kybernet integration section records this note as an open item.
+(a TPM2 and a LUKS2 TPM token). kybernet's roadmap tracks them under "Harness work"
+(a TPM and a LUKS2 token under `swtpm`) and "Needs real hardware". argonaut's roadmap
+lists the enrolment in its Kybernet-side section.

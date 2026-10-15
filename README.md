@@ -2,82 +2,123 @@
 
 **Init system and service manager for AGNOS.**
 
-Argonaut (Greek: sailors of the Argo — one letter off from AGNOS) is a minimal init system that boots AGNOS in under 3 seconds. It manages service startup ordering, health checks, runlevel switching, and shutdown sequences.
+Argonaut (Greek: sailors of the Argo — one letter off from AGNOS) handles:
+- service startup ordering;
+- health checks;
+- restarts;
+- runlevel switching;
+- shutdown;
+- edge boot (read-only rootfs, dm-verity, LUKS).
 
-Written in [Cyrius](https://github.com/MacCracken/cyrius), compiled via `cyrius build`.
+Every lifecycle event goes into a hash-linked audit chain.
+
+It is written in [Cyrius](https://github.com/MacCracken/cyrius) and built with
+`cyrius build`. Most of it is a library. [kybernet](https://github.com/MacCracken/kybernet),
+AGNOS's PID 1, drives that library from its own supervisor. argonaut's own binary also
+runs a minimal PID-1 loop: it mounts, takes signals on a signalfd, reaps, syncs and powers
+off.
 
 ## Features
 
-- **Boot modes** — Desktop, Server, Edge, Minimal, Recovery
-- **Service management** — define, enable, disable, start, stop with dependency ordering
-- **Health checks** — HTTP, TCP, command, process-alive per service
-- **Restart policies** — always, on-failure, never, with exponential backoff
-- **Runlevel switching** — transition between modes at runtime with planned service start/stop
-- **Shutdown planning** — ordered shutdown with drain, stop, kill phases
-- **Edge boot** — read-only rootfs, dm-verity integrity verification, LUKS unlock
-- **Security** — seccomp, Landlock, capabilities, socket activation per service
-- **Audit trail** — libro 1.0.3 SHA-256 hash-linked chain with lifecycle recording
-- **Tracing** — sakshi_full 0.7.0 structured tracing (spans, ring buffer, UDP output)
-- **Emergency shell** — configurable fallback on boot failure
-- **Crash actions** — reboot, halt, or emergency shell on service crash
+- **Boot modes:** Desktop, Server, Edge, Minimal, Recovery.
+- **Service lifecycle:**
+  - define, enable, disable, start and stop services, in dependency order;
+  - simple, forking (PID file), oneshot and notify (sd_notify `READY=1`) service types;
+  - startup in waves, by Kahn's algorithm, with a deterministic order inside each wave.
+- **Health checks:** HTTP, TCP, command and process-alive, all with bounded deadlines.
+- **Restarts:** always / on-failure / never, with exponential backoff inside a restart
+  window. A service gives up at `max_restarts`, and the give-up is audited.
+- **Watchdog:** `WATCHDOG=1` keepalives over an authenticated sd_notify socket.
+- **Shutdown:** `init_execute_shutdown` stops services in reverse dependency waves within
+  one budget. Each wave gets SIGTERM, then a process-group SIGKILL.
+- **Runlevel switching:** a planned start / stop set for moving between modes.
+- **Edge boot:** a read-only rootfs with tmpfs overlays, dm-verity verification, and a
+  LUKS2 unlock from a TPM token (key-release policy: [architecture note 005](docs/architecture/005-edge-boot-tpm-key-policy.md)).
+- **Emergency shell:** authentication is required by default. It verifies a salted
+  Argon2id credential.
+- **Audit trail:** [libro](https://github.com/MacCracken/libro) SHA-256 hash-linked chain.
+  Optional persistence, signed snapshots and merkle proofs.
+- **systemd interop:** unit-file generation with injection-safe escaping, and tmpfiles
+  entries applied natively without following symlinks.
+- **Security policy:** per-service seccomp / Landlock / capability fields, plus a
+  fail-closed **pre-exec hook** between fork and exec. **argonaut does not enforce the
+  policy itself.**
+  - The consumer registers the hook and applies the policy; kybernet does.
+  - With no hook registered, a service runs with PID 1's privileges.
 
-## Architecture
+## Layout
 
 ```
 argonaut
 ├── src/
-│   ├── types.cyr       — All enums, structs, config types
-│   ├── boot.cyr        — Boot sequence construction per BootMode
-│   ├── services.cyr    — Service registry, defaults, dependency resolution (Kahn's)
-│   ├── process_mgmt.cyr — Fork/exec, PID tracking, signal delivery, ProcessTable
-│   ├── health.cyr      — Health check execution, HealthState, HealthHistory
-│   ├── edge_boot.cyr   — Read-only rootfs, dm-verity, LUKS, fleet registration
-│   ├── notify.cyr      — sd_notify protocol listener
-│   ├── security.cyr    — Seccomp, Landlock, capabilities
-│   ├── systemd.cyr     — Hybrid systemd unit generation
-│   ├── tmpfiles.cyr    — Boot-time filesystem setup
-│   ├── audit.cyr       — Libro bridge (ServiceEventType → AuditChain)
-│   ├── init.cyr        — ArgonautInit orchestrator, service lifecycle
-│   └── main.cyr        — Entry point
-├── tests/tcyr/         — 30 test suites (868 assertions)
-└── build/              — Compiled binary (378KB ELF x86_64)
+│   ├── types.cyr          — enums, structs, config types and accessors
+│   ├── boot.cyr           — boot sequence per BootMode
+│   ├── services.cyr       — default services, dependency resolution (Kahn's, waves)
+│   ├── process_mgmt.cyr   — fork/exec, the pre-exec hook, process table, signals
+│   ├── resolver.cyr       — IPv4 literals and /etc/hosts for health checks
+│   ├── health.cyr         — health checks, state and history
+│   ├── edge_boot.cyr      — read-only rootfs, dm-verity, LUKS, fleet registration
+│   ├── notify.cyr         — sd_notify server and client
+│   ├── security.cyr       — policy modelling; the emergency-shell credential
+│   ├── systemd.cyr        — systemd unit generation
+│   ├── tmpfiles.cyr       — tmpfiles entries: native apply and command rendering
+│   ├── audit.cyr          — the libro bridge (ServiceEventType → audit chain)
+│   ├── audit_ext.cyr      — persistence, signing, merkle proofs
+│   ├── init.cyr           — the ArgonautInit orchestrator and service lifecycle
+│   ├── syscall_compat.cyr — per-arch wrappers for syscalls the stdlib lacks
+│   ├── pid1_harness.cyr   — the qemu PID-1 harness modes
+│   ├── bench_main.cyr     — the release benchmark gate
+│   └── main.cyr           — entry point and the minimal PID-1 loop
+├── tests/tcyr/            — test suites
+├── tests/bcyr/            — benchmarks
+├── qemu/                  — PID-1 boot harness
+└── scripts/               — bench history, aarch64 sweep, Pi smoke test
 ```
+
+Suite counts, binary sizes and dependency pins change every release; they are in
+[`docs/development/state.md`](docs/development/state.md).
 
 ## Boot Modes
 
-| Mode | Services | Use Case |
-|------|----------|----------|
-| Desktop | Full stack (daimon, hoosh, aethersafha, etc.) | Daily driver |
-| Server | Headless (daimon, hoosh, no compositor) | Servers, CI |
-| Edge | Minimal + fleet (daimon, seema) | IoT, edge nodes |
-| Minimal | Core only (daimon) | Debugging, recovery |
-| Recovery | Emergency shell | Broken system repair |
+| Mode | Default services | Use case |
+|------|------------------|----------|
+| Desktop | postgres, redis, daimon, llm-gateway (hoosh), agnos-init, aethersafha, agnoshi | Daily driver |
+| Server | postgres, redis, daimon, llm-gateway (hoosh) | Servers, CI |
+| Edge | daimon (edge mode) | IoT, edge nodes |
+| Minimal | daimon, console agnoshi | Debugging |
+| Recovery | none; emergency shell | Broken-system repair |
 
 ## Service Definition
 
 ```cyrius
-var sd = svc_def_new(str_from("daimon"), str_from("Daimon agent orchestrator"), str_from("/usr/bin/daimon"));
-var hc = health_check_new(HC_HTTP, str_from("http://localhost:8090/v1/health"), 10000, 5000, 3, 0);
+var sd = svc_def_new(str_from("daimon"), str_from("Daimon agent orchestrator"),
+                     str_from("/usr/bin/daimon"));
+# type, target, port, interval_ms, timeout_ms, retries
+var hc = health_check_new(HC_HTTP_GET, str_from("http://127.0.0.1:8090/v1/health"),
+                          0, 10000, 5000, 3);
 svc_def_set_health_check(sd, hc);
-store64(sd + 56, RESTART_ALWAYS);
+svc_def_set_restart_policy(sd, RESTART_ALWAYS);
 ```
+
+More in [`docs/guides/quickstart.md`](docs/guides/quickstart.md).
 
 ## Consumers
 
-- **AGNOS boot** — PID 1 (via kybernet) or systemd unit delegate
-- **stiva** — container service lifecycle
-- **sutra** — infrastructure playbook service management
-- **daimon** — system_update module triggers runlevel switches
+- **kybernet** (AGNOS PID 1) consumes argonaut's `src/` through `[deps.argonaut]`, and
+  enforces service policy through the pre-exec hook. Its pin is listed in
+  [`state.md`](docs/development/state.md#consumers).
 
 ## Building
 
 ```sh
-cyrius build src/main.cyr build/argonaut
-cyrius test
-cyrius bench
+cyrius deps                                    # resolve lib/ from cyrius.cyml
+cyrius build src/main.cyr build/argonaut       # build
+for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done
+CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut   # release build
 ```
 
-Requires cyrius 3.9.8+.
+The toolchain version is pinned in `cyrius.cyml` (`[package] cyrius`). The full set of
+gates is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

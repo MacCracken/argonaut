@@ -1,6 +1,6 @@
 # ADR-003: Library + Separate PID 1 Binary
 
-**Status**: Accepted — architecture carried forward in Cyrius port; PID 1 binary is now kybernet
+**Status**: Accepted — amended 1.6.0: argonaut also ships a minimal PID-1 binary; kybernet remains the production PID 1
 **Date**: 2026-04-02
 
 ## Context
@@ -30,3 +30,15 @@ Argonaut is a Cyrius library that provides the orchestration logic. The actual P
 ## Post-Port Update (v0.95.0)
 
 The library/binary split was preserved and clarified in the Cyrius port. The PID 1 binary is now **kybernet** (a separate Cyrius project). Argonaut is included by kybernet as a Cyrius library dependency. The separation of concerns — orchestration logic in argonaut, OS primitives in kybernet — is identical to the original design intent. See the kybernet project for the integration point.
+
+## Update (2026-10-14)
+
+- **Since 1.6.0, argonaut's own binary runs as PID 1.** It mounts, blocks signals onto a
+  signalfd, waits in poll with no idle wakeups, reaps, syncs and powers off. It boots
+  under KVM (`qemu/boot-test.sh`; architecture note 002). It does not drive the service
+  lifecycle; kybernet does that, linking argonaut's `src/` in-process.
+- **Reaping is in argonaut too**, through `init_reap_services` and the orphan sweep, with
+  PR_SET_CHILD_SUBREAPER enrolment. So is the child's signal-mask reset.
+- **cgroup placement and the uid/gid drop are kybernet's**, through argonaut's pre-exec
+  hook (ADR-013).
+- **Assertion counts move every release;** see `docs/development/state.md`.

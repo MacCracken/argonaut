@@ -41,3 +41,12 @@ Cyrius has no equivalent of Cargo feature gates (`#[cfg(feature = "...")]`). In 
 - **agnosys** security functions are included directly where needed. The dual-path (SafeCommand fallback vs. native syscall) is preserved via runtime logic rather than compile-time feature selection.
 
 The reusability concern from the original decision is addressed differently in Cyrius: consumers include only the modules they need by selecting which `.cyr` files to compile into their project. The "always compiled in" approach is acceptable for AGNOS-first deployments.
+
+## Update (2026-10-14)
+
+- **libro** is consumed as one `dist/libro.cyr` bundle from a tag-pinned git dependency.
+  sigil comes as thin sub-bundles (`[deps.sigil]`), and patra and sakshi come from the
+  stdlib fold. Pins are in `docs/development/state.md`.
+- **agnosys left the dependency graph at 1.8.4.** No native-syscall security path exists
+  in argonaut. Policy enforcement is the consumer's, through the pre-exec hook
+  (ADR-013).

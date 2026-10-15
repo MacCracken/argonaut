@@ -10,7 +10,7 @@
 # thread_local_{init,get,set}; under cyrius 6.2.x the manifest stdlib list
 # no longer auto-pulls a module referenced only by a transitive git dep
 # (sigil, via libro), so include it explicitly ahead of the audit chain.
-# See docs/architecture for the 6.2.x stdlib-resolution change.
+# History: CHANGELOG [1.8.3].
 include "lib/thread_local.cyr"
 
 # Argonaut modules

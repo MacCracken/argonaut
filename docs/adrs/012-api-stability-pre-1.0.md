@@ -1,6 +1,6 @@
 # ADR-012: API Stability Approach Pre-1.0
 
-**Status**: Superseded — argonaut is now at v1.2.0; API stability guarantees are in effect
+**Status**: Superseded — argonaut is past 1.0; current practice is in the Update below
 **Date**: 2026-04-02
 
 ## Context
@@ -48,3 +48,15 @@ Argonaut has reached v1.0.0. The API is now stable. The Cyrius port completed at
 - **Builder pattern during pre-1.0**: `service_definition_builder()` with defaults. Would have eliminated the field update problem but added API complexity before the type was stable. Deferred — adopted at 1.0.
 - **Exhaustive construction only**: Would require all consumers to update on every new field. Rejected — builder pattern preferred at 1.0.
 - **Optional fields throughout**: Requiring `name` and `binary_path` to be `Option` weakens type safety at the call site. Rejected — builder validates required fields at `build()` time.
+
+## Update (2026-10-14)
+
+**In practice, breaking changes ship in minor and patch releases.** Examples: the 1.8.6
+verify-wrapper arity, the 1.16.0 wrapper removals, and 1.16.1's behaviour changes. Each
+ships with a CHANGELOG **Breaking** section and a migration note.
+- **Deprecations:** a deprecated function carries `#deprecated("…")`, naming its removal
+  release. It is removed at the next minor.
+- **ServiceDefinition fields** are appended, never inserted (`cgroup_limits` at 1.13.0,
+  `watchdog_ms` at 1.13.6). Definitions are built with `svc_def_new` plus the
+  `svc_def_set_*` setters. There is no `ServiceCreateRequest` and no
+  `service_definition_builder()`.

@@ -3,170 +3,208 @@
 ## Building argonaut
 
 ```sh
-# Requires cyrius 3.9.8+
-cyrius build src/main.cyr build/argonaut
-
-# Run
-./build/argonaut
-
-# Test
-cyrius test
-
-# Benchmark
-cyrius bench
+cyrius deps                                   # resolve lib/ from cyrius.cyml
+cyrius build src/main.cyr build/argonaut      # build
+for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done   # every suite
+cyrius bench tests/bcyr/argonaut.bcyr         # benchmarks
 ```
 
-## Basic Usage — Boot and Manage Services
+The toolchain version is pinned in `cyrius.cyml` (`[package] cyrius`).
+
+## Using argonaut as a library
+
+A consumer declares argonaut as a dependency. Its modules are listed in `src/main.cyr`'s
+include order, because cyrius resolves references in one pass. This is kybernet's
+shape:
+
+```toml
+[deps.argonaut]
+git = "https://github.com/MacCracken/argonaut.git"
+tag = "<release>"
+modules = [
+    "src/syscall_compat.cyr",
+    "src/types.cyr",
+    "src/boot.cyr",
+    "src/services.cyr",
+    "src/process_mgmt.cyr",
+    "src/resolver.cyr",
+    "src/health.cyr",
+    "src/notify.cyr",
+    "src/audit.cyr",
+    "src/audit_ext.cyr",
+    "src/init.cyr",
+    "src/security.cyr",
+]
+```
+
+Add `src/edge_boot.cyr`, `src/systemd.cyr` and `src/tmpfiles.cyr` if you use them.
+- **Stdlib modules** come from the consumer's own `[deps] stdlib`, never from `include`
+  lines in source.
+- **sigil:** from 1.16.2, `src/security.cyr` needs sigil's `dist/sigil-argon2.cyr`. Declare
+  `[deps.sigil]` at libro's sigil tag, as argonaut's own `cyrius.cyml` does.
+
+## Boot and manage services
 
 ```cyrius
-include "lib/alloc.cyr"
-# ... (stdlib includes)
-include "src/audit.cyr"
-include "src/init.cyr"
-
 fn main() {
     alloc_init();
 
-    # Configure for server mode
+    # Server mode. Keep the audit chain queryable: the default chain streams,
+    # so it hashes every event but retains none (see "Audit trail").
     var config = argonaut_config_default();
-    store64(config, BOOT_SERVER);
+    config_set_boot_mode(config, BOOT_SERVER);
+    config_set_audit_retain(config, 1);
 
-    # Create the init system (includes audit log)
     var init = argonaut_init_new(config);
 
-    # Start services in dependency order
-    var svc_map = load64(init + 16);
-    var keys = map_keys(svc_map);
-    for (var i = 0; i < vec_len(keys); i = i + 1) {
-        var name = vec_get(keys, i);
+    # Start services in dependency order. Each entry is a 16-byte pair:
+    # +0 the name (Str), +8 the ServiceDefinition.
+    # init_boot_execution_plan_waves groups them into parallel waves instead.
+    var plan = init_boot_execution_plan(init);
+    for (var i = 0; i < vec_len(plan); i = i + 1) {
+        var name = load64(vec_get(plan, i));
         var pid = init_start_service(init, name);
-        if (pid > 0) {
-            println(name);
-        }
+        if (pid > 0) { str_println(name); }
     }
 
-    # Runtime loop
+    # Supervisor loop
     var tracker = health_tracker_new();
     while (1 == 1) {
-        # Reap exited processes
-        var reaped = init_reap_services(init);
-
-        # Run health checks. The returned vec is reused: it is valid
-        # until the next init_poll_health call.
-        init_poll_health(init, tracker);
-
-        # Enforce watchdog timeouts
-        init_enforce_watchdog(init);
-
-        # Sleep 1 second. Use the stdlib's sleep_ms, never a raw
-        # syscall number: x86_64's 35 (nanosleep) is unlinkat on aarch64.
-        sleep_ms(1000);
+        init_reap_services(init);          # reap exited services
+        init_poll_health(init, tracker);   # health checks; the returned vec is
+                                           # valid until the next call
+        init_enforce_watchdog(init);       # kill services that missed WATCHDOG=1
+        sleep_ms(1000);                    # never a raw syscall number
     }
-
     return 0;
 }
 var r = main();
 syscall(SYS_EXIT, r);
 ```
 
-## Defining a Custom Service
+## Defining a custom service
 
 ```cyrius
 var sd = svc_def_new(
     str_from("my-api"),
     str_from("My API server"),
-    str_from("/usr/bin/my-api"));
+    str_from("/usr/bin/my-api"));          # an absolute path
 vec_push(svc_def_args(sd), str_from("--port"));
 vec_push(svc_def_args(sd), str_from("3000"));
 vec_push(svc_def_deps(sd), str_from("daimon"));
 vec_push(svc_def_modes(sd), BOOT_SERVER);
 vec_push(svc_def_modes(sd), BOOT_DESKTOP);
-store64(sd + 56, RESTART_ON_FAILURE);
+svc_def_set_restart_policy(sd, RESTART_ON_FAILURE);
 
-# Health check: HTTP GET every 15s
+# Health check: HTTP GET every 15 s, 5 s timeout, 3 retries
+#   (type, target, port, interval_ms, timeout_ms, retries)
 var hc = health_check_new(
     HC_HTTP_GET,
     str_from("http://127.0.0.1:3000/health"),
     0, 15000, 5000, 3);
 svc_def_set_health_check(sd, hc);
 
-# Ready check: TCP connect with 10s timeout
+# Ready check: TCP connect, 10 s timeout, 20 retries 500 ms apart
+#   (type, target, port, timeout_ms, retries, retry_delay_ms)
 var rc = ready_check_new(
     HC_TCP_CONNECT,
     str_from("127.0.0.1"),
     3000, 10000, 20, 500);
 svc_def_set_ready_check(sd, rc);
 
-# Restart config
-var restart = restart_config_new(10, 500, 60000);
+# Restart config: start from the default and override
+# (+0 max_restarts, +8 base_delay_ms, +16 max_delay_ms)
+var restart = restart_config_default();
+store64(restart, 10);
+store64(restart + 8, 500);
+store64(restart + 16, 60000);
 svc_def_set_restart_config(sd, restart);
 ```
 
-## Edge Boot
+## Edge boot
 
 ```cyrius
-var config = argonaut_config_default();
-store64(config, BOOT_EDGE);
+# Defaults: read-only rootfs, LUKS, TPM attestation, 3000 ms budget, PCRs "7+14"
+var ec = edge_config_default();
 
-# Configure edge boot
-var ec = edge_config_new(1, 1, 1, 3000);  # ro_rootfs, luks, tpm, max_boot_ms
-
-# Execute edge boot sequence
 var result = execute_edge_boot(ec,
-    str_from("/dev/mmcblk0p2"),
-    str_from("/dev/mmcblk0p3"),
-    str_from("a1b2c3d4e5f6..."),  # root hash (64 hex chars)
-    str_from("/dev/mmcblk0p4"));
+    str_from("/dev/mmcblk0p2"),    # rootfs data device
+    str_from("/dev/mmcblk0p3"),    # verity hash device
+    str_from("a1b2c3d4e5f6..."),   # root hash: 64 hex digits
+    str_from("/dev/mmcblk0p4"));   # LUKS device
 
-# Validate edge profile
-var violations = validate_edge_profile(result, 128);  # 128MB RAM limit
-
-# Build fleet registration payload
+var violations = validate_edge_profile(result, 128);   # 128 MB RAM limit
 var reg = fleet_registration_from_system(result);
 ```
 
+The LUKS unlock uses the volume's TPM token. Which boot states the TPM will release that
+key to is set at enrolment, not by argonaut; see
+[architecture note 005](../architecture/005-edge-boot-tpm-key-policy.md).
+
 ## Shutdown
+
+`init_execute_shutdown` stops every managed service in reverse dependency waves within
+one budget. Each wave gets SIGTERM, then a process-group SIGKILL for stragglers. Every
+service ends STOPPED and audited.
+
+```cyrius
+var stopped = init_execute_shutdown(init, 10000);   # 10 s budget
+```
+
+`init_plan_shutdown` describes the whole shutdown sequence (wall message, stop, sync,
+unmount and the rest) without running it:
 
 ```cyrius
 var plan = init_plan_shutdown(init, SHUTDOWN_POWEROFF);
-var steps = load64(plan + 8);
-
+var steps = load64(plan + 8);                 # ShutdownPlan.steps
 for (var i = 0; i < vec_len(steps); i = i + 1) {
-    var step = vec_get(steps, i);
-    var desc = load64(step + 8);
-    str_println(desc);
+    str_println(load64(vec_get(steps, i)));   # ShutdownStep.description (+0)
 }
 ```
 
-## Audit Trail
+## Audit trail
+
+`argonaut_init_new` creates the audit chain.
+
+**By default it streams.** Every event is hashed into the chain, but no entry is kept,
+because PID 1 never exits and a retained chain grows forever. On a streaming chain,
+`chain_query` returns nothing and `audit_log_verify` has nothing to check. To query or
+verify in process, set `config_set_audit_retain(config, 1)` (as above), or use the
+persistent store (`audit_persist`).
 
 ```cyrius
-# The audit log is created automatically with argonaut_init_new
 var alog = init_audit_log(init);
 
-# All lifecycle events are recorded automatically:
-# start_service → EVT_STARTING, EVT_STARTED
-# stop_service → EVT_STOPPING, EVT_STOPPED_OK/FAIL
-# restart_service → EVT_RESTARTING
-# reap (crash) → EVT_CRASH_DETECTED
-# watchdog → EVT_TIMEOUT_KILLED
-# health → EVT_HEALTH_PASSED/FAILED
+# Lifecycle events are recorded automatically:
+#   start    -> EVT_STARTING, EVT_STARTED
+#   stop     -> EVT_STOPPING, EVT_STOPPED_OK / EVT_STOPPED_FAIL
+#   restart  -> EVT_RESTARTING; refused at the limit -> EVT_RESTART_LIMIT
+#   crash    -> EVT_CRASH_DETECTED
+#   watchdog / shutdown kill -> EVT_TIMEOUT_KILLED
+#   health   -> EVT_HEALTH_PASSED / EVT_HEALTH_FAILED: the first result, each
+#               change, and an hourly heartbeat while passing
 
-# Query the audit log
 var q = query_new();
 query_min_severity(q, SEV_ERROR);
 var errors = chain_query(alog, q);
 
-# Verify chain integrity (SHA-256)
-var ok = audit_log_verify(alog);  # 1 = valid, 0 = tampered
+var ok = audit_log_verify(alog);   # 1 = valid, 0 = tampered
 ```
 
-## Consumers
+## Confining services
 
-Argonaut is a library. The PID 1 binary is [kybernet](https://github.com/MacCracken/kybernet), which calls argonaut's init functions to manage the real boot process.
+argonaut does not apply seccomp, Landlock or capability policy itself. Register a
+pre-exec hook. It runs in the child after fork, immediately before `execve`, and receives
+the `ServiceDefinition`:
 
-Other consumers:
-- **stiva** — container service lifecycle
-- **sutra** — infrastructure playbook service management
-- **daimon** — agent runtime (triggers runlevel switches)
-- **agnoshi** — shell (queries service status via API)
+```cyrius
+fn my_pre_exec(svc_def) {
+    # apply the service's policy; return 0 to exec, non-zero to refuse
+    return 0;
+}
+argonaut_set_pre_exec_hook(&my_pre_exec);
+```
+
+A non-zero return aborts the child with exit 126, and the service never runs unconfined.
+kybernet's `src/lib/service_sandbox.cyr` is a complete hook. It applies cgroup placement,
+`no_new_privs`, capabilities, Landlock and seccomp, in that order.

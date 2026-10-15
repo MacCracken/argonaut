@@ -31,3 +31,15 @@ All command execution goes through `SafeCommand` — a structured `{binary, args
 ## Post-Port Update (v0.95.0)
 
 The `SafeCommand` pattern was carried forward unchanged into the Cyrius port. In Cyrius, `SafeCommand` is a struct with `binary` (null-terminated string) and `args` (vec of strings), executed via `exec_argv()`. The structural guarantee — no shell interpreter in the execution path — is identical to the Rust implementation. See `src/safe_command.cyr`.
+
+## Update (2026-10-14)
+
+`SafeCommand` lives in `src/types.cyr`. Its `binary` and arguments are `Str` values, and
+there is no `exec_argv()` and no `src/safe_command.cyr`. `run_safe_cmd_timeout`
+(`src/process_mgmt.cyr`) executes it:
+- it resolves the binary against a fixed PATH;
+- forks, and puts the child in its own process group;
+- calls `sys_execve` directly, deliberately not the stdlib's `exec_vec_str`;
+- waits with a deadline, and kills the whole group on timeout.
+
+The decision is unchanged.

@@ -1,9 +1,7 @@
-# cc3_readfile_cap.tcyr — regression test for cc3 compiler size limits
-# Tests that 16 libro modules compile and run (excludes file_store/patra_store/streaming
-# which need patra lock functions not in argonaut's stdlib).
-#
-# cc3 3.6.2: READFILE, codebuf, token limits all resolved. This test passes.
-# See docs/issues/cc3-readfile-cap.md for version history.
+# cc3_readfile_cap.tcyr — regression test for the compiler's size limits
+# (READFILE, codebuf, tokens): libro's whole bundle compiles and runs.
+# Kept as a regression marker; the history is in docs/issues/cc3-readfile-cap.md
+# (closed).
 
 # Core stdlib
 include "lib/string.cyr"

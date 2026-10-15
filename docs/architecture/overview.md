@@ -2,132 +2,126 @@
 
 ## System Context
 
-Argonaut is the init system and service manager for AGNOS. It occupies the layer between the kernel and userspace services — responsible for bringing the system from "kernel handed off control" to "all services running and healthy."
+Argonaut is the init system and service manager for AGNOS. It takes the system from
+"the kernel handed off control" to "every service running and healthy", and back down
+again.
+
+It ships two things:
+- **A library** (`src/*.cyr`). AGNOS's production PID 1, kybernet, links it in-process
+  and drives the service lifecycle from its own event loop.
+- **A minimal PID-1 binary** (`src/main.cyr`). It mounts, blocks signals onto a
+  signalfd, waits in poll, reaps, syncs and powers off. It does not run the service
+  lifecycle, and the qemu harness boots it as PID 1 (architecture note 002).
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    AGNOS Userspace                    │
-│  ┌─────────┐ ┌────────┐ ┌───────────┐ ┌──────────┐ │
-│  │ daimon  │ │ hoosh  │ │aethersafha│ │ agnoshi  │ │
-│  │ (agent) │ │ (LLM)  │ │(compositor)│ │ (shell)  │ │
-│  └────┬────┘ └───┬────┘ └─────┬─────┘ └────┬─────┘ │
-│       │          │            │             │        │
-│  ┌────┴──────────┴────────────┴─────────────┴─────┐  │
-│  │              argonaut (init system)             │  │
-│  │  boot sequence │ service lifecycle │ health     │  │
-│  │  runlevels     │ shutdown planning │ watchdog   │  │
-│  │  edge boot     │ process table    │ sd_notify  │  │
-│  │  security      │ audit trail      │ tracing    │  │
-│  └────────────────────────────────────────────────┘  │
-│                         │                            │
-└─────────────────────────┼────────────────────────────┘
-                          │
-┌─────────────────────────┼────────────────────────────┐
-│  Linux Kernel (6.x)     │                            │
-│  process management, signals, filesystems, dm-verity │
+┌──────────────────────────────────────────────────────┐
+│                   AGNOS userspace                    │
+│  daimon · llm-gateway (hoosh) · aethersafha · agnoshi │
+├──────────────────────────────────────────────────────┤
+│  kybernet (PID 1): event loop, config, policy hook   │
+│   └─ argonaut library                                │
+│        boot sequence │ service lifecycle │ health    │
+│        runlevels     │ ordered shutdown  │ watchdog  │
+│        edge boot     │ process table     │ sd_notify │
+│        audit chain   │ unit / tmpfiles   │ pre-exec  │
+├──────────────────────────────────────────────────────┤
+│  Linux kernel: processes, signals, filesystems,      │
+│  dm-verity, LUKS                                     │
 └──────────────────────────────────────────────────────┘
 ```
 
 ## Module Structure
 
 ```
-argonaut (Cyrius library)
-├── types.cyr       — All public types, enums, configs (~1000 lines)
-├── boot.cyr        — Boot sequence construction per BootMode
-├── services.cyr    — Service registry, defaults, dependency resolution (Kahn's)
-├── process_mgmt.cyr — Fork/exec, PID tracking, signal delivery, ProcessTable
-├── health.cyr      — Health check execution, HealthState, HealthHistory
-├── edge_boot.cyr   — Read-only rootfs, dm-verity, LUKS, fleet registration
-├── notify.cyr      — sd_notify protocol listener (READY=1, STATUS, MAINPID)
-├── security.cyr    — Seccomp, Landlock, capabilities, socket activation
-├── systemd.cyr     — Hybrid systemd unit generation
-├── tmpfiles.cyr    — Boot-time filesystem setup (directories, symlinks, devices)
-├── audit.cyr       — Libro bridge (ServiceEventType → AuditChain)
-├── init.cyr        — ArgonautInit orchestrator, service lifecycle, audit recording
-└── main.cyr        — Entry point
+argonaut
+├── syscall_compat.cyr — per-arch wrappers for syscalls the stdlib does not wrap
+├── types.cyr          — core enums, structs, configs and accessors
+├── boot.cyr           — boot sequence per BootMode
+├── services.cyr       — default services; dependency resolution (one Kahn's pass → waves)
+├── process_mgmt.cyr   — fork/exec, the pre-exec hook, process table, signals, PID files
+├── resolver.cyr       — IPv4 literals and /etc/hosts lookups for health checks
+├── health.cyr         — HTTP / TCP / command / process-alive checks, state, history
+├── edge_boot.cyr      — read-only rootfs, dm-verity, LUKS, fleet registration
+├── notify.cyr         — sd_notify server (authenticated) and client
+├── security.cyr       — policy descriptions (not enforced); emergency-shell credential
+├── systemd.cyr        — systemd unit generation
+├── tmpfiles.cyr       — tmpfiles entries: native symlink-safe apply, command rendering
+├── audit.cyr          — the libro bridge (ServiceEventType → audit chain)
+├── audit_ext.cyr      — persistence (patra), signed snapshots, merkle proofs
+├── init.cyr           — the ArgonautInit orchestrator: lifecycle, health, shutdown
+├── pid1_harness.cyr   — the qemu M3 / L3 self-tests
+├── bench_main.cyr     — the release benchmark gate
+└── main.cyr           — entry point; the minimal PID-1 loop
 ```
 
 ## Key Design Decisions
 
 | Decision | ADR | Rationale |
 |----------|-----|-----------|
-| Cyrius language | [ADR-001](../adrs/001-language-choice.md) | Sovereign toolchain, 378KB binary, no external deps |
-| SafeCommand abstraction | [ADR-002](../adrs/002-safe-command-abstraction.md) | Structural elimination of shell injection (CWE-78) |
-| Library + binary split | [ADR-003](../adrs/003-library-plus-binary-architecture.md) | Testable library (argonaut), PID 1 binary (kybernet) |
+| Language | [ADR-001](../adrs/001-language-choice.md) | Originally Rust, ported to Cyrius at 0.95.0: a sovereign toolchain and a small static binary |
+| SafeCommand abstraction | [ADR-002](../adrs/002-safe-command-abstraction.md) | No shell, so no shell injection (CWE-78) |
+| Library + binary split | [ADR-003](../adrs/003-library-plus-binary-architecture.md) | A testable library; kybernet is the production PID 1 |
 | Edge boot security model | [ADR-004](../adrs/004-edge-boot-security-model.md) | dm-verity + LUKS + read-only rootfs |
-| No HTTP dependencies | [ADR-005](../adrs/005-health-check-no-external-deps.md) | Raw TCP health checks, zero additional deps |
+| No HTTP dependencies | [ADR-005](../adrs/005-health-check-no-external-deps.md) | A raw-socket HTTP/1.0 client, no additional deps |
+| Wave-based startup and shutdown | [ADR-008](../adrs/008-wave-based-parallel-startup.md) | Parallel waves, deterministic order, reversed for shutdown |
+| Policy enforced by the consumer | [ADR-013](../adrs/013-policy-enforcement-in-the-consumer.md) | argonaut owns the fork→exec window; the consumer's hook applies seccomp / Landlock / capabilities |
 
-## Boot Flow
+## Boot Flow (as a consumer drives it)
 
 ```
-ArgonautInit::new(config)
+argonaut_init_new(config)
+  ├── build_boot_sequence(mode)        → BootSteps
+  ├── default_services(mode)           → registered services
+  └── audit chain                      → streaming by default; retained or persistent by config
   │
-  ├── build_boot_sequence(mode)    → vec of BootStep
-  ├── default_services(mode)       → registered in services map
-  ├── audit_log_new()              → libro AuditChain
+  ▼ boot (the caller drives it)
+  init_mark_step_complete(init, STAGE_MOUNT_FS)
+  init_mark_step_complete(init, STAGE_VERIFY_ROOTFS)   ← execute_edge_boot() in Edge mode
+  …
+  for each wave of init_boot_execution_plan_waves(init):
+      init_start_service(init, name)   → STARTING; RUNNING after the ready check
+                                         (SVC_NOTIFY: after an authenticated READY=1)
+  init_mark_step_complete(init, STAGE_BOOT_COMPLETE)
   │
-  ▼ Boot execution (caller drives):
-  mark_step_complete(MountFilesystems)
-  mark_step_complete(StartDeviceManager)
-  mark_step_complete(VerifyRootfs)        ← execute_edge_boot() for Edge mode
-  mark_step_complete(StartSecurity)
-  mark_step_complete(StartDatabaseServices)
-  start_service("postgres")               ← spawns process, runs ready check
-  start_service("redis")                     audit: STARTING → STARTED
-  start_service("daimon")
-  start_service("hoosh")
-  mark_step_complete(BootComplete)
-  │
-  ▼ Runtime loop (caller drives):
+  ▼ supervisor loop (the caller drives it)
   loop {
-      reap_services()                     → CrashAction, audit: CRASH_DETECTED
-      poll_health(&tracker)               → audit: HEALTH_PASSED/FAILED
-      enforce_watchdog()                  → audit: TIMEOUT_KILLED
-      // handle restart decisions
+      init_reap_services(init)         → crash handling, restarts, audit
+      init_poll_health(init, tracker)  → audited on change, plus an hourly heartbeat
+      init_enforce_watchdog(init)      → kills services that missed WATCHDOG=1
   }
+  │
+  ▼ shutdown
+  init_execute_shutdown(init, budget)  → reverse waves, SIGTERM then process-group SIGKILL
 ```
 
 ## Service State Machine
 
-```
-                 ┌─────────┐
-                 │ Stopped │
-                 └────┬────┘
-                      │ start_service()
-                      ▼
-                 ┌─────────┐
-                 │Starting │──── ready check fails ───► Failed
-                 └────┬────┘
-                      │ ready check passes
-                      ▼
-                 ┌─────────┐
-                 │ Running │──── health check fails ──► Failed
-                 └────┬────┘     (via HealthTracker)
-                      │ stop_service()
-                      ▼
-                 ┌─────────┐
-                 │Stopping │
-                 └────┬────┘
-                      │ process exits
-                      ▼
-                 ┌─────────┐
-                 │ Stopped │
-                 └─────────┘
+`valid_transition` in `src/types.cyr` is the table:
 
-  Failed ──► Starting  (if restart policy allows)
-  Failed ──► Stopped   (if restart limit exceeded or policy=Never)
 ```
+  Stopped  ──► Starting
+  Starting ──► Running    (ready check passes; SVC_NOTIFY: READY=1)
+  Starting ──► Failed     (start fails, ready check fails, or start timeout)
+  Starting ──► Stopping   (stopped before ready)
+  Running  ──► Stopping   (init_stop_service, shutdown)
+  Running  ──► Failed     (crash reaped, or watchdog kill)
+  Stopping ──► Stopped    (process exits)
+  Stopping ──► Failed
+  Failed   ──► Starting   (restart policy allows, within the restart window)
+  Failed   ──► Stopped    (restart limit reached, or policy = never)
+```
+
+Health checks record and audit results; they do not change state themselves.
 
 ## Dependencies
 
 | Library | Purpose |
 |---------|---------|
-| sigil | SHA-256, hex encoding, constant-time comparison (for libro) |
-| bigint | Arbitrary precision integers (for sigil) |
-| chrono | Timestamp formatting (RFC 3339) |
-| libro 1.0.3 | Cryptographic audit chain (8 modules) |
-| sakshi_full 0.7.0 | Structured tracing (spans, ring buffer, UDP) |
+| libro | Hash-linked audit chain, persistence, signing, merkle proofs (`dist/libro.cyr`, git tag) |
+| sigil | Thin sub-bundles: SHA-256 (+ SHA-NI), hex, ed25519 / ML-DSA, Argon2id (`[deps.sigil]`, libro's tag) |
+| patra | Storage behind optional audit persistence (stdlib fold) |
+| sakshi | Structured tracing (stdlib fold) |
 
-Cyrius stdlib: string, fmt, alloc, vec, str, syscalls, io, fs, process, hashmap, tagged, args, json, freelist.
-
-~378KB statically linked ELF x86_64. No libc, no external runtime dependencies.
+The full stdlib list is in `cyrius.cyml` `[deps] stdlib`. Current pins, binary sizes and
+suite counts are in [`docs/development/state.md`](../development/state.md). The binary is
+a statically linked ELF with no libc.

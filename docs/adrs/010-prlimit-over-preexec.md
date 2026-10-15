@@ -1,6 +1,6 @@
 # ADR-010: Resource Limits via prlimit(1) Instead of pre_exec
 
-**Status**: Accepted — carried forward in Cyrius port; prlimit approach unchanged
+**Status**: Superseded by ADR-013 — the prlimit path was never wired
 **Date**: 2026-04-02
 
 ## Context
@@ -34,3 +34,17 @@ A `ResourceLimits::secure_defaults()` constructor provides `core: Some(0)` (disa
 - **Pre-exec hook with `setrlimit`**: Tightest enforcement (limits applied before exec). Deferred to kybernet — the library does not make direct syscalls.
 - **Feature-gated syscall path**: Add a conditional compilation path for direct `setrlimit`. Rejected — Cyrius has no feature gates; deferred to kybernet regardless.
 - **`setrlimit` via agnosys**: Still requires a pre-exec context. Same architectural boundary.
+
+## Update (2026-10-14)
+
+This approach was never wired.
+- **The generator exists, unused:** `to_prlimit_commands(rl, pid)` and
+  `resource_limits_secure()`, in `src/types.cyr`. Nothing in the spawn path runs the
+  commands, and nothing reads `svc_def_rlimits`.
+- **A pre-exec context exists since 1.9.0** (ADR-013), so a consumer can call
+  `setrlimit` in the child.
+- **kybernet limits services with cgroups** (`cgroup_limits`) instead. It never reads
+  argonaut's `ResourceLimits`, whose layout clashes with agnostik's struct of the same
+  name.
+
+Whether to remove the generator or wire it is on the roadmap.

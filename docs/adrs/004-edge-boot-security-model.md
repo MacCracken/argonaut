@@ -40,3 +40,13 @@ Edge boot enforces a layered security model:
 - [`docs/architecture/005-edge-boot-tpm-key-policy.md`](../architecture/005-edge-boot-tpm-key-policy.md)
   (1.16.2) states what the TPM2 policy must bind for this model to hold against the
   CVE-2026-32606 class. That policy is set at enrolment, which kybernet owns.
+
+## Update (2026-10-14)
+
+- **Field name:** the boot budget is `EdgeBootConfig.max_boot_ms`. argonaut reports
+  `within_budget` in the result; the consumer decides what to do about it.
+- **tmpfs flags:** only `/tmp` and `/var/tmp` are `noexec` (sticky, mode 1777).
+  `/var/run` and `/var/log` are `nosuid,nodev,mode=0755`. Every overlay has an explicit
+  mode (1.16.1).
+- **Unlock flags:** the unlock runs `cryptsetup open --type luks2 --token-only --token-id
+  0 --tries 1 --`.

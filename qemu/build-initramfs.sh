@@ -2,10 +2,9 @@
 # build-initramfs.sh — stage a minimal initramfs with argonaut as
 # /sbin/init for the qemu PID-1 harness.
 #
-# Shape adapted from kybernet/qemu/build-initramfs.sh per the
-# "pull pattern, not code" convention in
-# docs/development/roadmap.md. Standalone — does not depend on
-# kybernet at runtime; only the harness scaffold shape was lifted.
+# Shape adapted from kybernet/qemu/build-initramfs.sh ("pull pattern,
+# not code"; docs/architecture/002-qemu-pid1-harness.md). Standalone —
+# does not depend on kybernet at runtime.
 #
 # Output: qemu/initramfs.cpio.gz + qemu/initramfs/ staging tree.
 #
@@ -54,9 +53,9 @@ if [ -f "$HELPER_BIN" ]; then
     echo "  bundled L3 helper ($(wc -c < "$HELPER_BIN") bytes, static)"
 fi
 
-# Bundle busybox for shells / test helpers used by the M3 orphan-reap
-# and L3 controlling-TTY test variants. Optional — boot smoke works
-# without it; M3/L3 end-to-end tests need it.
+# Bundle busybox, when present, for manual poking inside the guest.
+# Optional: neither the boot smoke nor the M3 / L3 harness needs it
+# (M3 forks directly; L3 execs /bin/l3-helper).
 BUSYBOX=""
 for cand in /usr/lib/initcpio/busybox /usr/bin/busybox /bin/busybox; do
     if [ -x "$cand" ]; then BUSYBOX="$cand"; break; fi
@@ -71,10 +70,8 @@ if [ -n "$BUSYBOX" ]; then
 
     # Modern distros ship busybox dynamically linked (Arch's
     # /usr/lib/initcpio/busybox needs /lib64/ld-linux-x86-64.so.2 +
-    # libc.so.6). The 1.6.2 L3 harness needs an actual execve to
-    # validate the setsid → exec chain, so bundle the dynamic
-    # loader + libc when the binary requires them. If we detect a
-    # static binary (no INTERP segment), skip this step.
+    # libc.so.6), so bundle the dynamic loader + libc when the binary
+    # requires them. A static binary (no INTERP segment) skips this.
     if file "$BUSYBOX" 2>/dev/null | grep -q "dynamically linked"; then
         mkdir -p "${INITRAMFS_DIR}/lib64" "${INITRAMFS_DIR}/usr/lib"
         # Resolve each NEEDED library + the interpreter through

@@ -60,3 +60,13 @@ From 1.15.6:
 ## Amendment — 1.16.1 (2026-10-14): one implementation
 
 The Negative above is resolved. Both functions now call one level-synchronous Kahn's pass, `_svc_kahn_levels` in `src/services.cyr`. It returns the levels as waves for `resolve_service_waves`, or reads them flat for `resolve_service_order`. The waves version used to rescan every key of the in-degree map once per wave, which made it O(waves × services). Sharing the pass halved `resolve_waves_chain_20` (63.9 → 32.7 µs) and cut `resolve_waves_desktop` by a fifth (CHANGELOG [1.16.1] Performance). The output is unchanged: `tests/tcyr/resolve_order.tcyr` passes as it did at 1.15.6.
+
+## Amendment — 1.16.2 (2026-10-14): shutdown uses the same waves
+
+The API is `init_boot_execution_plan_waves(init)`, which returns waves of
+`(name Str, ServiceDefinition)` pairs; the consumer chooses how to run each wave.
+
+Shutdown uses the same waves in reverse (`init_execute_shutdown`):
+- each wave gets a share of one overall budget;
+- SIGTERM first, then a process-group SIGKILL;
+- a dependency cycle stops everything as one wave.

@@ -1,7 +1,7 @@
 # test_header.cyr — shared includes and helpers for .tcyr test files
-# Uses system stdlib via lib/ symlink to ~/.cyrius/versions/*/lib/
+# lib/ is filled by `cyrius deps` from cyrius.cyml (gitignored).
 
-# Core stdlib — system install via lib/ symlink to ~/.cyrius
+# Core stdlib
 include "lib/string.cyr"
 include "lib/fmt.cyr"
 include "lib/alloc.cyr"
@@ -18,12 +18,14 @@ include "lib/assert.cyr"
 include "lib/bayan.cyr"
 include "lib/fnptr.cyr"
 
-# Libro dependencies (for audit.cyr which init.cyr now requires)
+# Libro dependencies (audit.cyr, which init.cyr requires, sits on libro)
 include "lib/freelist.cyr"
 include "lib/chrono.cyr"
 include "lib/thread_local.cyr"
 
-# Sakshi stubs for tests — avoids loading full sakshi (saves string buffer)
+# Sakshi stubs for tests. They override the manifest-resolved sakshi (last
+# definition wins), so each test build prints eight expected `duplicate fn
+# 'sakshi_*'` warnings.
 fn sakshi_info(msg, len) { return 0; }
 fn sakshi_warn(msg, len) { return 0; }
 fn sakshi_error(msg, len) { return 0; }
@@ -33,16 +35,13 @@ fn sakshi_span_enter(name, len) { return 0; }
 fn sakshi_span_exit() { return 0; }
 fn sakshi_span_depth() { return 0; }
 
-# Libro core chain modules.
+# Libro (the whole dist bundle).
 #
-# Do NOT add `include "lib/sigil.cyr"` here or in any .tcyr/.bcyr. Nothing in
-# argonaut calls sigil_* directly — sigil is reached only through libro, whose
-# manifest resolves the THIN sub-bundles (sha256 / sha_ni / mldsa / hex). A
-# hand-written monolith include pulls the full x509+RSA surface, collides with
-# the thin bundle (hundreds of `duplicate fn ... last definition wins`), and
-# made the bench-gate binary 14.3 MB against ~790 KB thin — so the recorded
-# bench numbers stopped describing the production binary. Removed from 10
-# files at 1.8.4; keep it out.
+# Do NOT add `include "lib/sigil.cyr"` here or in any .tcyr/.bcyr. sigil comes
+# only as the thin sub-bundles `[deps.sigil]` declares (sha256 / sha_ni / mldsa /
+# hex / argon2). The monolith pulls the full x509 + RSA surface, collides with the
+# thin bundles (hundreds of `duplicate fn ... last definition wins`), and makes the
+# bench-gate binary stop describing the production binary.
 include "lib/libro.cyr"
 
 # Argonaut modules (audit before init — init depends on audit;

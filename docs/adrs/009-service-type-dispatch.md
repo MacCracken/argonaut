@@ -35,3 +35,13 @@ Added `ServiceType` enum with three variants:
 - **Separate start functions exposed publicly**: `start_simple()`, `start_forking()`, etc. Rejected — leaks service type to callers who shouldn't need to know.
 - **Trait-based polymorphism**: `dyn ServiceRunner` with vtable dispatch. Over-engineered for 3 variants — enum dispatch is simpler and zero-cost.
 - **sd_notify-only PID tracking for forking**: Would require polling the notify socket during startup. PID file is simpler and more widely supported.
+
+## Update (2026-10-14)
+
+- **Four types.** `SVC_NOTIFY` was added at 1.13.6. It starts like a simple service and
+  stays STARTING until an authenticated `READY=1`.
+- **Dispatch:** `init_start_service` → `init_start_simple` / `init_start_oneshot` /
+  `init_start_forking`. The pid is the managed service's `pid` field.
+- **Bounded waits:** oneshot and forking waits are bounded by a start timeout (90 s
+  default, `argonaut_set_start_timeout_ms`; 1.16.1). They no longer block indefinitely.
+- **`MAINPID=`** is still parsed but not acted on.

@@ -11,7 +11,10 @@ These are the last benchmark numbers before the codebase was ported to Cyrius at
 
 ## Side-by-Side: Rust vs Cyrius
 
-| Benchmark | Rust (ns) | Cyrius (ns) | Ratio | Notes |
+The Cyrius column is the **v0.95.0** port, not today's code. Current numbers are in
+`bench-history.csv` and the bench snapshot in `docs/development/state.md`.
+
+| Benchmark | Rust (ns) | Cyrius @ v0.95.0 (ns) | Ratio | Notes |
 |-----------|-----------|-------------|-------|-------|
 | **Boot sequence construction** | | | | |
 | build_boot_seq_desktop | 213 | 4,000 | 18.8x | |
@@ -61,19 +64,19 @@ These are the last benchmark numbers before the codebase was ported to Cyrius at
 | **Audit logging** | | | | |
 | audit_log_record | — | 1,000 | — | Cyrius only (shim) |
 | **Safe command** | | | | |
-| safe_command_display | 146 | — | — | Not ported |
+| safe_command_display | 146 | — | — | Not ported at v0.95.0; ported since |
 | **Execution plan** | | | | |
-| boot_execution_plan | 3,378 | — | — | Not ported |
-| boot_execution_plan_waves | 3,757 | — | — | Not ported |
+| boot_execution_plan | 3,378 | — | — | Not ported at v0.95.0; ported since |
+| boot_execution_plan_waves | 3,757 | — | — | Not ported at v0.95.0; ported since |
 | **API responses** | | | | |
-| list_services_desktop | 536 | — | — | Not ported |
-| system_status_desktop | 564 | — | — | Not ported |
-| system_metrics_desktop | 211 | — | — | Not ported |
-| boot_log_desktop | 185 | — | — | Not ported |
+| list_services_desktop | 536 | — | — | Not ported at v0.95.0; ported since |
+| system_status_desktop | 564 | — | — | Not ported at v0.95.0; ported since |
+| system_metrics_desktop | 211 | — | — | Not ported at v0.95.0; ported since |
+| boot_log_desktop | 185 | — | — | Not ported at v0.95.0; ported since |
 | **Resource limits** | | | | |
-| resource_limits_prlimit | 772 | — | — | Not ported |
+| resource_limits_prlimit | 772 | — | — | Not ported at v0.95.0; ported since |
 
-## Analysis
+## Analysis (as of v0.95.0)
 
 **Typical overhead: 4–8x vs Rust.** Expected for a language without LLVM optimizations,
 inlining, or register allocation beyond R12 spill. The Cyrius compiler produces
@@ -99,10 +102,12 @@ the full calling convention.
 These are the higher-level orchestration paths where allocation overhead
 is amortized over real work.
 
-## Rust-only benchmarks (not yet ported to Cyrius)
+## Rust-only benchmarks at the time of the port
 
-These require functions that haven't been ported:
-- `boot_execution_plan` / `boot_execution_plan_waves` — execution plan builders
-- `list_services` / `system_status` / `system_metrics` / `boot_log` — API response builders
-- `resource_limits_prlimit_commands` — prlimit command generation
-- `safe_command_display` — SafeCommand Display impl
+All of these have since been ported and are benched in `tests/bcyr/api.bcyr`:
+- `init_boot_execution_plan` / `init_boot_execution_plan_waves`
+  (`boot_exec_plan`, `boot_exec_waves`);
+- `init_list_services` / `init_system_status` / `init_system_metrics` / `init_boot_log`
+  (`api_list_svcs`, `api_sys_status`, `api_sys_metrics`, `api_boot_log`);
+- `to_prlimit_commands` (`prlimit_cmds`);
+- `safe_cmd_display` (`safe_cmd_disp`).

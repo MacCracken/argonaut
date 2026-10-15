@@ -4,7 +4,11 @@
 **Reporter:** kybernet 1.2.0 (AGNOS PID 1 init system)
 **Affected:** `src/types.cyr` — `EdgeBootConfig` struct + `edge_config_default()`
 **Severity:** **P1** — kybernet's 1.2.x arc is **fully blocked** on this struct extension at the consumer-side. kybernet 1.2.0 shipped capability-detection-only edge boot with stubs in place of the real verify/unlock calls; 1.2.1 (real-device verify) cannot start until argonaut lands the deployment-path fields. P1 here is the consumer's rate-of-progress signal — argonaut's own work is unaffected, but kybernet's primary current-arc deliverable is sitting on it.
-**Status:** open.
+**Status:** **closed — withdrawn by the reporter** (kybernet 1.5.7). No struct change was needed:
+`execute_edge_boot(config, root_device, hash_device, root_hash, luks_device)` has always
+taken the deployment paths as parameters, and kybernet keeps the paths and its expected
+PCR values in its own config. The real blocker was the edge-boot exec path, fixed in
+argonaut 1.13.2 (CHANGELOG [1.13.2]). Kept as a historical record.
 
 ## Summary
 
@@ -180,6 +184,6 @@ key source) and an expected-PCR baseline vec landing in the struct.
 - [ ] `to_json` / `from_json` round-trip for the extended shape
 - [ ] No agnosys / cyrius pin movement; argonaut-internal cut
 
-See [`docs/development/issues/2026-05-11-edgebootconfig-deployment-paths.md`](issues/2026-05-11-edgebootconfig-deployment-paths.md).
+See [`docs/development/issues/2026-05-11-edgebootconfig-deployment-paths.md`](2026-05-11-edgebootconfig-deployment-paths.md).
 Filed by kybernet 1.2.0; unblocks kybernet 1.2.1.
 ```

@@ -34,9 +34,8 @@ jobs:
           echo "Version verified: $TAG (cyrius.cyml pulls from VERSION via \${file:VERSION})"
 
       - name: Install Cyrius toolchain
-        # Version-pinned layout — cycc (was cc5, renamed in Cyrius 6.0)
-        # 5.10.9+ resolves arch-peer includes (syscalls_x86_64_linux.cyr
-        # etc.) under ~/.cyrius/versions/<V>/lib.
+        # Version-pinned layout: cycc resolves arch-peer includes
+        # (syscalls_x86_64_linux.cyr etc.) under ~/.cyrius/versions/<V>/lib.
         run: |
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
           echo "Installing Cyrius $CYRIUS_VERSION"
@@ -78,17 +77,9 @@ jobs:
           echo "argonaut: $(wc -c < build/argonaut) bytes"
 
       - name: Cross-build aarch64 (best-effort)
-        # 1.5.4 — ship aarch64 alongside x86_64 when the toolchain
-        # bundles cycc_aarch64 (renamed from cc5_aarch64 in Cyrius
-        # 6.0). Skip without failing the run when absent (e.g. older
-        # toolchain release tarball); the release publishes whatever
-        # binaries were produced.
-        #
-        # 1.7.1: the cycc_aarch64 6.0.1 hang/stub on src/main.cyr is
-        # FIXED in cyrius 6.0.14 — the cross-build produces a real
-        # ~1.14 MB aarch64 ELF again. The 6.0.x major-version gate is
-        # removed; the cycc_aarch64-presence check below remains the
-        # only skip condition (older tarballs without the cross-tool).
+        # Ship aarch64 alongside x86_64 when the toolchain bundles
+        # cycc_aarch64. Skip without failing the run when absent; the
+        # release publishes whatever binaries were produced.
         run: |
           if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ]; then
             echo "::warning::cycc_aarch64 not shipped with this Cyrius release — aarch64 binary skipped"

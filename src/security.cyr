@@ -528,12 +528,10 @@ fn validate_mapper_name(name) {
     return 1;
 }
 
-# is_localhost_target: 1 if the host string is one of the loopback
-# literals argonaut ships health checks against. The current TCP /
-# HTTP check implementation hardcodes 127.0.0.1; this predicate is
-# the gate that turns the silent-localhost-fallback (HIGH-1) into
-# an explicit acceptance condition. Non-loopback targets get a
-# clear rejection rather than a misleading "healthy" verdict.
+# is_localhost_target: 1 if the host string is a loopback literal.
+# Nothing in argonaut calls it: TCP / HTTP checks resolve any IPv4
+# literal or /etc/hosts name (resolve_host_ipv4). It remains a
+# predicate for a caller that wants a loopback-only gate.
 fn is_localhost_target(host) {
     if (str_eq(host, str_from("127.0.0.1"))) { return 1; }
     if (str_eq(host, str_from("localhost"))) { return 1; }

@@ -129,19 +129,12 @@ jobs:
           grep -q "all systems nominal" /tmp/smoke_output
 
       - name: Cross-build aarch64 (best-effort)
-        # 1.5.4 — restore aarch64 builds. Requires `cycc_aarch64`
-        # (renamed from `cc5_aarch64` in Cyrius 6.0) in the toolchain
-        # bin dir; skip with a warning if the toolchain release didn't
-        # bundle it rather than fail the whole CI run (matches agnosys
-        # / agnostik convention). The translation pass converts x86_64
-        # syscall numbers to aarch64 at codegen — no argonaut source
-        # changes needed.
-        #
-        # 1.7.1: the cycc_aarch64 6.0.1 hang/stub on src/main.cyr is
-        # FIXED in cyrius 6.0.14 — the cross-build emits a real
-        # ~1.14 MB aarch64 ELF again. The 6.0.x major-version gate is
-        # removed; the cycc_aarch64-presence check below is the only
-        # remaining skip (toolchain tarballs without the cross-tool).
+        # Requires `cycc_aarch64` in the toolchain bin dir; skips with a
+        # warning when the toolchain release does not bundle it, rather
+        # than failing the run (the agnosys / agnostik convention).
+        # Portability is in the source, not the compiler: every syscall
+        # goes through a stdlib sys_* wrapper or src/syscall_compat.cyr
+        # (arch note 001).
         run: |
           if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ]; then
             echo "::warning::cycc_aarch64 not shipped with this Cyrius release — skipping aarch64 cross-build"
@@ -154,9 +147,7 @@ jobs:
           xxd -l 4 build/argonaut-aarch64 | grep -q "7f45 4c46"
 
       - name: Smoke test (aarch64 via qemu-user)
-        # Best-effort. Real-hardware coverage is gated on a CI
-        # runner with native aarch64 capacity (not yet allocated;
-        # tracked under the 1.5.4 cross-arch roadmap item). Use
+        # Best-effort. Native aarch64 CI is roadmap 1.17.2. Use
         # qemu-user-static if available — most stock Ubuntu / Debian
         # runners have it preinstalled, but we don't fail the run
         # if it's absent or the cross-build was skipped.

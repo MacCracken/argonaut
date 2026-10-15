@@ -13,7 +13,7 @@
 - **Language**: Cyrius (toolchain pinned in `cyrius.cyml [package].cyrius`)
 - **Version**: `VERSION` at the project root is the source of truth — do not inline the number here
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
-- **Not yet enforced**: seccomp / Landlock / capability configs are **modelled and rendered, not applied** — `src/security.cyr` has no syscalls and nothing in the spawn path reads those fields, so services run with PID 1's full root privileges. Corrected at 1.8.6 (audit DOC-1); do not describe argonaut as sandboxing services until this is real.
+- **Not enforced by argonaut**: seccomp / Landlock / capability configs are **modelled and rendered, not applied**. `src/security.cyr` makes no enforcement syscalls, and argonaut's spawn path does not read those fields. By design, enforcement belongs to the consumer (ADR-013). `fork_exec_service` passes each definition to a fail-closed pre-exec hook (`argonaut_set_pre_exec_hook`, 1.9.0), and kybernet's hook applies the policy. With no hook registered, services run with PID 1's full root privileges. Do not describe argonaut itself as sandboxing services.
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md) · [First-Party Documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
 - **Shared crates**: [shared-crates.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/shared-crates.md)
@@ -45,7 +45,8 @@ cyrius lint src/*.cyr                            # static checks
 cyrius fmt <file> --check                        # format check
 cyrius vet src/main.cyr                          # vet
 cyrius deps --verify                             # verify cyrius.lock hashes
-CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut    # release build
+CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut    # release build
+cyrius capacity src/main.cyr                     # compiler-table headroom
 ```
 
 ## Key Principles
@@ -58,7 +59,7 @@ CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut    # release build
 - **str_builder over string concat** — avoid temporary allocations on the hot path
 - **Packed Result** — zero-alloc on success, heap on the cold-path error
 - **SafeCommand for all process execution** — never shell strings; explicit argv only
-- **Build with `cyrius build`** — never raw `cat file | cc5`; the manifest auto-resolves deps and prepends includes
+- **Build with `cyrius build`** — never pipe a file into raw `cycc`; the manifest auto-resolves deps and prepends includes
 - **Source files only need project includes** — stdlib + external deps auto-resolve from `cyrius.cyml [deps]`
 - **Cyrius language reference**: `vidya/content/cyrius/` is canonical for syntax, idioms, gotchas
 
@@ -73,7 +74,7 @@ CYRIUS_DCE=1 cyrius build src/main.cyr build/argonaut    # release build
 - Do not commit `build/` (compiled binaries)
 - Do not add Cyrius stdlib includes in individual src files — the manifest resolves them
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the only source of truth (no separate `.cyrius-toolchain` file)
-- Prefer `str_builder` over stdlib `json_build/1` for flat JSON. (The old hard ban is **retired at 1.8.5**: patra renamed its 6-arg overload to `patra_json_build` at 1.9.0, and patra 1.13.10 defines no bare `json_build` — the shadowing is gone. `str_builder` is still the hot-path choice.)
+- Prefer `str_builder` over stdlib `json_build/1` for flat JSON on the hot path
 - Do not use `break` in `while` loops with `var` declarations — flag + `continue`
 - Do not write negative literals as `(0 - N)` — `-N` works since cyrius 3.10.3
 - Do not mix `&&` / `||` in one expression — nest `if` blocks instead
@@ -120,7 +121,7 @@ Per [first-party-standards § Security Hardening](https://github.com/MacCracken/
 4. **Pointer validation** — no raw deref of untrusted input without bounds check
 5. **No command injection** — `safe_cmd_*` API only; never `sys_system()` with user input
 6. **No path traversal** — file paths from external input validated; no `../` escape
-7. **Constant-time comparisons** for secrets — `constant_time_eq_str` (sigil), never `str_eq` for auth tokens
+7. **Constant-time comparisons** for secrets — `constant_time_eq_str` (libro, over the stdlib's `ct_eq_bytes_lens`), never `str_eq` for auth tokens
 8. **Known-CVE sweep** — websearch for current init/service-manager/systemd CVEs and 2025-2026 0days; map to argonaut's surface
 9. **Document findings** — `docs/audit/YYYY-MM-DD-audit.md`
 
@@ -132,15 +133,15 @@ Run before tagging `X.Y.0` or `X.0.0`. Ship as the last patch of the prior minor
 
 1. **Full test suite** — all `.tcyr` pass, zero failures
 2. **Benchmark snapshot** — compare against prior closeout label in `bench-history.csv`
-3. **Dead code audit** — `cyrius build` "dead:" floor recorded in CHANGELOG
+3. **Dead code audit** — the DCE build's `note: N unreachable fns (B bytes …)` floor recorded in CHANGELOG
 4. **Refactor pass** — consolidate parallel codepaths added during the minor
 5. **Code review pass** — diffs end-to-end for missed guards, ABI leaks, off-by-ones, silently-ignored errors
-6. **Cleanup sweep** — stale comments, dead `#ifdef` branches, unused includes, orphaned files (notably `src/test_*.cyr` stubs that predate `tests/tcyr/`)
+6. **Cleanup sweep** — stale comments, dead `#ifdef` branches, unused includes, orphaned files
 7. **Security re-scan** — quick grep for new `sys_system`, unchecked writes, unsanitized input, buffer size mismatches
 8. **Downstream check** — kybernet (and any consumer in `state.md`) builds and tests against the new version
 9. **Doc sync** — CHANGELOG, roadmap, `docs/development/state.md`, CLAUDE.md (if durable content changed)
 10. **Version verify** — `VERSION`, `cyrius.cyml`, CHANGELOG header, intended git tag all match
-11. **Full clean build** — `rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build` passes clean
+11. **Full clean build** — `rm -rf build lib && cyrius deps && CYRIUS_DCE=1 cyrius build --check-lib-sync` passes clean (`cyrius deps` never deletes a stale `lib/` file, so `lib/` goes too)
 
 ### Mandatory Benchmark Gate (every release)
 
@@ -173,16 +174,14 @@ Rationale: argonaut is PID 1 — boot sequencing, dependency resolution, and hea
 - All struct fields are 8 bytes (`i64`), accessed via `load64` / `store64` with offset (or `#derive(accessors)` getters/setters where adopted)
 - Heap allocation via `fl_alloc()` / `fl_free()` (freelist) for data with individual lifetimes
 - Bump allocation via `alloc()` for long-lived data (vec, str internals)
-- Enum values for constants — don't consume `gvar_toks` slots (4,096 initialized globals limit)
+- Enum values for constants: they are const-folded and take no initialized-global slot
 - Heap-allocate large buffers — `var buf[N]` inside a function is **static data** (not stack), bloats the binary, and consecutive calls clobber any returned Str/buf-borrowing values. The build's "large static data (N bytes)" warning is the upstream tell
 - 5.x stdlib lookup helpers (`toml_get`, `toml_get_sections`, …) take **cstr keys**; passing `str_from("…")` silently returns 0. JSON helpers (`json_get`) still take `Str`
 - `break` in while loops with `var` declarations is unreliable — flag + `continue`
 - `match`, `trait`, `const`, `true`, `false`, `do` and `dyn` are reserved words; `return;` without value is invalid (use `return 0;`); all `var` declarations are function-scoped
 - `!` is a real operator (cyrius 6.7.3+; earlier toolchains silently dropped a lone `!`). argonaut spells negation `== 0`, so a lone `!` in this tree is new code, not a carry-over
-- Per-compilation-unit limits: 4,096 variables, 1,024 functions, 4,096 initialized globals, 16,384 fixups (cc5 5.4.2+)
-- Counting rule: only a top-level `var NAME = <non-literal>;` (call / identifier / expression initializer) consumes an initialized-globals slot; a bare integer-literal init (`var x = 42;`) takes the static-init fast path and enum members are const-folded, so neither counts. See the cyrius guide's **Global Initializers** section (`docs/guides/cyrius-guide.md` in the cyrius repo)
+- Compiler tables are large on 6.6.9+ (the old 4,096-initializer and 1,024-function caps are gone); check headroom with `cyrius capacity src/main.cyr`. See the cyrius guide's **Global Initializers** section (`docs/guides/cyrius-guide.md` in the cyrius repo)
 - **Module-level `var X[N]` is N *slots*, not N bytes** — a top-level `var buf[N]` reserves N eight-byte slots (8N bytes of static data); only a *function-local* `var buf[N]` is N bytes. Measured upstream in sigil 3.12.9, whose de-banking freed 9,994,240 bytes = 1,249,280 declared units x 8, exactly. Size every module-level buffer as 8N when auditing static footprint
-- ~~Patra `json_build/6` shadows stdlib `json_build/1`~~ — **retired 1.8.5**; patra namespaced it to `patra_json_build` at 1.9.0 and 1.13.10 defines no bare `json_build`
 
 ## CI / Release
 
@@ -190,29 +189,28 @@ Rationale: argonaut is PID 1 — boot sequencing, dependency resolution, and hea
 - **Lockfile gate**: `cyrius.lock` checked in; CI runs `cyrius deps --verify`
 - **Dead code elimination**: every `cyrius build` in CI/release runs with `CYRIUS_DCE=1`. Binary size is a release metric — track in `state.md`
 - **Tag filter**: release workflow accepts both `v[0-9]+.[0-9]+.[0-9]+` and `[0-9]+.[0-9]+.[0-9]+` shapes; semver shape verified before build
-- **Version-verify gate**: release asserts `VERSION == ${file:VERSION}-resolved manifest version == git tag` before building. Mismatch fails the run
-- **Lint / fmt sweep**: CI auto-discovers `src/*.cyr` + `tests/tcyr/*.tcyr` + `tests/bcyr/*.bcyr`; `cyrlint` warnings are blocking; `cyrfmt --check` drift is blocking
+- **Version-verify gate**: release asserts `VERSION == git tag` (semver shape checked) before building; the manifest reads `${file:VERSION}`, and CI's docs job checks that VERSION appears in the CHANGELOG. Mismatch fails the run
+- **Lint / fmt sweep**: CI auto-discovers `src/*.cyr` + `tests/tcyr/*.tcyr` + `tests/bcyr/*.bcyr`; `cyrius lint` warnings are blocking; `cyrius fmt <file> --check` drift is blocking
 - **ELF magic check**: every CI build verifies the produced binary starts with `7f 45 4c 46`
 - **Workflow layout**:
-  - `.github/workflows/ci.yml` — toolchain install → deps verify → lint → fmt → vet → DCE build → ELF check → smoke → tests → bench (non-fatal artifact); reusable via `workflow_call`
-  - `.github/workflows/release.yml` — version gate → CI gate → DCE build → archives (source tarball, x86_64 binary, SHA256SUMS, cyrius.lock)
+  - `.github/workflows/ci.yml` — `build` job: toolchain install → deps resolve + verify → lint → fmt → vet → DCE build (`--check-lib-sync`) → ELF check → smoke → aarch64 cross-build + qemu-user smoke (best-effort) → every tcyr suite → bench (non-fatal artifact). Plus a `security` pattern scan and a `docs` job (required files, VERSION in CHANGELOG). Reusable via `workflow_call`
+  - `.github/workflows/release.yml` — CI gate → version verify → deps resolve + verify → DCE build → aarch64 cross-build (best-effort) → tests → smoke → archives (source tarball, x86_64 binary, aarch64 binary when built, SHA256SUMS, cyrius.lock) → GitHub release
 - **Concurrency**: CI uses `cancel-in-progress: true` keyed on workflow + ref — only the latest push is tested
-- **State sync**: every release also bumps `docs/development/state.md`. If you find yourself hand-editing state during routine work, the release hook needs fixing — file an issue against the workflow
+- **State sync**: every release also bumps `docs/development/state.md`, by hand today; automating it is roadmap 1.17.2. Outside a release, state.md should not need editing
 
 ## Docs
 
-- [`docs/adr/`](docs/adr/) — architecture decision records. *Why X over Y?*
+- [`docs/adrs/`](docs/adrs/) — architecture decision records. *Why X over Y?*
 - [`docs/architecture/`](docs/architecture/) — non-obvious constraints and quirks
 - [`docs/guides/`](docs/guides/) — task-oriented how-tos
-- [`docs/examples/`](docs/examples/) — runnable examples
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — completed, backlog, future, v1.0 criteria
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — the pinned release plan, gated work, non-goals
 - [`docs/development/state.md`](docs/development/state.md) — **live state snapshot, refreshed every release**
 - [`docs/audit/`](docs/audit/) — security audit reports (`YYYY-MM-DD-audit.md`)
 - [`CHANGELOG.md`](CHANGELOG.md) — source of truth for all changes
 
-New quirks land in `docs/architecture/` as numbered items (`NNN-kebab-case.md`); new decisions in `docs/adr/` using the template. **Never renumber either series.**
+New quirks land in `docs/architecture/` as numbered items (`NNN-kebab-case.md`); new decisions in `docs/adrs/` using `000-template.md`. **Never renumber either series.**
 
-**A toolchain pin bump or a dependency refresh does not earn a numbered doc.** It is routine maintenance: the CHANGELOG entry is the record, and a comment next to the code the constraint actually binds (`cyrius.cyml` for manifest shape, the CI workflow for a gate, `tests/test_header.cyr` for an include rule) states only the rule in force, in the present tense. Version narratives, dates and measurements never go in those comments — history belongs in the CHANGELOG, current figures in `state.md`. **`cyrius.cyml` is a manifest, not a ledger.** A third copy in `docs/architecture/` is a place to forget to update, not a place to look. Reserve the numbered series for argonaut's *own* surface — the aarch64 artifact matrix and its known-failure budget (001), the qemu PID-1 harness (002), the edge-boot TPM key-release policy argonaut depends on but does not enforce (005). Both `003` and `004` were toolchain quirk refs and were deleted at 1.8.5; their numbers are not reused.
+**A toolchain pin bump or a dependency refresh does not earn a numbered doc.** It is routine maintenance: the CHANGELOG entry is the record, and a comment next to the code the constraint actually binds (`cyrius.cyml` for manifest shape, the CI workflow for a gate, `tests/test_header.cyr` for an include rule) states only the rule in force, in the present tense. Version narratives, dates and measurements never go in those comments — history belongs in the CHANGELOG, current figures in `state.md`. **`cyrius.cyml` is a manifest, not a ledger.** A third copy in `docs/architecture/` is a place to forget to update, not a place to look. Reserve the numbered series for argonaut's *own* surface — the aarch64 artifact matrix (001), the qemu PID-1 harness (002), the edge-boot TPM key-release policy argonaut depends on but does not enforce (005). Both `003` and `004` were toolchain quirk refs and were deleted at 1.8.5; their numbers are not reused.
 
 Full doc-tree convention: [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md).
 
@@ -231,7 +229,7 @@ docs/ (minimum):
   examples/ — runnable examples
   development/
     roadmap.md — completed, backlog, future
-    state.md — live state snapshot (volatile; release-hook-bumped)
+    state.md — live state snapshot (volatile; bumped every release)
 
 docs/ (when earned):
   audit/ — security audit reports (YYYY-MM-DD-audit.md)
