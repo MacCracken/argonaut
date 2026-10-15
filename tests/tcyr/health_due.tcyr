@@ -31,22 +31,23 @@ fn main() {
     managed_svc_set_last_hc(ms, 0);
     assert_eq(_hc_is_due(ms, hc2), 1, "never-probed service is due");
 
-    # Just probed -> not due for another 60s.
-    managed_svc_set_last_hc(ms, now_ms());
+    # Just probed -> not due for another 60s. `last_hc` is CLOCK_MONOTONIC
+    # since 1.16.1 (audit C-3), so the stamps here are too.
+    managed_svc_set_last_hc(ms, monotonic_ms());
     assert_eq(_hc_is_due(ms, hc2), 0, "just-probed service is NOT due");
 
     # Probed longer ago than the interval -> due again.
-    managed_svc_set_last_hc(ms, now_ms() - 61000);
+    managed_svc_set_last_hc(ms, monotonic_ms() - 61000);
     assert_eq(_hc_is_due(ms, hc2), 1, "service past its interval is due");
 
     # Exactly at the interval counts as due (>=, not >).
-    managed_svc_set_last_hc(ms, now_ms() - 60000);
+    managed_svc_set_last_hc(ms, monotonic_ms() - 60000);
     assert_eq(_hc_is_due(ms, hc2), 1, "exactly at the interval is due");
 
     # A zero/absent interval means every tick — preserves the behaviour of any
     # config that never set one.
     var hc0 = health_check_new(HC_PROCESS_ALIVE, 0, 0, 0, 1000, 2);
-    managed_svc_set_last_hc(ms, now_ms());
+    managed_svc_set_last_hc(ms, monotonic_ms());
     assert_eq(_hc_is_due(ms, hc0), 1, "interval 0 means every tick");
 
     return assert_summary();

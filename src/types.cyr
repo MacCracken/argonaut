@@ -208,6 +208,21 @@ fn restart_limit_exceeded(rc, restart_count) {
     return restart_count >= max;
 }
 
+# 1.16.1 audit C-2 — THE RESTART LIMIT IS A WINDOW, NOT A LIFETIME BUDGET.
+#
+# `restart_count` was only ever incremented, so `max_restarts` counted every
+# restart since boot: the Nth restart of a RESTART_ALWAYS service gave up for
+# good even when the restarts were months apart, and backoff_delay stayed
+# pinned at its cap. A run of at least RESTART_STABLE_MS (monotonic) since the
+# service's last start now clears the count — the effect of systemd's default
+# StartLimitIntervalSec=10s: a crash loop still exhausts max_restarts, a
+# service that crashes once after a long stable run starts over from the base
+# delay. Only time spent RUNNING counts; the backoff wait between a crash and
+# its restart does not (see managed_svc_settle_restarts).
+enum RestartWindow {
+    RESTART_STABLE_MS = 10000;
+}
+
 # =========================================================================
 # Health check types
 # =========================================================================
@@ -363,10 +378,20 @@ fn service_state_str(s) {
 }
 
 # Valid state transitions
+#
+# 1.16.1 audit C-1: STARTING -> STOPPING is valid. A SVC_NOTIFY service sits in
+# STARTING until its READY=1 arrives, possibly for a long time, and
+# init_plan_shutdown already emits a stop step for it; refusing the transition
+# made init_stop_service return -1 WITHOUT signalling, so the service could not
+# be stopped, and init_restart_service then forked a second copy beside it.
 fn valid_transition(from, to) {
     if (from == to) { return 1; }
     if (from == STATE_STOPPED)  { return to == STATE_STARTING; }
-    if (from == STATE_STARTING) { return (to == STATE_RUNNING) || (to == STATE_FAILED); }
+    if (from == STATE_STARTING) {
+        if (to == STATE_RUNNING) { return 1; }
+        if (to == STATE_STOPPING) { return 1; }
+        return to == STATE_FAILED;
+    }
     if (from == STATE_RUNNING)  { return (to == STATE_STOPPING) || (to == STATE_FAILED); }
     if (from == STATE_STOPPING) { return (to == STATE_STOPPED) || (to == STATE_FAILED); }
     if (from == STATE_FAILED)   { return (to == STATE_STARTING) || (to == STATE_STOPPED); }
@@ -983,14 +1008,21 @@ fn svc_def_set_cgroup_limits(sd, cl)  { store64(sd + 168, cl); return sd; }
 # Managed service — runtime state of a service
 # =========================================================================
 
+# ⚠ THE THREE TIMESTAMPS ARE CLOCK_MONOTONIC MS (1.16.1 audit C-3), not epoch.
+# Each one feeds a deadline or a duration — the health due-time, the watchdog,
+# the restart window — and on CLOCK_REALTIME an NTP step forward SIGKILLed every
+# watchdog- or health-checked service on the next tick while a step back
+# silenced the watchdog. None of them is exported: init_list_services and
+# init_stats do not print them, and kybernet never reads them. 0 still means
+# "never" (argonaut stamps them with a value >= 1).
 struct ManagedService {
     definition;          # ptr to ServiceDefinition
     state;               # ServiceState enum
     pid;                 # i64 (0 = not running)
-    started_at;          # epoch ms (0 = not started)
-    restart_count;       # i64
-    last_health_check;   # epoch ms (0 = never)
-    last_notify;         # epoch ms of the last authenticated WATCHDOG= ping
+    started_at;          # monotonic ms (0 = not started)
+    restart_count;       # i64 — restarts inside the current window (C-2)
+    last_health_check;   # monotonic ms (0 = never)
+    last_notify;         # monotonic ms of the last authenticated WATCHDOG= ping
 }
 
 # ⚠ `last_notify` IS DELIBERATELY SEPARATE FROM `last_health_check`, AND
@@ -1032,6 +1064,21 @@ fn managed_svc_set_started(ms, ts)      { store64(ms + 24, ts); }
 fn managed_svc_set_restarts(ms, n)      { store64(ms + 32, n); }
 fn managed_svc_set_last_hc(ms, ts)      { store64(ms + 40, ts); }
 fn managed_svc_set_last_notify(ms, ts)  { store64(ms + 48, ts); }
+
+# Close a run for the restart window (C-2): if the service has been up for at
+# least RESTART_STABLE_MS since its last start, its restart count goes back to
+# 0. `now` is monotonic ms. Call it when a run ENDS — an exit reaped, a stop, a
+# watchdog kill — and when a live service is restarted; never at the restart of
+# an already-dead service, where `now - started` would count the backoff wait
+# as uptime and a crash loop with a long backoff would never give up. Returns 1
+# if the count was cleared.
+fn managed_svc_settle_restarts(ms, now) {
+    var started = managed_svc_started(ms);
+    if (started <= 0) { return 0; }
+    if (now - started < RESTART_STABLE_MS) { return 0; }
+    managed_svc_set_restarts(ms, 0);
+    return 1;
+}
 
 # =========================================================================
 # Edge boot config
@@ -1392,6 +1439,9 @@ struct FleetRegistration {
 # Timestamp helper — epoch milliseconds via clock_gettime
 # =========================================================================
 
+# Wall clock. For timestamps that are EXPORTED as dates — the boot log's step
+# times, HealthCheckResult.checked_at — and nothing else: never difference it
+# for a deadline or a duration, which is monotonic_ms' job (1.16.1 audit C-3).
 fn now_ms() {
     var buf[16];
     # clock_gettime(CLOCK_REALTIME=0, &timespec)

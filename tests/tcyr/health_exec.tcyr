@@ -145,6 +145,18 @@ fn main() {
     assert_eq((alloc_used() - multi_before) / 50, 0,
       "a multi-word check_command allocates nothing per call either");
 
+    # 1.16.1 audit B-8 — and for a BARE command name, which takes the PATH
+    # resolution path. `_resolve_safe_binary` built a vec and a fresh Str per
+    # candidate directory on every call (272 bytes for `true`, 0 for
+    # `/bin/true`); it now resolves into static storage.
+    var alloc_bare = str_from("true");
+    check_command(alloc_bare, 5000);
+    var bare_before = alloc_used();
+    var bi = 0;
+    while (bi < 50) { check_command(alloc_bare, 5000); bi = bi + 1; }
+    assert_eq((alloc_used() - bare_before) / 50, 0,
+      "a bare-name check_command allocates nothing per call either");
+
     # An argv longer than the static buffer is REFUSED, never truncated — a
     # silently shortened argv is a different command.
     var too_many = str_from("/bin/true a b c d e f g h i j k l m n o p q r");

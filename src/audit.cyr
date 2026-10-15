@@ -118,18 +118,45 @@ fn audit_log_entries(log) {
 # and once per health probe, in an arena PID 1 never resets.
 #
 # With libro >= 2.10.0 nothing inside libro allocates per record, so the
-# `details` box below is the whole per-record cost: 16 bytes, asserted as a
-# ceiling in tests/tcyr/audit_lifecycle.tcyr.
+# `details` box audit_log_record makes is the whole per-record cost: 16 bytes,
+# asserted as a ceiling in tests/tcyr/audit_lifecycle.tcyr. audit_log_record_str
+# has none (tests/tcyr/harden_core.tcyr, C-6).
 var _audit_src_cached = 0;
 var _audit_action_cache[64];
 
 fn audit_log_record(log, service, event_type) {
-    var severity = audit_event_severity(event_type);
+    # Caches first, then the per-call box — the order this has always
+    # allocated in. The audit_log_record micro (src/bench_main.cyr, tests/bcyr)
+    # rewinds the bump pointer under the lazily-filled caches every iteration;
+    # in the other order the next iteration's chain entry overwrites them and
+    # the bench crashes. (That bench should warm the caches before it marks.)
+    var source = _audit_source_str();
+    var action = _audit_action_str(event_type);
+    var details = str_from(service);
+    return _audit_append(log, event_type, source, action, details);
+}
+
+# audit_log_record with the service name already a Str — the box is BORROWED,
+# not copied. 1.16.1 audit C-6: init's lifecycle records pass the service
+# definition's own name Str, which lives as long as the init, so a health tick
+# no longer allocates the 16-byte `details` box per record. On a retaining
+# chain the entry keeps the pointer, so the Str must never be mutated or freed
+# afterwards; a caller with a transient name uses audit_log_record.
+fn audit_log_record_str(log, service, event_type) {
+    var source = _audit_source_str();
+    var action = _audit_action_str(event_type);
+    return _audit_append(log, event_type, source, action, service);
+}
+
+fn _audit_source_str() {
     if (_audit_src_cached == 0) { _audit_src_cached = str_from("argonaut"); }
-    var source = _audit_src_cached;
-    # Small lazy table keyed by event type. The enum is bounded and small; an
-    # out-of-range value falls back to allocating, so a future event type cannot
-    # index out of the array.
+    return _audit_src_cached;
+}
+
+# Small lazy table keyed by event type. The enum is bounded and small; an
+# out-of-range value falls back to allocating, so a future event type cannot
+# index out of the array.
+fn _audit_action_str(event_type) {
     var action = 0;
     if (event_type >= 0 && event_type < 64) {
         action = load64((&_audit_action_cache) + event_type * 8);
@@ -140,25 +167,29 @@ fn audit_log_record(log, service, event_type) {
     } else {
         action = str_from(event_type_str(event_type));
     }
-    var details = str_from(service);
-    # ⚠ RETURNS THE HEAD HASH, NOT AN ENTRY. 1.15.0 — the reason this release is
-    # a minor.
-    #
-    # `chain_append` hands back an entry the caller owns and is expected to free.
-    # Nothing in argonaut ever used it — every call site here and in init.cyr
-    # discards it — while on a STREAMING chain (which is the default since
-    # 1.13.8) libro retains nothing, so the entry was allocated and abandoned on
-    # every service start, stop, crash and health probe, in an arena kybernet's
-    # PID 1 never resets.
-    #
-    # libro 2.9.0's `chain_append_nokeep` is the opt-in append for exactly this
-    # shape: it reuses one scratch entry per chain and returns the new head hash.
-    # Linkage is byte-identical — `entry_compute_hash` reads only the struct's
-    # fields — so `audit_persist` deployments verify across the change.
-    #
-    # On a streaming chain the returned hash lives in libro's two-slot scratch
-    # (libro 2.10.0): it is valid until the second subsequent append to the same
-    # chain. A caller that keeps it longer must copy it.
+    return action;
+}
+
+# ⚠ RETURNS THE HEAD HASH, NOT AN ENTRY. 1.15.0 — the reason this release is
+# a minor.
+#
+# `chain_append` hands back an entry the caller owns and is expected to free.
+# Nothing in argonaut ever used it — every call site here and in init.cyr
+# discards it — while on a STREAMING chain (which is the default since
+# 1.13.8) libro retains nothing, so the entry was allocated and abandoned on
+# every service start, stop, crash and health probe, in an arena kybernet's
+# PID 1 never resets.
+#
+# libro 2.9.0's `chain_append_nokeep` is the opt-in append for exactly this
+# shape: it reuses one scratch entry per chain and returns the new head hash.
+# Linkage is byte-identical — `entry_compute_hash` reads only the struct's
+# fields — so `audit_persist` deployments verify across the change.
+#
+# On a streaming chain the returned hash lives in libro's two-slot scratch
+# (libro 2.10.0): it is valid until the second subsequent append to the same
+# chain. A caller that keeps it longer must copy it.
+fn _audit_append(log, event_type, source, action, details) {
+    var severity = audit_event_severity(event_type);
     return chain_append_nokeep(log, severity, source, action, details);
 }
 

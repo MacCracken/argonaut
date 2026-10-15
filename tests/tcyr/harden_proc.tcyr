@@ -1,0 +1,646 @@
+# harden_proc.tcyr — 1.16.1 audit: process execution, pid files, and the
+# unit / tmpfiles / edge-boot command renderers.
+#
+# One test_group per finding. Every MEDIUM's assertions were run against the
+# unfixed source first and failed there; the LOW groups pin the corrected
+# behaviour. Scratch files live under /tmp/argonaut-harden-<pid>-* and are
+# removed at the end.
+#
+# ⚠ THIS SUITE MUST NOT CALL argonaut_init_new. That enrols the test process
+# as a child subreaper (init.cyr, PR_SET_CHILD_SUBREAPER), after which an
+# orphaned grandchild is reparented to US and becomes our child — which would
+# silently change what the B-7 "not our child" and A-2 "grandchild is gone"
+# groups are measuring.
+include "tests/test_header.cyr"
+
+var _hp_pid = 0;
+var _hp_sleep_argv[3];
+var _hp_envp[1];
+
+# /tmp/argonaut-harden-<pid>-<suffix> as a Str whose data is NUL-terminated.
+fn hp_path(suffix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/argonaut-harden-");
+    str_builder_add_int(sb, _hp_pid);
+    str_builder_add_cstr(sb, "-");
+    str_builder_add_cstr(sb, suffix);
+    return str_builder_build(sb);
+}
+
+# Create `path` afresh with `mode`, holding the bytes of Str `s`.
+fn hp_write(path, s, mode) {
+    sys_unlink(str_data(path));
+    var fd = sys_open(str_data(path), 193, mode);   # O_WRONLY|O_CREAT|O_EXCL
+    if (fd < 0) { return -1; }
+    if (str_len(s) > 0) { sys_write(fd, str_data(s), str_len(s)); }
+    sys_close(fd);
+    sys_chmod(str_data(path), mode);
+    return 0;
+}
+
+# First decimal number in a file, or -1.
+fn hp_read_int(path) {
+    var buf = alloc(64);
+    var n = file_read_all(str_data(path), buf, 63);
+    if (n <= 0) { return -1; }
+    var v = 0;
+    var seen = 0;
+    var stop = 0;
+    var i = 0;
+    while (stop == 0 && i < n) {
+        var c = load8(buf + i);
+        var digit = 0;
+        if (c >= 48) { if (c <= 57) { digit = 1; } }
+        if (digit == 1) { v = v * 10 + c - 48; seen = 1; }
+        elif (seen == 1) { stop = 1; }
+        i = i + 1;
+    }
+    if (seen == 0) { return -1; }
+    return v;
+}
+
+# State letter from /proc/<pid>/stat ('S', 'R', 'Z', ...), or 0 when the pid
+# does not exist.
+fn hp_proc_state(pid) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/proc/");
+    str_builder_add_int(sb, pid);
+    str_builder_add_cstr(sb, "/stat");
+    var p = str_builder_build(sb);
+    var buf = alloc(512);
+    var n = file_read_all(str_data(p), buf, 511);
+    if (n <= 0) { return 0; }
+    var rp = -1;
+    var i = n - 1;
+    while (rp < 0 && i >= 0) {
+        if (load8(buf + i) == 41) { rp = i; }   # the LAST ')' ends comm
+        i = i - 1;
+    }
+    if (rp < 0) { return 0; }
+    if (rp + 2 >= n) { return 0; }
+    return load8(buf + rp + 2);
+}
+
+# 1 if `pid` is a live (non-zombie) process.
+fn hp_alive(pid) {
+    var st = hp_proc_state(pid);
+    if (st == 0) { return 0; }
+    if (st == 90) { return 0; }   # 'Z'
+    return 1;
+}
+
+# Poll until `pid` is gone (ESRCH) or a zombie, reaping it if it is ours.
+# Returns 1 when gone inside `budget_ms`.
+fn hp_wait_gone(pid, budget_ms) {
+    var deadline = monotonic_ms() + budget_ms;
+    var gone = 0;
+    while (gone == 0 && monotonic_ms() < deadline) {
+        var st = alloc(8);
+        sys_waitpid(pid, st, WNOHANG);
+        if (hp_alive(pid) == 0) { gone = 1; } else { sleep_ms(20); }
+    }
+    return gone;
+}
+
+# Wait for our child `pid` up to `budget_ms`. Returns its exit status,
+# 128+signal if it was killed by a signal, or -1 if it overran (it is then
+# SIGKILLed and reaped so it cannot outlive the suite).
+fn hp_wait_child(pid, budget_ms) {
+    var deadline = monotonic_ms() + budget_ms;
+    var st = alloc(8);
+    var res = -2;
+    while (res == -2) {
+        store64(st, 0);
+        var r = sys_waitpid(pid, st, WNOHANG);
+        if (r > 0) {
+            var status = load32(st);
+            if (WIFEXITED(status)) { res = WEXITSTATUS(status); }
+            elif (WIFSIGNALED(status)) { res = 128 + WTERMSIG(status); }
+            else { res = -3; }
+        } elif (r < 0) {
+            res = -4;
+        } elif (monotonic_ms() >= deadline) {
+            sys_kill(pid, SIGKILL);
+            sys_waitpid(pid, st, 0);
+            res = -1;
+        } else {
+            sleep_ms(10);
+        }
+    }
+    return res;
+}
+
+# Occurrences of cstr `needle` in Str `s`.
+fn hp_count(s, needle) {
+    var nlen = strlen(needle);
+    var slen = str_len(s);
+    var d = str_data(s);
+    var n = 0;
+    var i = 0;
+    while (i + nlen <= slen) {
+        if (memeq(d + i, needle, nlen) == 1) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+# safe_cmd argument `i` equals cstr `want`.
+fn hp_arg_is(cmd, i, want) {
+    var args = safe_cmd_args(cmd);
+    if (i >= vec_len(args)) { return 0; }
+    return str_eq_cstr(vec_get(args, i), want);
+}
+
+# A live process that is NOT our child: we fork A, A forks B (/bin/sleep 30)
+# and exits, so B is reparented away from us. Returns B's pid.
+fn hp_spawn_stray() {
+    store64(&_hp_sleep_argv, "/bin/sleep");
+    store64(&_hp_sleep_argv + 8, "30");
+    store64(&_hp_sleep_argv + 16, 0);
+    store64(&_hp_envp, 0);
+    var fds = alloc(8);
+    if (sys_pipe(fds) != 0) { return -1; }
+    var rfd = load32(fds);
+    var wfd = load32(fds + 4);
+    var a = sys_fork();
+    if (a == 0) {
+        var b = sys_fork();
+        if (b == 0) {
+            sys_execve("/bin/sleep", &_hp_sleep_argv, &_hp_envp);
+            sys_exit(127);
+        }
+        var wb = alloc(8);
+        store64(wb, b);
+        sys_write(wfd, wb, 8);
+        sys_exit(0);
+    }
+    sys_close(wfd);
+    var rb = alloc(8);
+    store64(rb, 0);
+    sys_read(rfd, rb, 8);
+    sys_close(rfd);
+    var ast = alloc(8);
+    sys_waitpid(a, ast, 0);
+    return load64(rb);
+}
+
+# Build a TmpfileEntry.
+fn hp_tmp_entry(etype, path, target, mode, uid, gid, dtype) {
+    var e = alloc(72);
+    store64(e, etype);
+    store64(e + 8, str_from(path));
+    store64(e + 16, target);
+    store64(e + 24, mode);
+    store64(e + 32, uid);
+    store64(e + 40, gid);
+    store64(e + 48, dtype);
+    store64(e + 56, 1);
+    store64(e + 64, 3);
+    return e;
+}
+
+# Entries of an envp vec (cstrs) beginning with cstr `prefix`.
+fn hp_env_count(v, prefix) {
+    var plen = strlen(prefix);
+    var n = 0;
+    for (var i = 0; i < vec_len(v); i = i + 1) {
+        var e = vec_get(v, i);
+        if (strlen(e) >= plen) {
+            if (memeq(e, prefix, plen) == 1) { n = n + 1; }
+        }
+    }
+    return n;
+}
+
+# 1 if an envp vec holds exactly the cstr `want`.
+fn hp_env_has(v, want) {
+    var hit = 0;
+    for (var i = 0; i < vec_len(v); i = i + 1) {
+        if (streq(vec_get(v, i), want) == 1) { hit = 1; }
+    }
+    return hit;
+}
+
+fn hp_edge_cfg(readonly, luks) {
+    var ec = alloc(sizeof(EdgeBootConfig));
+    store64(ec, readonly);
+    store64(ec + 8, luks);
+    store64(ec + 16, 0);
+    store64(ec + 24, 60000);
+    store64(ec + 32, str_from(""));
+    return ec;
+}
+
+fn main() {
+    alloc_init();
+    _hp_pid = sys_getpid();
+    var me = _hp_pid;
+    var uid = sys_getuid();
+
+    # =====================================================================
+    # B-1 MEDIUM — read_pid_file_safe: no symlinks, no FIFOs, strict parse
+    # =====================================================================
+    test_group("B-1 pid file: symlink / FIFO / strict parse");
+
+    var pf_target = hp_path("pid-target");
+    hp_write(pf_target, str_from_int(me), 384);                       # 0600
+    assert_eq(read_pid_file_safe(pf_target, uid), me,
+      "B-1: control — a plain own-uid 0600 pid file naming a live pid is accepted");
+
+    # The owner/mode checks fstat the opened file. Following a symlink means
+    # they vet the TARGET — e.g. another daemon's root-owned 0644 pid file —
+    # and argonaut then adopts, and later SIGKILLs, that daemon.
+    var pf_link = hp_path("pid-link");
+    sys_unlink(str_data(pf_link));
+    sys_symlink(str_data(pf_target), str_data(pf_link));
+    assert_eq(read_pid_file_safe(pf_link, uid), -1,
+      "B-1: a symlinked pid file is refused, not followed");
+    assert_eq(read_pid_file(pf_link), -1,
+      "B-1: the production reader refuses a symlinked pid file too");
+
+    # A FIFO with no writer blocks open(O_RDONLY) forever — PID 1 parked in
+    # open(2). Probed in a child so the unfixed code fails the assertion
+    # instead of hanging the suite.
+    var pf_fifo = hp_path("pid-fifo");
+    sys_unlink(str_data(pf_fifo));
+    assert_eq(sys_mknodat(-100, str_data(pf_fifo), 4096 | 384, 0), 0, "B-1: FIFO fixture created");
+    var t_fifo = monotonic_ms();
+    var fc = sys_fork();
+    if (fc == 0) {
+        if (read_pid_file_safe(pf_fifo, uid) == -1) { sys_exit(0); }
+        sys_exit(1);
+    }
+    assert_eq(hp_wait_child(fc, 2000), 0, "B-1: a FIFO at the pid-file path is refused without blocking");
+    assert(monotonic_ms() - t_fifo < 1500, "B-1: the FIFO refusal is prompt");
+
+    # Strict parse. The own pid is used wherever the unfixed reader's
+    # process_alive() would otherwise mask the parse defect.
+    var me_s = str_from_int(me);
+    var half = str_len(me_s) / 2;
+    var junk_sb = str_builder_new();
+    str_builder_add(junk_sb, str_sub(me_s, 0, half));
+    str_builder_add_cstr(junk_sb, "abc");
+    str_builder_add(junk_sb, str_sub(me_s, half, str_len(me_s) - half));
+    var pf_junk = hp_path("pid-junk");
+    hp_write(pf_junk, str_builder_build(junk_sb), 384);
+    assert_eq(read_pid_file_safe(pf_junk, uid), -1,
+      "B-1: digits separated by junk are refused, not joined into a pid");
+
+    var pf_big = hp_path("pid-big");
+    hp_write(pf_big, str_from("4294967295"), 384);
+    assert_eq(read_pid_file_safe(pf_big, uid), -1,
+      "B-1: 4294967295 (kill(-1) once truncated to pid_t) is refused");
+
+    var pf_neg = hp_path("pid-neg");
+    hp_write(pf_neg, str_from("-1"), 384);
+    assert_eq(read_pid_file_safe(pf_neg, uid), -1, "B-1: -1 is refused");
+
+    var pf_empty = hp_path("pid-empty");
+    hp_write(pf_empty, str_from(""), 384);
+    assert_eq(read_pid_file_safe(pf_empty, uid), -1, "B-1: an empty pid file is refused");
+
+    var pf_nl = hp_path("pid-nl");
+    hp_write(pf_nl, str_cat(me_s, str_from("\n")), 384);
+    assert_eq(read_pid_file_safe(pf_nl, uid), me, "B-1: one trailing newline is accepted");
+
+    var pf_nl2 = hp_path("pid-nl2");
+    hp_write(pf_nl2, str_cat(me_s, str_from("\n\n")), 384);
+    assert_eq(read_pid_file_safe(pf_nl2, uid), -1, "B-1: a second trailing newline is refused");
+
+    var pf_sp = hp_path("pid-sp");
+    hp_write(pf_sp, str_cat(str_from(" "), me_s), 384);
+    assert_eq(read_pid_file_safe(pf_sp, uid), -1, "B-1: leading whitespace is refused");
+
+    var pf_ovf = hp_path("pid-ovf");
+    hp_write(pf_ovf, str_from("99999999999999999999999"), 384);
+    assert_eq(read_pid_file_safe(pf_ovf, uid), -1, "B-1: an overflowing digit run is refused");
+
+    var pf_one = hp_path("pid-one");
+    hp_write(pf_one, str_from("1"), 384);
+    assert_eq(read_pid_file_safe(pf_one, uid), -1, "B-1: pid 1 is never adopted from a pid file");
+
+    # =====================================================================
+    # A-2 MEDIUM — a timed-out command takes its descendants with it
+    # =====================================================================
+    test_group("A-2 run_safe_cmd_timeout kills the process group");
+
+    var gp_file = hp_path("gpid");
+    sys_unlink(str_data(gp_file));
+    var gsb = str_builder_new();
+    str_builder_add_cstr(gsb, "sleep 30 & echo $! > ");
+    str_builder_add(gsb, gp_file);
+    str_builder_add_cstr(gsb, "; wait");
+    var gcmd = safe_cmd_new(str_from("/bin/sh"));
+    safe_cmd_add_arg(gcmd, str_from("-c"));
+    safe_cmd_add_arg(gcmd, str_builder_build(gsb));
+    var g_t0 = monotonic_ms();
+    var g_rc = run_safe_cmd_timeout(gcmd, 300);
+    assert_eq(g_rc, -1, "A-2: the over-budget command reports failure");
+    assert(monotonic_ms() - g_t0 < 3000, "A-2: and returns near its bound");
+    var gpid = hp_read_int(gp_file);
+    assert(gpid > 0, "A-2: the grandchild recorded its pid");
+    if (gpid > 0) {
+        var g_gone = hp_wait_gone(gpid, 1500);
+        assert_eq(g_gone, 1, "A-2: the timed-out command's grandchild is killed with it");
+        if (g_gone == 0) {
+            sys_kill(gpid, SIGKILL);
+            hp_wait_gone(gpid, 1000);
+        }
+    }
+
+    # =====================================================================
+    # B-2 MEDIUM — unit-file injection that survived MEDIUM-7
+    # =====================================================================
+    test_group("B-2 systemd unit escaping");
+
+    var inj = svc_def_new(str_from("inj"), str_from("50% done %h cost $5"), str_from("/usr/bin/app"));
+    vec_push(svc_def_modes(inj), BOOT_SERVER);
+    var inj_args = svc_def_args(inj);
+    vec_push(inj_args, str_from("%h"));
+    vec_push(inj_args, str_from(";"));
+    vec_push(inj_args, str_from("/bin/evil"));
+    vec_push(inj_args, str_from("$HOME"));
+    var inj_env = svc_def_env(inj);
+    map_set(inj_env, "FOO\nExecStartPre=/bin/evil", str_from("x"));
+    map_set(inj_env, "K", str_from("v\" \"LD_PRELOAD=/tmp/e.so"));
+    map_set(inj_env, "B", str_from("a\\b$c%h"));
+    map_set(inj_env, "1BAD", str_from("x"));
+    map_set(inj_env, "A-B", str_from("x"));
+    vec_push(svc_def_deps(inj), str_from("db debug-shell"));
+    var inj_unit = generate_unit(inj);
+
+    assert_eq(hp_count(inj_unit, "\nExecStart="), 1, "B-2: exactly one ExecStart= line");
+    assert_eq(hp_count(inj_unit, "ExecStartPre="), 0, "B-2(a): an env KEY cannot inject ExecStartPre=");
+    assert_eq(hp_count(inj_unit, "1BAD"), 0, "B-2(a): an env key starting with a digit is skipped");
+    assert_eq(hp_count(inj_unit, "A-B="), 0, "B-2(a): an env key with '-' is skipped");
+    assert(str_contains(inj_unit, str_from("Environment=\"K=v\\\" \\\"LD_PRELOAD=/tmp/e.so\"\n")),
+      "B-2(b): '\"' inside an Environment value is escaped, adding no assignment");
+    assert(str_contains(inj_unit, str_from("Environment=\"B=a\\\\b$c%%h\"\n")),
+      "B-2(b): '\\' is escaped, '%' doubled, '$' left literal in Environment=");
+    assert_eq(hp_count(inj_unit, "\nEnvironment="), 2, "B-2: only the two valid keys are emitted");
+    assert(str_contains(inj_unit, str_from("After=db_debug-shell.service\n")),
+      "B-2(c): a dependency name cannot add a second unit to After=");
+    assert(str_contains(inj_unit, str_from("Requires=db_debug-shell.service\n")),
+      "B-2(c): a dependency name cannot add a second unit to Requires=");
+    assert(str_contains(inj_unit, str_from("ExecStart=/usr/bin/app %%h \\; /bin/evil $$HOME\n")),
+      "B-2(d): '%' doubled, a lone ';' escaped, '$' doubled on the Exec line");
+    assert(str_contains(inj_unit, str_from("Description=50%% done %%h cost $5\n")),
+      "B-2(d): Description doubles '%' and leaves '$' literal");
+
+    # A newline in a dependency name: still one line, still one unit name.
+    var inj2 = svc_def_new(str_from("inj2"), str_from("d"), str_from("/usr/bin/true"));
+    vec_push(svc_def_deps(inj2), str_from("net\n[Service]\nExecStart=/bin/sh -c evil"));
+    var inj2_unit = generate_unit(inj2);
+    assert_eq(hp_count(inj2_unit, "\nExecStart="), 1, "B-2(c): a dependency newline adds no ExecStart=");
+    assert_eq(hp_count(inj2_unit, "[Service]"), 1, "B-2(c): a dependency newline adds no section");
+
+    # Quoting of awkward Exec arguments.
+    var q = svc_def_new(str_from("q"), str_from("d"), str_from("/usr/bin/q"));
+    vec_push(svc_def_args(q), str_from("a b"));
+    vec_push(svc_def_args(q), str_from("it's"));
+    vec_push(svc_def_args(q), str_from("tab\there"));
+    vec_push(svc_def_args(q), str_from(""));
+    vec_push(svc_def_args(q), str_from("x;y"));
+    var q_unit = generate_unit(q);
+    assert(str_contains(q_unit, str_from("ExecStart=/usr/bin/q \"a b\" \"it's\" \"tab\there\" \"\" x;y\n")),
+      "B-2: spaces, quotes, tabs and an empty argument stay one argument each");
+
+    # LOW — the service type maps to its own systemd Type=.
+    var ty_s = svc_def_new(str_from("ts"), str_from("d"), str_from("/usr/bin/ts"));
+    assert(str_contains(generate_unit(ty_s), str_from("Type=simple\n")), "B-2 LOW: SVC_SIMPLE -> Type=simple");
+    var ty_n = svc_def_new(str_from("tn"), str_from("d"), str_from("/usr/bin/tn"));
+    svc_def_set_service_type(ty_n, SVC_NOTIFY);
+    assert(str_contains(generate_unit(ty_n), str_from("Type=notify\n")), "B-2 LOW: SVC_NOTIFY -> Type=notify");
+    var ty_f = svc_def_new(str_from("tf"), str_from("d"), str_from("/usr/bin/tf"));
+    svc_def_set_service_type(ty_f, SVC_FORKING);
+    assert(str_contains(generate_unit(ty_f), str_from("Type=forking\n")), "B-2 LOW: SVC_FORKING -> Type=forking");
+    var ty_o = svc_def_new(str_from("to"), str_from("d"), str_from("/usr/bin/to"));
+    svc_def_set_service_type(ty_o, SVC_ONESHOT);
+    assert(str_contains(generate_unit(ty_o), str_from("Type=oneshot\n")), "B-2 LOW: SVC_ONESHOT -> Type=oneshot");
+
+    # Environment keys come out sorted (deterministic output).
+    var srt = svc_def_new(str_from("srt"), str_from("d"), str_from("/usr/bin/srt"));
+    map_set(svc_def_env(srt), "ZED", str_from("1"));
+    map_set(svc_def_env(srt), "ALPHA", str_from("2"));
+    map_set(svc_def_env(srt), "MID", str_from("3"));
+    map_set(svc_def_env(srt), "AL", str_from("4"));
+    assert(str_contains(generate_unit(srt),
+        str_from("Environment=\"AL=4\"\nEnvironment=\"ALPHA=2\"\nEnvironment=\"MID=3\"\nEnvironment=\"ZED=1\"\n")),
+      "B-2: Environment= lines are sorted by key");
+
+    # =====================================================================
+    # B-3 MEDIUM — tmpfiles modes are octal; B-4 LOW — no symlink following
+    # =====================================================================
+    test_group("B-3/B-4 tmpfiles argv");
+
+    var te = vec_new();
+    vec_push(te, hp_tmp_entry(TMP_DIRECTORY, "/run/hp-a", 0, 493, 999, 999, 0));     # 0755
+    vec_push(te, hp_tmp_entry(TMP_DIRECTORY, "/run/hp-b", 0, 2541, 5, -1, 0));       # 04755
+    vec_push(te, hp_tmp_entry(TMP_DIRECTORY, "/run/hp-c", 0, 0, -1, 7, 0));
+    vec_push(te, hp_tmp_entry(TMP_DEVICE, "/dev/hp-d", 0, 432, -1, -1, 99));         # 0660
+    vec_push(te, hp_tmp_entry(TMP_SYMLINK, "/run/hp-l", str_from("/run/hp-t"), 0, -1, -1, 0));
+    var tc = generate_tmpfile_commands(te);
+    assert_eq(vec_len(tc), 9, "B-3: mkdir+chown x3, mknod+chmod, ln");
+
+    assert(hp_arg_is(vec_get(tc, 0), 2, "755"), "B-3: mode 0755 renders as mkdir -m 755, not 493");
+    assert(hp_arg_is(vec_get(tc, 2), 2, "4755"), "B-3: mode 04755 renders as 4755");
+    assert(hp_arg_is(vec_get(tc, 4), 2, "0"), "B-3: mode 0 renders as 0");
+    assert(hp_arg_is(vec_get(tc, 7), 0, "660"), "B-3: device mode 0660 renders as chmod 660, not 432");
+
+    assert(hp_arg_is(vec_get(tc, 1), 0, "-h"), "B-4: chown does not follow a symlink (-h)");
+    assert(hp_arg_is(vec_get(tc, 1), 1, "999:999"), "B-4: uid:gid when both are set");
+    assert(hp_arg_is(vec_get(tc, 3), 1, "5"), "B-4: uid only — no trailing ':' (which would set the login group)");
+    assert(hp_arg_is(vec_get(tc, 5), 1, ":7"), "B-4: gid only renders as :gid");
+    assert(hp_arg_is(vec_get(tc, 8), 0, "-sfnT"), "B-4: ln -sfnT replaces a link, never writes inside its target");
+    assert(hp_arg_is(vec_get(tc, 8), 1, "/run/hp-t"), "B-4: ln target");
+    assert(hp_arg_is(vec_get(tc, 8), 2, "/run/hp-l"), "B-4: ln link path");
+
+    # =====================================================================
+    # B-5 MEDIUM — edge boot tmpfs mounts are not world-writable
+    # =====================================================================
+    test_group("B-5 edge boot tmpfs options");
+
+    var ro = configure_readonly_rootfs();
+    assert_eq(vec_len(ro), 5, "B-5: remount + four tmpfs mounts");
+    var mi = 1;
+    while (mi < vec_len(ro)) {
+        var m = vec_get(ro, mi);
+        var margs = safe_cmd_args(m);
+        var mdir = vec_get(margs, 3);
+        var mopt = vec_get(margs, 5);
+        assert(str_contains(mopt, str_from("nodev")), "B-5: every tmpfs is nodev");
+        assert(str_contains(mopt, str_from("nosuid")), "B-5: every tmpfs is nosuid");
+        var want_mode = "mode=1777";
+        if (str_eq_cstr(mdir, "/var/run") == 1) { want_mode = "mode=0755"; }
+        if (str_eq_cstr(mdir, "/var/log") == 1) { want_mode = "mode=0755"; }
+        assert(str_contains(mopt, str_from(want_mode)),
+          "B-5: explicit mode= (0755 for /var/run,/var/log; 1777 for tmp)");
+        mi = mi + 1;
+    }
+    var vr_opt = vec_get(safe_cmd_args(vec_get(ro, 2)), 5);
+    assert_eq(str_contains(vr_opt, str_from("1777")), 0, "B-5: /var/run is not world-writable");
+
+    # =====================================================================
+    # B-6 LOW — LUKS / verity fail closed
+    # =====================================================================
+    test_group("B-6 edge boot: missing inputs are errors");
+
+    var lr = execute_edge_boot(hp_edge_cfg(0, 1), str_from(""), str_from(""), str_from(""), str_from(""));
+    assert_eq(load64(lr + 16), 0, "B-6: LUKS enabled with no device is not reported unlocked");
+    assert(vec_len(load64(lr + 40)) >= 1, "B-6: LUKS enabled with no device records an error");
+    var lfr = fleet_registration_from_system(lr);
+    assert_eq(load64(lfr + 32), 0, "B-6: luks_active is 0 when nothing was unlocked");
+
+    var nr = execute_edge_boot(hp_edge_cfg(0, 0), str_from(""), str_from(""), str_from(""), str_from(""));
+    assert_eq(load64(nr + 16), 0, "B-6: LUKS disabled reports nothing unlocked");
+    assert_eq(vec_len(load64(nr + 40)), 0, "B-6: LUKS disabled is not an error");
+    assert_eq(load64(fleet_registration_from_system(nr) + 32), 0,
+      "B-6: luks_active is 0 on a board with LUKS disabled");
+
+    var pv = execute_edge_boot(hp_edge_cfg(0, 0), str_from("/dev/sda1"), str_from(""), str_from(""), str_from(""));
+    assert_eq(load64(pv + 8), 0, "B-6: partial verity inputs do not verify");
+    assert(vec_len(load64(pv + 40)) >= 1, "B-6: partial verity inputs record an error, not a silent skip");
+
+    # =====================================================================
+    # B-7 LOW — never wait on / signal a pid that is not our child
+    # =====================================================================
+    test_group("B-7 process_stop / stop_all on a non-child");
+
+    var stray = hp_spawn_stray();
+    assert(stray > 0, "B-7: stray fixture spawned");
+    if (stray > 0) {
+        sleep_ms(50);
+        assert_eq(hp_alive(stray), 1, "B-7: the stray is alive before the stop");
+        var s_t0 = monotonic_ms();
+        var s_rc = process_stop(stray, 2000);
+        var s_spent = monotonic_ms() - s_t0;
+        assert_eq(s_rc, -1, "B-7: process_stop on a non-child reports failure");
+        assert(s_spent < 1000, "B-7: process_stop on a non-child returns at once, not after the timeout");
+        sleep_ms(50);
+        assert_eq(hp_alive(stray), 1, "B-7: process_stop sends no signal to a pid that is not our child");
+
+        proc_table_init();
+        proc_table_insert(str_from("ghost"), stray);
+        var a_t0 = monotonic_ms();
+        var a_res = proc_table_stop_all(2000);
+        var a_spent = monotonic_ms() - a_t0;
+        assert(a_spent < 1000, "B-7: proc_table_stop_all does not wait out a non-child");
+        assert_eq(vec_len(a_res), 1, "B-7: the non-child is still reported");
+        if (vec_len(a_res) == 1) {
+            assert_eq(load64(vec_get(a_res, 0) + 8), -1, "B-7: ... as -1");
+        }
+        sleep_ms(50);
+        assert_eq(hp_alive(stray), 1, "B-7: proc_table_stop_all sends no signal to a non-child");
+
+        sys_kill(stray, SIGKILL);
+        hp_wait_gone(stray, 1000);
+    }
+
+    # A real child still gets the full treatment.
+    var real = sys_fork();
+    if (real == 0) {
+        sys_execve("/bin/sleep", &_hp_sleep_argv, &_hp_envp);
+        sys_exit(127);
+    }
+    sleep_ms(50);
+    var r_rc = process_stop(real, 2000);
+    assert_eq(r_rc, 128 + SIGTERM, "B-7: a real child is still SIGTERMed and reaped");
+    assert_eq(hp_proc_state(real), 0, "B-7: ... and leaves no zombie");
+
+    # =====================================================================
+    # B-9 LOW — spawn_service forwards to fork_exec_service
+    # =====================================================================
+    test_group("B-9 spawn_service");
+
+    # Probed in a child: the unfixed function dereferences a map as a vec.
+    var sc = sys_fork();
+    if (sc == 0) {
+        var ssd = svc_def_new(str_from("spawn"), str_from("d"), str_from("/bin/true"));
+        var sp = spawn_service(ssd);
+        if (sp <= 0) { sys_exit(2); }
+        var sst = alloc(8);
+        if (sys_waitpid(sp, sst, 0) != sp) { sys_exit(3); }
+        sys_exit(0);
+    }
+    assert_eq(hp_wait_child(sc, 5000), 0, "B-9: spawn_service returns a reapable child pid");
+
+    # =====================================================================
+    # B-10 LOW — a service's own environment overrides the defaults
+    # =====================================================================
+    test_group("B-10 service env overrides defaults");
+
+    # getenv returns the FIRST match, so appending the service's entries
+    # after the defaults never overrode anything; a default the service
+    # defines is now left out.
+    var xenv = vec_new();
+    vec_push(xenv, "NOTIFY_SOCKET=/run/hp-notify");
+    vec_push(xenv, "FOO=extra");
+    var xprev = argonaut_set_extra_env(xenv);
+
+    var esd = svc_def_new(str_from("envo"), str_from("d"), str_from("/bin/true"));
+    map_set(svc_def_env(esd), "PATH", str_from("/opt/bin"));
+    map_set(svc_def_env(esd), "FOO", str_from("svc"));
+    map_set(svc_def_env(esd), "NOTIFY", str_from("x"));     # a key PREFIX of NOTIFY_SOCKET
+    var ev = build_service_envp(esd);
+    assert_eq(hp_env_count(ev, "PATH="), 1, "B-10: exactly one PATH= entry");
+    assert_eq(hp_env_has(ev, "PATH=/opt/bin"), 1, "B-10: ... and it is the service's own PATH");
+    assert_eq(hp_env_count(ev, "FOO="), 1, "B-10: exactly one FOO= entry");
+    assert_eq(hp_env_has(ev, "FOO=svc"), 1, "B-10: the service's FOO overrides the extra-env FOO");
+    assert_eq(hp_env_has(ev, "NOTIFY_SOCKET=/run/hp-notify"), 1,
+      "B-10: a default whose key the service does NOT define is kept (prefix is not a match)");
+    assert_eq(hp_env_has(ev, "NOTIFY=x"), 1, "B-10: the service's own entries are all present");
+    assert_eq(vec_len(ev), 4, "B-10: three service entries plus the one surviving default");
+
+    # A service with no environment gets exactly the defaults.
+    var psd = svc_def_new(str_from("plain"), str_from("d"), str_from("/bin/true"));
+    var pev = build_service_envp(psd);
+    assert_eq(vec_len(pev), vec_len(build_default_envp()), "B-10: no service env -> the defaults");
+    assert_eq(hp_env_count(pev, "PATH=/usr/local/sbin"), 1, "B-10: ... starting with the default PATH");
+    assert_eq(hp_env_has(pev, "FOO=extra"), 1, "B-10: ... and the extra-env entries");
+    argonaut_set_extra_env(xprev);
+
+    # =====================================================================
+    # B-11 LOW — LUKS mapper names cannot be options
+    # =====================================================================
+    test_group("B-11 mapper names");
+
+    assert_eq(validate_mapper_name(str_from("-rf")), 0, "B-11: a leading '-' is refused");
+    assert_eq(validate_mapper_name(str_from("--help")), 0, "B-11: '--help' is refused");
+    assert_eq(validate_mapper_name(str_from("a-b")), 1, "B-11: an interior '-' is fine");
+    assert_eq(close_luks(str_from("-x")), 0, "B-11: close_luks validates its name");
+    assert_eq(close_luks(str_from("a/b")), 0, "B-11: close_luks refuses a slash");
+    var cl = close_luks(str_from("agnos-data"));
+    assert(cl != 0, "B-11: close_luks accepts a valid name");
+    if (cl != 0) {
+        var clc = vec_get(cl, 0);
+        assert(hp_arg_is(clc, 0, "close"), "B-11: close argv[1]");
+        assert(hp_arg_is(clc, 1, "--"), "B-11: '--' ends options before the name");
+        assert(hp_arg_is(clc, 2, "agnos-data"), "B-11: the name follows '--'");
+    }
+    var ul = unlock_luks(str_from("/dev/sda3"), str_from("agnos-data"));
+    var ulc = vec_get(ul, 0);
+    var ula = safe_cmd_args(ulc);
+    var uln = vec_len(ula);
+    assert(hp_arg_is(ulc, uln - 3, "--"), "B-11: unlock: '--' precedes the positionals");
+    assert(hp_arg_is(ulc, uln - 2, "/dev/sda3"), "B-11: unlock: device");
+    assert(hp_arg_is(ulc, uln - 1, "agnos-data"), "B-11: unlock: name");
+
+    # Cleanup.
+    sys_unlink(str_data(pf_target));
+    sys_unlink(str_data(pf_link));
+    sys_unlink(str_data(pf_fifo));
+    sys_unlink(str_data(pf_junk));
+    sys_unlink(str_data(pf_big));
+    sys_unlink(str_data(pf_neg));
+    sys_unlink(str_data(pf_empty));
+    sys_unlink(str_data(pf_nl));
+    sys_unlink(str_data(pf_nl2));
+    sys_unlink(str_data(pf_sp));
+    sys_unlink(str_data(pf_ovf));
+    sys_unlink(str_data(pf_one));
+    sys_unlink(str_data(gp_file));
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

@@ -32,11 +32,16 @@
 # documented across multiple language stdlibs. Returns the packed
 # big-endian IP on success, -1 on any parse failure.
 fn parse_ipv4(host) {
-    var len = str_len(host);
+    return parse_ipv4_span(str_data(host), str_len(host));
+}
+
+# parse_ipv4_span(data, len) — `parse_ipv4` over a raw byte span, so the
+# /etc/hosts scan can parse a token in place without boxing it in a Str
+# (1.16.1 audit A-3). Same rules, same result.
+fn parse_ipv4_span(data, len) {
     # "0.0.0.0" = 7 chars min; "255.255.255.255" = 15 chars max.
     if (len < 7) { return 0 - 1; }
     if (len > 15) { return 0 - 1; }
-    var data = str_data(host);
 
     var ip = 0;
     var octet = 0;
@@ -118,6 +123,102 @@ fn _etc_hosts_buf_ptr() {
     return _etc_hosts_buf;
 }
 
+# ⚠ THE SCAN ALLOCATES NOTHING. 1.16.1 audit A-3.
+#
+# It used to box every IP token and every name token it looked at in a fresh
+# `str_new` just to hand them to `parse_ipv4` and `str_eq` — 16 bytes per
+# token: 32-48 bytes per call on a stock two-line file, 6,400-9,600 on a
+# 200-line one. This runs on every TCP/HTTP health tick whose target is a
+# hostname, on PID 1's reactor path, in an arena init never resets. Tokens are
+# now parsed and compared where they lie in the buffer (`parse_ipv4_span`,
+# length + `memeq`).
+#
+# The rules are unchanged, byte for byte: a line is split on space and tab; the
+# first token must be a dotted quad (no '#' ends it, so `1.2.3.4#x` is not an
+# address); every later token up to a '#' is a name; a line whose first token
+# is not an IPv4 address (IPv6, junk) is skipped; the first matching line wins.
+
+# Blank on a hosts line: space or tab.
+fn _hosts_blank(c) {
+    if (c == 32) { return 1; }
+    if (c == 9) { return 1; }
+    return 0;
+}
+
+# First index in [i, le) that is not blank, or le.
+fn _hosts_skip_blank(buf, i, le) {
+    var j = i;
+    while (j < le && _hosts_blank(load8(buf + j)) == 1) { j = j + 1; }
+    return j;
+}
+
+# End of the token starting at i: the first blank in [i, le), or le. With
+# `hash_ends` set a '#' also ends it (names); the address token runs over one.
+fn _hosts_token_end(buf, i, le, hash_ends) {
+    var j = i;
+    var going = 1;
+    while (going == 1) {
+        if (j >= le) { going = 0; }
+        elif (_hosts_blank(load8(buf + j)) == 1) { going = 0; }
+        elif (hash_ends == 1 && load8(buf + j) == 35) { going = 0; }
+        else { j = j + 1; }
+    }
+    return j;
+}
+
+# The packed IPv4 of the line [ls, le) if it names the `hlen` bytes at
+# `hdata`, otherwise -1.
+fn _hosts_line_match(buf, ls, le, hdata, hlen) {
+    var j = _hosts_skip_blank(buf, ls, le);
+    if (j >= le) { return 0 - 1; }                     # blank line
+    if (load8(buf + j) == 35) { return 0 - 1; }        # comment line
+    var ip_start = j;
+    j = _hosts_token_end(buf, j, le, 0);
+    var ip = parse_ipv4_span(buf + ip_start, j - ip_start);
+    if (ip < 0) { return 0 - 1; }                      # IPv6 or malformed
+    var hit = 0;
+    var scanning = 1;
+    while (scanning == 1) {
+        j = _hosts_skip_blank(buf, j, le);
+        if (j >= le) { scanning = 0; }
+        elif (load8(buf + j) == 35) { scanning = 0; }  # inline comment
+        else {
+            var name_start = j;
+            j = _hosts_token_end(buf, j, le, 1);
+            if (j - name_start == hlen) {
+                if (memeq(buf + name_start, hdata, hlen) == 1) {
+                    hit = 1;
+                    scanning = 0;
+                }
+            }
+        }
+    }
+    if (hit == 1) { return ip; }
+    return 0 - 1;
+}
+
+# hosts_scan(buf, n, host) — the /etc/hosts scan over `n` bytes already in
+# memory: the packed IPv4 of the first line naming `host`, or -1. Split from
+# `lookup_etc_hosts` so the parsing rules can be tested against crafted input.
+fn hosts_scan(buf, n, host) {
+    var hdata = str_data(host);
+    var hlen = str_len(host);
+    var found = 0 - 1;
+    var ls = 0;
+    while (ls < n) {
+        var le = ls;
+        while (le < n && load8(buf + le) != 10) { le = le + 1; }
+        var ip = _hosts_line_match(buf, ls, le, hdata, hlen);
+        if (ip >= 0) {
+            found = ip;
+            ls = n;
+        } else {
+            ls = le + 1;
+        }
+    }
+    return found;
+}
+
 fn lookup_etc_hosts(host) {
     if (_etc_hosts_buf == 0) {
         _etc_hosts_buf = alloc(8193);
@@ -137,7 +238,10 @@ fn lookup_etc_hosts(host) {
     var n = file_read_all("/etc/hosts", buf, 8193);
     if (n <= 0) { return 0 - 1; }
     if (n > 8192) {
-        sakshi_warn("resolver: /etc/hosts exceeds the 8 KB scan cap — entries past it are invisible", 78);
+        # 1.16.1 audit: the length is measured, not a hand count (it said 78
+        # for an 80-byte message, so the log line lost its last two bytes).
+        var warn = "resolver: /etc/hosts exceeds the 8 KB scan cap — entries past it are invisible";
+        sakshi_warn(warn, strlen(warn));
         n = 8192;
         var cut = n;
         while (cut > 0 && load8(buf + cut - 1) != 10) { cut = cut - 1; }
@@ -145,74 +249,7 @@ fn lookup_etc_hosts(host) {
         n = cut;
         if (n == 0) { return 0 - 1; }
     }
-
-    var i = 0;
-    while (i < n) {
-        # Skip leading whitespace on the line.
-        while (i < n) {
-            var sc = load8(buf + i);
-            if (sc != 32 && sc != 9) { break; }   # ' ' or tab
-            i = i + 1;
-        }
-        if (i >= n) { return 0 - 1; }
-
-        var first = load8(buf + i);
-        if (first == 35 || first == 10) {        # '#' or empty line
-            # Skip to EOL.
-            while (i < n && load8(buf + i) != 10) { i = i + 1; }
-            if (i < n) { i = i + 1; }
-            continue;
-        }
-
-        # Token 1: IP literal.
-        var ip_start = i;
-        while (i < n) {
-            var tc = load8(buf + i);
-            if (tc == 32 || tc == 9 || tc == 10) { break; }
-            i = i + 1;
-        }
-        var ip_str = str_new(buf + ip_start, i - ip_start);
-        var ip = parse_ipv4(ip_str);
-        if (ip < 0) {
-            # Likely IPv6 or malformed; skip to EOL.
-            while (i < n && load8(buf + i) != 10) { i = i + 1; }
-            if (i < n) { i = i + 1; }
-            continue;
-        }
-
-        # Remaining tokens: hostname + aliases. Match `host` against any.
-        var line_done = 0;
-        while (i < n && line_done == 0) {
-            # Skip inter-token whitespace.
-            while (i < n) {
-                var wc = load8(buf + i);
-                if (wc != 32 && wc != 9) { break; }
-                i = i + 1;
-            }
-            if (i >= n) { break; }
-            var lc = load8(buf + i);
-            if (lc == 10) { i = i + 1; break; }       # EOL
-            if (lc == 35) {                           # inline comment
-                while (i < n && load8(buf + i) != 10) { i = i + 1; }
-                if (i < n) { i = i + 1; }
-                line_done = 1;
-            } else {
-                var name_start = i;
-                while (i < n) {
-                    var nc = load8(buf + i);
-                    if (nc == 32 || nc == 9 || nc == 10 || nc == 35) { break; }
-                    i = i + 1;
-                }
-                if (i > name_start) {
-                    var name = str_new(buf + name_start, i - name_start);
-                    if (str_eq(name, host)) {
-                        return ip;
-                    }
-                }
-            }
-        }
-    }
-    return 0 - 1;
+    return hosts_scan(buf, n, host);
 }
 
 # =========================================================================

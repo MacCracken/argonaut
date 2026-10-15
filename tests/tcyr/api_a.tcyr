@@ -48,7 +48,7 @@ fn main() {
     var e1 = alloc(72);
     store64(e1, TMP_DIRECTORY);
     store64(e1 + 8, str_from("/run/app"));
-    store64(e1 + 24, 755);
+    store64(e1 + 24, 493);   # 0755 (the mode is octal; 1.16.1 audit B-3)
     store64(e1 + 32, 999);
     store64(e1 + 40, 999);
     vec_push(te, e1);

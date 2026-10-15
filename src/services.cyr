@@ -313,27 +313,24 @@ fn _svc_name_cmp(a, b): i64 {
     return la - lb;
 }
 
-# Resolve startup order for services. Returns vec of service name Strs.
-# Returns 0 on error (cycle or missing dependency).
+# Level-synchronous Kahn's algorithm, shared by `resolve_service_order` and
+# `resolve_service_waves` (1.16.1; until then each had its own copy, and the
+# waves one rescanned every key of the in-degree map once per wave).
 #
-# Level-synchronous Kahn's algorithm. A service's level is one more than its
-# deepest dependency's. Levels run in sequence, each sorted by `_svc_name_cmp`, so
-# the order is `resolve_service_waves`' plan read wave by wave, and it depends on
-# the graph alone. It does not depend on definition order, or on `map_keys`, whose
-# order follows the hashmap's per-process seed and so changed on every boot until
-# 1.15.6.
-fn resolve_service_order(svc_defs) {
-    var count = vec_len(svc_defs);
-    if (count == 0) { return vec_new(); }
-
+# A service's level is one more than its deepest dependency's. Level 0 is every
+# node with in-degree 0 (external dependencies included). Each level is sorted by
+# `_svc_name_cmp` before it runs, and the services it releases form the next. So
+# the result depends on the graph alone: not on definition order, and not on
+# `map_keys`, whose order follows the hashmap's per-process seed.
+#
+# `as_waves` 1: a vec of levels, each a vec of name Strs. 0: one flat vec of
+# name Strs, the levels read in sequence. Returns 0 on a cycle.
+fn _svc_kahn_levels(svc_defs, as_waves) {
     var in_degree = map_new();
     var dependents = map_new();
     build_dep_graph(svc_defs, in_degree, dependents);
 
-    # Level 0: every node with in-degree 0.
     var level = vec_new();
-    var next = vec_new();
-    var spent = 0;
     var keys = map_keys(in_degree);
     for (var i = 0; i < vec_len(keys); i = i + 1) {
         var key = vec_get(keys, i);
@@ -342,13 +339,17 @@ fn resolve_service_order(svc_defs) {
         }
     }
 
-    var ordered = vec_new();
+    var out = vec_new();
+    var next = vec_new();
+    var spent = 0;
+    var resolved = 0;
     while (vec_len(level) > 0) {
         vec_sort_by(level, &_svc_name_cmp);
-        vec_truncate(next, 0);
+        resolved = resolved + vec_len(level);
+        if (as_waves == 1) { vec_push(out, level); }
         for (var li = 0; li < vec_len(level); li = li + 1) {
             var current = vec_get(level, li);
-            vec_push(ordered, current);
+            if (as_waves == 0) { vec_push(out, current); }
 
             # A dependent whose last dependency starts in this level joins the next.
             var dep_list = map_get(dependents, str_data(current));
@@ -363,75 +364,44 @@ fn resolve_service_order(svc_defs) {
                 }
             }
         }
-        # Swap, so the drained vec holds the level after next.
-        spent = level;
-        level = next;
-        next = spent;
+        if (as_waves == 1) {
+            # This level now belongs to `out`; the next one needs its own vec.
+            level = next;
+            next = vec_new();
+        } else {
+            # A flat order only reads each level once, so the two vecs alternate.
+            spent = level;
+            level = next;
+            next = spent;
+            vec_truncate(next, 0);
+        }
     }
 
-    # Cycle detection: compare against total graph nodes (includes external deps)
-    if (vec_len(ordered) != map_count(in_degree)) {
-        return 0;  # cycle detected
+    # Cycle detection: a node on a cycle never reaches in-degree 0, so fewer
+    # nodes resolve than the graph holds (external deps included).
+    if (resolved != map_count(in_degree)) {
+        return 0;
     }
+    return out;
+}
 
-    return ordered;
+# Resolve startup order for services. Returns vec of service name Strs, the
+# waves of `resolve_service_waves` read in sequence.
+# Returns 0 on error (cycle or missing dependency).
+fn resolve_service_order(svc_defs) {
+    if (vec_len(svc_defs) == 0) { return vec_new(); }
+    return _svc_kahn_levels(svc_defs, 0);
 }
 
 # =========================================================================
 # Wave-based startup: group services by dependency depth
 # =========================================================================
 
+# Group services into waves by dependency depth (ADR 008): a vec of waves, each
+# a vec of service name Strs sorted by name. Returns 0 on a cycle.
 fn resolve_service_waves(svc_defs) {
     if (vec_len(svc_defs) == 0) { return vec_new(); }
-
-    var in_degree = map_new();
-    var dependents = map_new();
-    build_dep_graph(svc_defs, in_degree, dependents);
-
-    var total_nodes = map_count(in_degree);
-    var waves = vec_new();
-    var resolved = 0;
-
-    while (resolved < total_nodes) {
-        var wave = vec_new();
-        var keys = map_keys(in_degree);
-
-        for (var i = 0; i < vec_len(keys); i = i + 1) {
-            var key = vec_get(keys, i);
-            if (map_get(in_degree, key) == 0) {
-                vec_push(wave, str_from(key));
-            }
-        }
-
-        if (vec_len(wave) == 0) {
-            return 0;  # cycle detected
-        }
-
-        # ADR 008: a wave is sorted by name, never left in `map_keys` order.
-        vec_sort_by(wave, &_svc_name_cmp);
-
-        # Remove processed nodes and decrement dependents
-        for (var i = 0; i < vec_len(wave); i = i + 1) {
-            var name = str_data(vec_get(wave, i));
-            map_delete(in_degree, name);
-
-            var dep_list = map_get(dependents, name);
-            if (dep_list != 0) {
-                for (var j = 0; j < vec_len(dep_list); j = j + 1) {
-                    var dep_name = str_data(vec_get(dep_list, j));
-                    if (map_has(in_degree, dep_name)) {
-                        var deg = map_get(in_degree, dep_name);
-                        map_set(in_degree, dep_name, deg - 1);
-                    }
-                }
-            }
-        }
-
-        resolved = resolved + vec_len(wave);
-        vec_push(waves, wave);
-    }
-
-    return waves;
+    return _svc_kahn_levels(svc_defs, 1);
 }
 
 # =========================================================================

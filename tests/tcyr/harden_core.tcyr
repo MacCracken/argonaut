@@ -1,0 +1,907 @@
+# harden_core.tcyr — 1.16.1 audit: service-lifecycle core hardening.
+#
+# One group per finding. Every MEDIUM group was written first and run against
+# the unfixed tree (new API stubbed), where 40 of its assertions failed:
+#
+#   C-1   a STARTING service could not be stopped, and start/restart forked a
+#         second copy of it
+#   C-2   the restart limit was a lifetime budget, never a window
+#   C-3   watchdog / health deadlines were measured on CLOCK_REALTIME
+#   C-4   oneshot / forking starts blocked PID 1 in waitpid with no bound
+#   C-5   lifecycle records bypassed the persistent store and broke its chain
+#   C-6   init_poll_health allocated a results vec + notify pid set every tick
+#   notify  the drain admitted only RUNNING pids and discarded what it parsed
+#   C-7, C-10, C-11  LOWs
+#   P-2   in-place map walks must produce byte-identical output
+#
+# Uses its own include list rather than tests/test_header.cyr so the span stubs
+# COUNT (C-10 asserts the depth returns to where it started).
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/process.cyr"
+include "lib/hashmap.cyr"
+include "lib/tagged.cyr"
+include "lib/args.cyr"
+include "lib/assert.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/freelist.cyr"
+include "lib/chrono.cyr"
+include "lib/thread_local.cyr"
+
+var _span_depth = 0;
+fn sakshi_info(msg, len) { return 0; }
+fn sakshi_warn(msg, len) { return 0; }
+fn sakshi_error(msg, len) { return 0; }
+fn sakshi_debug(msg, len) { return 0; }
+fn sakshi_trace(msg, len) { return 0; }
+fn sakshi_span_enter(name, len) { _span_depth = _span_depth + 1; return 0; }
+fn sakshi_span_exit() { _span_depth = _span_depth - 1; return 0; }
+fn sakshi_span_depth() { return _span_depth; }
+
+include "lib/libro.cyr"
+
+include "src/syscall_compat.cyr"
+include "src/types.cyr"
+include "src/boot.cyr"
+include "src/services.cyr"
+include "src/process_mgmt.cyr"
+include "src/resolver.cyr"
+include "src/health.cyr"
+include "src/edge_boot.cyr"
+include "src/notify.cyr"
+include "src/security.cyr"
+include "src/systemd.cyr"
+include "src/tmpfiles.cyr"
+include "src/audit.cyr"
+include "src/audit_ext.cyr"
+include "src/init.cyr"
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+# /tmp/argonaut-harden-<pid>-<suffix>, as a Str.
+fn _tmp_path(suffix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/argonaut-harden-");
+    str_builder_add_int(sb, sys_getpid());
+    str_builder_add_cstr(sb, "-");
+    str_builder_add_cstr(sb, suffix);
+    return str_builder_build(sb);
+}
+
+# An init with no default services (BOOT_RECOVERY registers none).
+fn _bare_init(retain) {
+    var cfg = config_set_boot_mode(argonaut_config_default(), BOOT_RECOVERY);
+    if (retain == 1) { config_set_audit_retain(cfg, 1); }
+    return argonaut_init_new(cfg);
+}
+
+# Register a service under its own name (the map key is the def's cstr, as
+# argonaut_init_new does it). `arg` is a cstr or 0.
+fn _add_svc(init, name, binary, arg, svc_type) {
+    var sd = svc_def_new(str_from(name), str_from("harden"), str_from(binary));
+    if (arg != 0) { vec_push(svc_def_args(sd), str_from(arg)); }
+    svc_def_set_service_type(sd, svc_type);
+    map_set(load64(init + 16), str_data(svc_def_name(sd)), managed_svc_new(sd));
+    return sd;
+}
+
+fn _absdiff(a, b) {
+    if (a > b) { return a - b; }
+    return b - a;
+}
+
+fn _kill_reap(pid) {
+    if (pid <= 0) { return 0; }
+    sys_kill(pid, SIGKILL);
+    var st[8];
+    sys_waitpid(pid, &st, 0);
+    return 0;
+}
+
+# Reap until init_reap_services reports something, or the budget runs out.
+# Returns the results vec, or 0 on timeout.
+fn _reap_one(init, budget_ms) {
+    var deadline = monotonic_ms() + budget_ms;
+    var out = 0;
+    var done = 0;
+    while (done == 0) {
+        sleep_ms(20);
+        var r = init_reap_services(init);
+        if (vec_len(r) > 0) {
+            out = r;
+            done = 1;
+        }
+        if (monotonic_ms() > deadline) { done = 1; }
+    }
+    return out;
+}
+
+# The integer in a small file, or -1. (read_pid_file_safe refuses dead pids,
+# which is exactly what C-4 needs to look at.)
+fn _read_int_file(path) {
+    var fd = sys_open(str_data(path), 0, 0);
+    if (fd < 0) { return 0 - 1; }
+    var buf[64];
+    var n = sys_read(fd, &buf, 63);
+    sys_close(fd);
+    if (n <= 0) { return 0 - 1; }
+    return str_to_int(str_new(&buf, n));
+}
+
+fn _count_action(log, action) {
+    var q = query_new();
+    query_action(q, str_from(action));
+    return vec_len(chain_query(log, q));
+}
+
+# =========================================================================
+# C-1 — a STARTING service can be stopped; start never double-forks
+# =========================================================================
+
+fn test_c1() {
+    test_group("c1-starting-stop");
+    assert_eq(valid_transition(STATE_STARTING, STATE_STOPPING), 1,
+      "c1: STARTING->STOPPING is a valid transition");
+
+    var init = _bare_init(1);
+    var log = init_audit_log(init);
+    _add_svc(init, "c1-nfy", "/bin/sleep", "60", SVC_NOTIFY);
+    var ms = init_get_service(init, "c1-nfy");
+
+    var p1 = init_start_service(init, "c1-nfy");
+    assert(p1 > 0, "c1: notify service spawned");
+    assert_eq(managed_svc_state(ms), STATE_STARTING, "c1: notify service left STARTING");
+
+    var again = init_start_service(init, "c1-nfy");
+    assert_eq(again, 0 - 1, "c1: start on a STARTING service is refused");
+    assert_eq(managed_svc_pid(ms), p1, "c1: refused start kept the original pid");
+    if (again > 0) { _kill_reap(again); }
+
+    var sc = init_stop_service(init, "c1-nfy", 2000);
+    assert(sc != 0 - 1, "c1: stop of a STARTING service is not refused");
+    assert_eq(managed_svc_state(ms), STATE_STOPPED, "c1: STARTING service reached STOPPED");
+    assert_eq(process_alive(p1), 0, "c1: the stopped STARTING service's process is gone");
+    if (process_alive(p1) == 1) { _kill_reap(p1); }
+
+    # Restart of a STARTING service stops the old copy before forking anew.
+    managed_svc_set_state(ms, STATE_STOPPED);
+    proc_table_remove(svc_def_name(managed_svc_def(ms)));
+    var p2 = init_start_service(init, "c1-nfy");
+    assert(p2 > 0, "c1: restarted from STOPPED");
+    var p3 = init_restart_service(init, "c1-nfy", 2000);
+    assert(p3 > 0, "c1: restart of a STARTING service spawned the replacement");
+    assert_eq(process_alive(p2), 0, "c1: restart of a STARTING service stopped the old copy first");
+    if (process_alive(p2) == 1) { _kill_reap(p2); }
+    init_stop_service(init, "c1-nfy", 2000);
+    if (process_alive(p3) == 1) { _kill_reap(p3); }
+
+    # FAILED is startable (the documented recovery path).
+    managed_svc_set_state(ms, STATE_FAILED);
+    var p4 = init_start_service(init, "c1-nfy");
+    assert(p4 > 0, "c1: a FAILED service can be started again");
+    init_stop_service(init, "c1-nfy", 2000);
+    if (process_alive(p4) == 1) { _kill_reap(p4); }
+
+    # RUNNING and STOPPING are refused, and a refused start writes nothing.
+    _add_svc(init, "c1-run", "/bin/sleep", "60", SVC_SIMPLE);
+    var rms = init_get_service(init, "c1-run");
+    var rp = init_start_service(init, "c1-run");
+    assert(rp > 0, "c1: simple service running");
+    var before = audit_log_len(log);
+    assert_eq(init_start_service(init, "c1-run"), 0 - 1, "c1: start on a RUNNING service is refused");
+    assert_eq(audit_log_len(log), before, "c1: a refused start records nothing");
+    managed_svc_set_state(rms, STATE_STOPPING);
+    assert_eq(init_start_service(init, "c1-run"), 0 - 1, "c1: start on a STOPPING service is refused");
+    assert_eq(managed_svc_pid(rms), rp, "c1: refused starts never replaced the pid");
+    managed_svc_set_state(rms, STATE_RUNNING);
+    init_stop_service(init, "c1-run", 2000);
+    if (process_alive(rp) == 1) { _kill_reap(rp); }
+    return 0;
+}
+
+# =========================================================================
+# C-10 — every early return in a spanned function closes its span
+# =========================================================================
+
+fn test_c10() {
+    test_group("c10-span-balance");
+    var init = _bare_init(0);
+    var sd = _add_svc(init, "c10-dep", "/bin/sleep", "60", SVC_SIMPLE);
+    vec_push(svc_def_deps(sd), str_from("c10-missing"));
+    var d0 = sakshi_span_depth();
+    assert_eq(init_start_service(init, "c10-dep"), 0 - 1, "c10: start with an unmet dependency is refused");
+    assert_eq(sakshi_span_depth(), d0, "c10: refused start (unmet dependency) closes its span");
+    assert_eq(init_start_service(init, "c10-nope"), 0 - 1, "c10: unknown service refused");
+    assert_eq(sakshi_span_depth(), d0, "c10: refused start (unknown service) closes its span");
+    return 0;
+}
+
+# =========================================================================
+# C-2 — the restart limit is a window, not a lifetime budget
+# =========================================================================
+
+fn _c2_svc(init, name, binary, arg, max) {
+    var sd = _add_svc(init, name, binary, arg, SVC_SIMPLE);
+    svc_def_set_restart_policy(sd, RESTART_ALWAYS);
+    store64(svc_def_restart_config(sd), max);
+    return sd;
+}
+
+fn test_c2() {
+    test_group("c2-restart-window");
+    assert_eq(RESTART_STABLE_MS, 10000, "c2: RESTART_STABLE_MS is 10 s (StartLimitIntervalSec)");
+    var init = _bare_init(0);
+
+    # A live service that has run past the stable window: an exhausted count is
+    # history, not a crash loop.
+    var lsd = _c2_svc(init, "c2-long", "/bin/sleep", "60", 2);
+    var lms = init_get_service(init, "c2-long");
+    var lp = init_start_service(init, "c2-long");
+    assert(lp > 0, "c2: long-running service started");
+    managed_svc_set_restarts(lms, 2);
+    managed_svc_set_started(lms, managed_svc_started(lms) - 11000);
+    var lr = init_restart_service(init, "c2-long", 2000);
+    assert(lr > 0, "c2: a live service past the stable window restarts despite an exhausted count");
+    assert_eq(managed_svc_restarts(lms), 1, "c2: the count was reset before counting this restart");
+    init_stop_service(init, "c2-long", 2000);
+    if (process_alive(lp) == 1) { _kill_reap(lp); }
+    if (lr > 0) {
+        if (process_alive(lr) == 1) { _kill_reap(lr); }
+    }
+
+    # A crash after a long stable run: the decision is made at EXIT (in the reap
+    # path's on_service_crash), so that is where the window must apply.
+    var csd = _c2_svc(init, "c2-crash", "/bin/sleep", "60", 2);
+    var cms = init_get_service(init, "c2-crash");
+    var cp = init_start_service(init, "c2-crash");
+    assert(cp > 0, "c2: crash candidate started");
+    managed_svc_set_restarts(cms, 2);
+    managed_svc_set_started(cms, managed_svc_started(cms) - 11000);
+    sys_kill(cp, SIGKILL);
+    var cr = _reap_one(init, 3000);
+    assert(cr != 0, "c2: crash reaped");
+    if (cr != 0) {
+        var action = load64(vec_get(cr, 0) + 16);
+        assert_eq(load64(action), CRASH_RESTART,
+          "c2: a crash after a long stable run is restarted, not given up");
+        assert_eq(load64(action + 8), backoff_delay(svc_def_restart_config(csd), 0),
+          "c2: backoff starts again from the base delay");
+    }
+    assert_eq(managed_svc_restarts(cms), 0, "c2: a long stable run resets the count at exit");
+
+    # A crash loop still gives up. Between crashes, back-date `started` by 20 s:
+    # that models kybernet's backoff wait (16 s by the 5th default restart),
+    # which must NOT read as a stable run — only time spent RUNNING counts.
+    var fsd = _c2_svc(init, "c2-loop", "/bin/false", 0, 3);
+    var fms = init_get_service(init, "c2-loop");
+    init_start_service(init, "c2-loop");
+    var crashes = 0;
+    var gave_up = 0;
+    var guard = 0;
+    while (gave_up == 0 && guard < 10) {
+        var r = _reap_one(init, 3000);
+        if (r == 0) {
+            guard = 10;
+        } else {
+            crashes = crashes + 1;
+            var act = load64(vec_get(r, 0) + 16);
+            if (load64(act) == CRASH_GIVE_UP) {
+                gave_up = 1;
+            } else {
+                managed_svc_set_started(fms, managed_svc_started(fms) - 20000);
+                init_restart_service(init, "c2-loop", 2000);
+            }
+        }
+        guard = guard + 1;
+    }
+    assert_eq(gave_up, 1, "c2: a crash loop still gives up");
+    assert_eq(crashes, 4, "c2: ...after max_restarts + 1 crashes, however long the backoff");
+    return 0;
+}
+
+# =========================================================================
+# C-3 — deadlines are measured on CLOCK_MONOTONIC
+# =========================================================================
+
+fn test_c3() {
+    test_group("c3-monotonic");
+    var init = _bare_init(0);
+    var sd = _add_svc(init, "c3-svc", "/bin/sleep", "60", SVC_SIMPLE);
+    svc_def_set_health_check(sd, health_check_new(HC_PROCESS_ALIVE, 0, 0, 0, 1000, 3));
+    var ms = init_get_service(init, "c3-svc");
+    var p = init_start_service(init, "c3-svc");
+    assert(p > 0, "c3: service started");
+    var mono = monotonic_ms();
+    assert(_absdiff(managed_svc_started(ms), mono) < 5000, "c3: started_at is on the monotonic clock");
+    assert(_absdiff(managed_svc_last_hc(ms), mono) < 5000, "c3: last_hc is on the monotonic clock");
+    assert(_absdiff(managed_svc_last_notify(ms), mono) < 5000, "c3: last_notify is on the monotonic clock");
+
+    managed_svc_set_last_hc(ms, 0);
+    var tracker = health_tracker_new();
+    init_poll_health(init, tracker);
+    assert(_absdiff(managed_svc_last_hc(ms), monotonic_ms()) < 5000,
+      "c3: a passing probe stamps last_hc monotonically");
+
+    managed_svc_set_last_notify(ms, 0);
+    init_notify_watchdog(init, "c3-svc");
+    assert(_absdiff(managed_svc_last_notify(ms), monotonic_ms()) < 5000,
+      "c3: WATCHDOG=1 stamps last_notify monotonically");
+
+    init_mark_step_complete(init, STAGE_MOUNT_FS);
+    assert(_absdiff(load64(init + 24), monotonic_ms()) < 5000,
+      "c3: boot_started (the duration base) is on the monotonic clock");
+    init_mark_step_complete(init, STAGE_BOOT_COMPLETE);
+    var dur = init_boot_duration_ms(init);
+    assert(dur >= 0 && dur < 5000, "c3: boot duration is a monotonic difference");
+
+    # A just-refreshed deadline is not stale on the monotonic clock.
+    svc_def_set_watchdog_ms(sd, 60000);
+    managed_svc_set_last_notify(ms, monotonic_ms());
+    managed_svc_set_last_hc(ms, monotonic_ms());
+    assert_eq(vec_len(init_check_watchdog(init)), 0, "c3: fresh monotonic deadlines do not fire");
+    svc_def_set_watchdog_ms(sd, 0);
+
+    init_stop_service(init, "c3-svc", 2000);
+    if (process_alive(p) == 1) { _kill_reap(p); }
+    return 0;
+}
+
+# =========================================================================
+# C-4 — oneshot / forking starts are bounded
+# =========================================================================
+
+fn test_c4() {
+    test_group("c4-start-timeout");
+    var init = _bare_init(1);
+    var log = init_audit_log(init);
+
+    # A oneshot that writes its own pid, then hangs.
+    var pidf = _tmp_path("c4.pid");
+    sys_unlink(str_data(pidf));
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "echo $$ > ");
+    str_builder_add(sb, pidf);
+    str_builder_add_cstr(sb, "; exec /bin/sleep 30");
+    var osd = svc_def_new(str_from("c4-one"), str_from("harden"), str_from("/bin/sh"));
+    vec_push(svc_def_args(osd), str_from("-c"));
+    vec_push(svc_def_args(osd), str_builder_build(sb));
+    svc_def_set_service_type(osd, SVC_ONESHOT);
+    var oms = managed_svc_new(osd);
+    map_set(load64(init + 16), str_data(svc_def_name(osd)), oms);
+
+    argonaut_set_start_timeout_ms(300);
+    var t0 = monotonic_ms();
+    var r = init_start_service(init, "c4-one");
+    var spent = monotonic_ms() - t0;
+    assert_eq(r, 0 - 1, "c4: a hung oneshot start fails");
+    assert(spent < 1500, "c4: a hung oneshot returns within its start timeout");
+    assert_eq(managed_svc_state(oms), STATE_FAILED, "c4: the timed-out oneshot is FAILED");
+    assert_eq(managed_svc_pid(oms), 0, "c4: the timed-out oneshot holds no pid");
+    assert_eq(_count_action(log, "TimeoutKilled"), 1, "c4: the start timeout is audited");
+    var cpid = _read_int_file(pidf);
+    assert(cpid > 0, "c4: the oneshot reported its pid");
+    if (cpid > 0) {
+        assert(sys_kill(cpid, 0) < 0, "c4: the timed-out child is gone (killed and reaped)");
+    }
+    sys_unlink(str_data(pidf));
+
+    # A forking start whose parent hangs, with a grandchild in its process group.
+    var gpf = _tmp_path("c4g.pid");
+    sys_unlink(str_data(gpf));
+    var sb2 = str_builder_new();
+    str_builder_add_cstr(sb2, "/bin/sleep 30 & echo $! > ");
+    str_builder_add(sb2, gpf);
+    str_builder_add_cstr(sb2, "; wait");
+    var fsd = svc_def_new(str_from("c4-fork"), str_from("harden"), str_from("/bin/sh"));
+    vec_push(svc_def_args(fsd), str_from("-c"));
+    vec_push(svc_def_args(fsd), str_builder_build(sb2));
+    svc_def_set_service_type(fsd, SVC_FORKING);
+    var fms = managed_svc_new(fsd);
+    map_set(load64(init + 16), str_data(svc_def_name(fsd)), fms);
+    var t1 = monotonic_ms();
+    var fr = init_start_service(init, "c4-fork");
+    var fspent = monotonic_ms() - t1;
+    assert_eq(fr, 0 - 1, "c4: a hung forking start fails");
+    assert(fspent < 1500, "c4: a hung forking parent returns within the start timeout");
+    assert_eq(managed_svc_state(fms), STATE_FAILED, "c4: the timed-out forking service is FAILED");
+    var gpid = _read_int_file(gpf);
+    if (gpid > 0) {
+        # The grandchild was in the killed process group; it is reparented to
+        # us (subreaper) as a zombie — collect it, then check it is gone.
+        var gone = 0;
+        var gdl = monotonic_ms() + 2000;
+        while (gone == 0 && monotonic_ms() < gdl) {
+            proc_table_reap_orphans();
+            if (sys_kill(gpid, 0) < 0) { gone = 1; }
+            sleep_ms(10);
+        }
+        assert_eq(gone, 1, "c4: the hung parent's process group was killed with it");
+        if (gone == 0) { _kill_reap(gpid); }
+    }
+    sys_unlink(str_data(gpf));
+
+    # A quick oneshot is unaffected, and the default is systemd's 90 s.
+    var qsd = _add_svc(init, "c4-quick", "/bin/true", 0, SVC_ONESHOT);
+    var qms = init_get_service(init, "c4-quick");
+    assert_eq(init_start_service(init, "c4-quick"), 0, "c4: a quick oneshot still succeeds");
+    assert_eq(managed_svc_state(qms), STATE_STOPPED, "c4: and lands STOPPED");
+    argonaut_set_start_timeout_ms(0);
+    assert_eq(argonaut_start_timeout_ms(), 90000, "c4: <= 0 restores the 90 s default");
+    return 0;
+}
+
+# =========================================================================
+# C-5 — lifecycle records reach the persistent store in chain order
+# =========================================================================
+
+fn test_c5() {
+    test_group("c5-persist-chain");
+    var path = _tmp_path("audit.patra");
+    sys_unlink(str_data(path));
+    var cfg = config_set_boot_mode(argonaut_config_default(), BOOT_RECOVERY);
+    config_set_audit_persist(cfg, 1);
+    config_set_audit_path(cfg, path);
+    var sd = svc_def_new(str_from("c5-svc"), str_from("harden"), str_from("/bin/sleep"));
+    vec_push(svc_def_args(sd), str_from("60"));
+    vec_push(config_services(cfg), sd);
+
+    var init = argonaut_init_new(cfg);
+    var pal = init_audit_log_persistent(init);
+    assert(pal != 0, "c5: persistent audit opened");
+    var p = init_start_service(init, "c5-svc");
+    assert(p > 0, "c5: service started");
+    init_stop_service(init, "c5-svc", 2000);
+    if (process_alive(p) == 1) { _kill_reap(p); }
+    # An explicit record after the lifecycle ones — the reviewer's probe: before
+    # the fix this one is persisted linked to an entry that never reached disk.
+    init_audit_record(init, "c5-marker", EVT_ENABLED);
+    var n = chain_len(init_audit_log(init));
+    assert(n >= 5, "c5: lifecycle + marker records are in the chain");
+    init_audit_flush(init);
+    audit_log_close_persistent(pal);
+
+    var pal2 = audit_log_open_persistent(path);
+    assert(pal2 != 0, "c5: the store reopens and its chain verifies");
+    if (pal2 != 0) {
+        assert_eq(chain_len(pal_chain(pal2)), n, "c5: every lifecycle record reached disk");
+        assert_eq(audit_log_verify_persistent(pal2), 1, "c5: replayed chain verifies");
+        audit_log_close_persistent(pal2);
+    }
+    var init2 = argonaut_init_new(cfg);
+    assert(init_audit_log_persistent(init2) != 0,
+      "c5: the next boot keeps persistence (no silent in-memory fallback)");
+    if (init_audit_log_persistent(init2) != 0) {
+        audit_log_close_persistent(init_audit_log_persistent(init2));
+    }
+    sys_unlink(str_data(path));
+    return 0;
+}
+
+# =========================================================================
+# C-6 — a health tick allocates nothing beyond the probes' own results
+# =========================================================================
+
+fn test_c6() {
+    test_group("c6-poll-alloc");
+    var init = _bare_init(0);
+    var sd = _add_svc(init, "c6-svc", "/bin/sleep", "60", SVC_SIMPLE);
+    var hc = health_check_new(HC_PROCESS_ALIVE, 0, 0, 0, 1000, 3);
+    svc_def_set_health_check(sd, hc);
+    var ms = init_get_service(init, "c6-svc");
+    var p = init_start_service(init, "c6-svc");
+    assert(p > 0, "c6: service started");
+    var tracker = health_tracker_new();
+
+    # Warm every lazily-created cache first.
+    init_poll_health(init, tracker);
+    init_poll_health(init, tracker);
+
+    var b0 = alloc_used();
+    execute_health_check(svc_def_name(sd), hc, p);
+    var probe_cost = alloc_used() - b0;
+
+    var b1 = alloc_used();
+    var res = init_poll_health(init, tracker);
+    var tick_cost = alloc_used() - b1;
+    assert_eq(vec_len(res), 1, "c6: the tick returned its one probe result");
+    assert_eq(load64(vec_get(res, 0) + 16), 1, "c6: and it passed");
+    assert_eq(tick_cost - probe_cost, 0, "c6: a due-probe tick allocates nothing beyond the probe's own result");
+
+    # With a notify socket bound and nothing queued.
+    var npath = _tmp_path("c6.sock");
+    var nfd = init_notify_bind(init, npath);
+    assert(nfd >= 0, "c6: notify socket bound");
+    init_poll_health(init, tracker);
+    var b2 = alloc_used();
+    init_poll_health(init, tracker);
+    var drain_cost = alloc_used() - b2;
+    assert_eq(drain_cost - probe_cost, 0, "c6: the notify drain allocates no per-tick pid set");
+    sys_close(nfd);
+    store64(init + 48, 0 - 1);
+    sys_unlink(str_data(npath));
+
+    # Idle: no due probe allocates nothing at all (one warm-up idle tick first,
+    # for any lazily-created empty result).
+    managed_svc_set_state(ms, STATE_STOPPED);
+    init_poll_health(init, tracker);
+    var b3 = alloc_used();
+    init_poll_health(init, tracker);
+    assert_eq(alloc_used() - b3, 0, "c6: an idle tick allocates nothing");
+    managed_svc_set_state(ms, STATE_RUNNING);
+    init_stop_service(init, "c6-svc", 2000);
+    if (process_alive(p) == 1) { _kill_reap(p); }
+    return 0;
+}
+
+# =========================================================================
+# notify drain — STARTING pids admitted, READY / WATCHDOG honoured, fd 0 valid
+# =========================================================================
+
+fn _notify_child(path, msg) {
+    var pid = sys_fork();
+    if (pid == 0) {
+        send_notify(path, str_from(msg));
+        sleep_ms(3000);
+        syscall(SYS_EXIT, 0);
+    }
+    return pid;
+}
+
+fn test_notify() {
+    test_group("notify-drain");
+    var init = _bare_init(1);
+    var log = init_audit_log(init);
+    var tracker = health_tracker_new();
+
+    # fd 0 is a valid descriptor. Close stdin so the socket lands on it.
+    sys_close(0);
+    var path = _tmp_path("notify.sock");
+    var fd = init_notify_bind(init, path);
+    assert_eq(fd, 0, "notify: precondition - the notify socket is fd 0");
+
+    _add_svc(init, "n-ready", "/bin/sleep", "60", SVC_NOTIFY);
+    var rms = init_get_service(init, "n-ready");
+    var c1 = _notify_child(path, "READY=1");
+    managed_svc_set_pid(rms, c1);
+    managed_svc_set_state(rms, STATE_STARTING);
+
+    _add_svc(init, "n-wd", "/bin/sleep", "60", SVC_NOTIFY);
+    var wms = init_get_service(init, "n-wd");
+    var c2 = _notify_child(path, "WATCHDOG=1");
+    managed_svc_set_pid(wms, c2);
+    managed_svc_set_state(wms, STATE_RUNNING);
+    managed_svc_set_last_notify(wms, 1);
+
+    # A READY=1 for a STARTING service, sent by a pid that is NOT that service.
+    _add_svc(init, "n-spoof", "/bin/sleep", "60", SVC_NOTIFY);
+    var sms = init_get_service(init, "n-spoof");
+    var c3 = _notify_child(path, "STATUS=idle");
+    managed_svc_set_pid(sms, c3);
+    managed_svc_set_state(sms, STATE_STARTING);
+    send_notify(path, str_from("READY=1"));
+
+    sleep_ms(150);
+    var before = _count_action(log, "ReadyCheckPassed");
+    init_poll_health(init, tracker);
+    assert_eq(managed_svc_state(rms), STATE_RUNNING,
+      "notify: an authenticated READY=1 promotes a STARTING notify service");
+    assert_eq(_count_action(log, "ReadyCheckPassed") - before, 1, "notify: the promotion is audited");
+    assert(_absdiff(managed_svc_last_notify(wms), monotonic_ms()) < 5000,
+      "notify: WATCHDOG=1 refreshes last_notify");
+    assert_eq(managed_svc_state(sms), STATE_STARTING,
+      "notify: READY=1 from a pid that is not the service's is ignored");
+
+    _kill_reap(c1);
+    _kill_reap(c2);
+    _kill_reap(c3);
+    sys_close(fd);
+    store64(init + 48, 0 - 1);
+    sys_unlink(str_data(path));
+    return 0;
+}
+
+# =========================================================================
+# C-7 — an orphan-swept service leaves no stale proc-table entry
+# =========================================================================
+
+fn test_c7() {
+    test_group("c7-orphan-proc-table");
+    var init = _bare_init(0);
+    var sd = _add_svc(init, "c7-svc", "/bin/sleep", "60", SVC_SIMPLE);
+    var ms = init_get_service(init, "c7-svc");
+    var p = init_start_service(init, "c7-svc");
+    assert(p > 0, "c7: service started");
+    assert_eq(proc_table_has(svc_def_name(sd)), 1, "c7: tracked in the proc table");
+    # Collect it the way the orphan sweep would: outside proc_table_reap.
+    _kill_reap(p);
+    var pids[8];
+    store64(&pids, p);
+    _init_clear_reaped_pids(init, &pids, 1);
+    assert_eq(managed_svc_pid(ms), 0, "c7: managed pid cleared");
+    assert_eq(managed_svc_state(ms), STATE_STOPPED, "c7: state cleared");
+    assert_eq(proc_table_has(svc_def_name(sd)), 0, "c7: no stale name->pid entry is left behind");
+    return 0;
+}
+
+# =========================================================================
+# C-11 — the watchdog reports a service once per tick
+# =========================================================================
+
+fn test_c11() {
+    test_group("c11-watchdog-once");
+    var init = _bare_init(1);
+    var log = init_audit_log(init);
+    var sd = _add_svc(init, "c11-svc", "/bin/sleep", "60", SVC_SIMPLE);
+    svc_def_set_watchdog_ms(sd, 1);
+    svc_def_set_health_check(sd, health_check_new(HC_PROCESS_ALIVE, 0, 0, 10, 1, 1));
+    var ms = init_get_service(init, "c11-svc");
+    var p = init_start_service(init, "c11-svc");
+    assert(p > 0, "c11: service started");
+    managed_svc_set_last_notify(ms, 1);
+    managed_svc_set_last_hc(ms, 1);
+    assert_eq(vec_len(init_check_watchdog(init)), 1,
+      "c11: a service whose deadlines all fire is reported once");
+    var before = _count_action(log, "TimeoutKilled");
+    var killed = init_enforce_watchdog(init);
+    assert_eq(vec_len(killed), 1, "c11: enforce kills it once");
+    assert_eq(_count_action(log, "TimeoutKilled") - before, 1, "c11: one TimeoutKilled record per service per tick");
+    assert_eq(managed_svc_state(ms), STATE_FAILED, "c11: and marks it FAILED");
+    _kill_reap(p);
+    return 0;
+}
+
+# =========================================================================
+# P-2 — in-place map walks produce identical output
+# =========================================================================
+
+fn _ref_list_services(init) {
+    var results = vec_new();
+    var svc_map = load64(init + 16);
+    var keys = map_keys(svc_map);
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        var name = vec_get(keys, i);
+        var ms = map_get(svc_map, name);
+        var sd = managed_svc_def(ms);
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{\"name\":\"");
+        str_builder_add_cstr(sb, name);
+        str_builder_add_cstr(sb, "\",\"state\":\"");
+        str_builder_add_cstr(sb, service_state_str(managed_svc_state(ms)));
+        str_builder_add_cstr(sb, "\",\"pid\":");
+        str_builder_add_int(sb, managed_svc_pid(ms));
+        str_builder_add_cstr(sb, ",\"restarts\":");
+        str_builder_add_int(sb, managed_svc_restarts(ms));
+        str_builder_add_cstr(sb, ",\"enabled\":");
+        str_builder_add_int(sb, svc_def_enabled(sd));
+        str_builder_add_cstr(sb, ",\"type\":\"");
+        str_builder_add_cstr(sb, service_type_str(svc_def_service_type(sd)));
+        str_builder_add_cstr(sb, "\"}");
+        vec_push(results, str_builder_build(sb));
+    }
+    return results;
+}
+
+fn _ref_defs(init, enabled_only) {
+    var out = vec_new();
+    var svc_map = load64(init + 16);
+    var keys = map_keys(svc_map);
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        var sd = managed_svc_def(map_get(svc_map, vec_get(keys, i)));
+        if (enabled_only == 0) {
+            vec_push(out, sd);
+        } elif (svc_def_enabled(sd)) {
+            vec_push(out, sd);
+        }
+    }
+    return out;
+}
+
+fn _ref_count_state(init, state) {
+    var n = 0;
+    var svc_map = load64(init + 16);
+    var keys = map_keys(svc_map);
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        if (managed_svc_state(map_get(svc_map, vec_get(keys, i))) == state) { n = n + 1; }
+    }
+    return n;
+}
+
+fn _ref_total_restarts(init) {
+    var n = 0;
+    var svc_map = load64(init + 16);
+    var keys = map_keys(svc_map);
+    for (var i = 0; i < vec_len(keys); i = i + 1) {
+        n = n + managed_svc_restarts(map_get(svc_map, vec_get(keys, i)));
+    }
+    return n;
+}
+
+fn _registered(svc_map, names) {
+    var out = vec_new();
+    if (names == 0) { return out; }
+    for (var i = 0; i < vec_len(names); i = i + 1) {
+        if (map_get(svc_map, str_data(vec_get(names, i))) != 0) { vec_push(out, vec_get(names, i)); }
+    }
+    return out;
+}
+
+fn _strvec_eq(a, b) {
+    if (vec_len(a) != vec_len(b)) { return 0; }
+    for (var i = 0; i < vec_len(a); i = i + 1) {
+        if (str_eq(vec_get(a, i), vec_get(b, i)) == 0) { return 0; }
+    }
+    return 1;
+}
+
+fn _ptrvec_eq(a, b) {
+    if (vec_len(a) != vec_len(b)) { return 0; }
+    for (var i = 0; i < vec_len(a); i = i + 1) {
+        if (vec_get(a, i) != vec_get(b, i)) { return 0; }
+    }
+    return 1;
+}
+
+fn test_p2() {
+    test_group("p2-in-place-walks");
+    var cfg = config_set_boot_mode(argonaut_config_default(), BOOT_DESKTOP);
+    var init = argonaut_init_new(cfg);
+    var svc_map = load64(init + 16);
+    # Mixed states, restarts, and a tombstone in the table.
+    var keys = map_keys(svc_map);
+    assert(vec_len(keys) >= 4, "p2: desktop registers several services");
+    managed_svc_set_state(map_get(svc_map, vec_get(keys, 0)), STATE_RUNNING);
+    managed_svc_set_state(map_get(svc_map, vec_get(keys, 1)), STATE_FAILED);
+    managed_svc_set_state(map_get(svc_map, vec_get(keys, 2)), STATE_STARTING);
+    managed_svc_set_restarts(map_get(svc_map, vec_get(keys, 1)), 3);
+    managed_svc_set_restarts(map_get(svc_map, vec_get(keys, 2)), 2);
+    map_delete(svc_map, vec_get(keys, vec_len(keys) - 1));
+
+    assert_eq(_strvec_eq(init_list_services(init), _ref_list_services(init)), 1,
+      "p2: init_list_services is unchanged");
+    var st = init_stats(init);
+    assert_eq(load64(st + 16), _ref_count_state(init, STATE_RUNNING), "p2: init_stats running");
+    assert_eq(load64(st + 24), _ref_count_state(init, STATE_FAILED), "p2: init_stats failed");
+    assert_eq(load64(st + 32), _ref_total_restarts(init), "p2: init_stats restarts");
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"services_total\":");
+    str_builder_add_int(sb, map_count(svc_map));
+    str_builder_add_cstr(sb, ",\"services_running\":");
+    str_builder_add_int(sb, _ref_count_state(init, STATE_RUNNING));
+    str_builder_add_cstr(sb, ",\"services_failed\":");
+    str_builder_add_int(sb, _ref_count_state(init, STATE_FAILED));
+    str_builder_add_cstr(sb, ",\"services_stopped\":");
+    str_builder_add_int(sb, _ref_count_state(init, STATE_STOPPED));
+    str_builder_add_cstr(sb, ",\"services_starting\":");
+    str_builder_add_int(sb, _ref_count_state(init, STATE_STARTING));
+    str_builder_add_cstr(sb, ",\"total_restarts\":");
+    str_builder_add_int(sb, _ref_total_restarts(init));
+    str_builder_add_cstr(sb, ",\"boot_duration_ms\":0,\"boot_complete\":false}");
+    assert(str_eq(init_system_metrics(init), str_builder_build(sb)), "p2: init_system_metrics is unchanged");
+
+    assert_eq(_ptrvec_eq(init_service_defs(init), _ref_defs(init, 0)), 1, "p2: init_service_defs order unchanged");
+
+    # Shutdown plan: the stop steps are reverse dependency order over the same defs.
+    var order = resolve_service_order(_ref_defs(init, 0));
+    if (order == 0) { order = vec_new(); }
+    var want = vec_new();
+    for (var i = vec_len(order) - 1; i >= 0; i = i - 1) {
+        var ms = map_get(svc_map, str_data(vec_get(order, i)));
+        if (ms != 0) {
+            var s = managed_svc_state(ms);
+            if (s == STATE_RUNNING || s == STATE_STARTING) { vec_push(want, vec_get(order, i)); }
+        }
+    }
+    var plan = init_plan_shutdown(init, SHUTDOWN_REBOOT);
+    var got = vec_new();
+    var psteps = load64(plan + 8);
+    for (var j = 0; j < vec_len(psteps); j = j + 1) {
+        var stp = vec_get(psteps, j);
+        if (load64(stp + 8) == SA_STOP_SERVICE) { vec_push(got, load64(stp + 16)); }
+    }
+    assert_eq(_strvec_eq(got, want), 1, "p2: init_plan_shutdown stop steps unchanged");
+    assert_eq(vec_len(psteps), vec_len(want) + 7, "p2: init_plan_shutdown step count unchanged");
+
+    # Boot plans over the enabled defs.
+    # The plans keep only names that are registered (resolve_* also returns
+    # external dependency targets).
+    var border = _registered(svc_map, resolve_service_order(_ref_defs(init, 1)));
+    var bplan = init_boot_execution_plan(init);
+    var bnames = vec_new();
+    for (var k = 0; k < vec_len(bplan); k = k + 1) { vec_push(bnames, load64(vec_get(bplan, k))); }
+    assert_eq(_strvec_eq(bnames, border), 1, "p2: init_boot_execution_plan unchanged");
+    var rwaves = resolve_service_waves(_ref_defs(init, 1));
+    if (rwaves == 0) { rwaves = vec_new(); }
+    var gwaves = init_boot_execution_plan_waves(init);
+    var wok = vec_len(rwaves) == vec_len(gwaves);
+    if (wok) {
+        for (var w = 0; w < vec_len(rwaves); w = w + 1) {
+            var gw = vec_get(gwaves, w);
+            var gn = vec_new();
+            for (var x = 0; x < vec_len(gw); x = x + 1) { vec_push(gn, load64(vec_get(gw, x))); }
+            if (_strvec_eq(gn, _registered(svc_map, vec_get(rwaves, w))) == 0) { wok = 0; }
+        }
+    }
+    assert_eq(wok, 1, "p2: init_boot_execution_plan_waves unchanged");
+
+    # Runlevel switch.
+    var em = init_plan_runlevel_switch(init, RL_EMERGENCY, default_targets());
+    var em_want = vec_new();
+    var k2 = map_keys(svc_map);
+    for (var e = 0; e < vec_len(k2); e = e + 1) {
+        var es = managed_svc_state(map_get(svc_map, vec_get(k2, e)));
+        if (es == STATE_RUNNING || es == STATE_STARTING) { vec_push(em_want, str_from(vec_get(k2, e))); }
+    }
+    assert_eq(_strvec_eq(load64(em + 24), em_want), 1, "p2: emergency switch stop list unchanged");
+    var gr = init_plan_runlevel_switch(init, RL_CONSOLE, default_targets());
+    var gr_stop = vec_new();
+    var desired = map_new();
+    var tg = default_targets();
+    for (var t = 0; t < vec_len(tg); t = t + 1) {
+        var tgt = vec_get(tg, t);
+        var act = load64(tgt + 32);
+        var is_on = 0;
+        for (var a = 0; a < vec_len(act); a = a + 1) {
+            if (vec_get(act, a) == RL_CONSOLE) { is_on = 1; }
+        }
+        if (is_on) {
+            var rq = load64(tgt + 16);
+            for (var q = 0; q < vec_len(rq); q = q + 1) { map_set(desired, str_data(vec_get(rq, q)), 1); }
+            var wn = load64(tgt + 24);
+            for (var q2 = 0; q2 < vec_len(wn); q2 = q2 + 1) { map_set(desired, str_data(vec_get(wn, q2)), 1); }
+        }
+    }
+    for (var e2 = 0; e2 < vec_len(k2); e2 = e2 + 1) {
+        var nm = vec_get(k2, e2);
+        var s2 = managed_svc_state(map_get(svc_map, nm));
+        if (s2 == STATE_RUNNING || s2 == STATE_STARTING) {
+            if (map_has(desired, nm) == 0) { vec_push(gr_stop, str_from(nm)); }
+        }
+    }
+    assert_eq(_strvec_eq(load64(gr + 24), gr_stop), 1, "p2: console switch stop list unchanged");
+    var gr_start = vec_new();
+    var dk = map_keys(desired);
+    for (var d = 0; d < vec_len(dk); d = d + 1) {
+        var dms = map_get(svc_map, vec_get(dk, d));
+        var dup = 0;
+        if (dms != 0) {
+            var ds = managed_svc_state(dms);
+            if (ds == STATE_RUNNING || ds == STATE_STARTING) { dup = 1; }
+        }
+        if (dup == 0) { vec_push(gr_start, str_from(vec_get(dk, d))); }
+    }
+    assert(vec_len(gr_start) > 0, "p2: console switch has services to start");
+    assert_eq(_strvec_eq(load64(gr + 16), gr_start), 1, "p2: console switch start list unchanged");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    # C-4 first, while this process has no other children to confuse the
+    # "child is gone" check.
+    test_c4();
+    test_c1();
+    test_c10();
+    test_c2();
+    test_c3();
+    test_c5();
+    test_c6();
+    test_c7();
+    test_c11();
+    test_p2();
+    # Last: it closes stdin.
+    test_notify();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

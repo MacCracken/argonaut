@@ -648,17 +648,17 @@ fn main() {
     var ui_unit = generate_unit(ui_svc);
 
     # The property that matters is that the injected text cannot become its
-    # OWN directive line. sanitize_unit_value folds the newline to a space,
-    # so the bytes survive as inert text on the After= line — but never at
-    # the start of a line, which is the only place systemd reads a directive.
+    # OWN directive line. It never reaches the start of a line, which is the
+    # only place systemd reads a directive.
     assert(str_contains(ui_unit, str_from("\nExecStart=/bin/sh -c evil")) == 0,
       "systemd: injected ExecStart never begins a line");
-    # Positive form: the payload survives FOLDED onto the After= line, which
-    # is what proves the newline was neutralised rather than dropped. (The
-    # unit legitimately contains a real "[Service]" section of its own, so
-    # simply searching for that string proves nothing.)
-    assert(str_contains(ui_unit, str_from("After=net [Service] ExecStart=/bin/sh -c evil.service")),
-      "systemd: dependency newline is folded to a space, staying on After=");
+    # Positive form: the payload survives as ONE unit name on the After=
+    # line, which proves it was neutralised rather than dropped. Since 1.16.1
+    # (audit B-2) a dependency goes through the unit-name sanitiser: folding
+    # the newline to a space was not enough, because After= is a
+    # space-separated list and every word became a unit to order after.
+    assert(str_contains(ui_unit, str_from("After=net__Service__ExecStart__bin_sh_-c_evil.service\n")),
+      "systemd: a dependency carrying a newline stays one unit name on After=");
 
     # Unit filename must stay a single path component.
     var uf_svc = svc_def_new(str_from("../../etc/systemd/system/evil"),

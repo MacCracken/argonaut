@@ -102,7 +102,7 @@ fn main() {
     var init2 = argonaut_init_new(cfg2);
     var ms2 = init_get_service(init2, "wd-only");
     managed_svc_set_state(ms2, STATE_RUNNING);
-    managed_svc_set_last_notify(ms2, now_ms());
+    managed_svc_set_last_notify(ms2, monotonic_ms());   # monotonic since 1.16.1 (audit C-3)
     proc_table_insert(str_from("wd-only"), 0);
 
     sleep_ms(20);

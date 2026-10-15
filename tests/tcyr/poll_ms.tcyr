@@ -1,0 +1,64 @@
+# poll_ms.tcyr — `ag_sys_poll(fds, nfds, timeout_ms)` keeps poll(2)'s millisecond contract (1.16.1)
+#
+# The TCP and HTTP health checks bound every wait with `ag_sys_poll`. Until 1.16.1 it issued
+# x86 poll (7) on both architectures and relied on the aarch64 compiler to rewrite that into
+# ppoll with a ms → timespec conversion. From 1.16.1 it converts the milliseconds itself and
+# calls the stdlib's `sys_ppoll`. A qemu syscall trace shows the call but not the timespec it
+# points at, so these assertions pin the behaviour instead: ready data returns at once, a zero
+# timeout returns at once, an idle wait lasts about as long as asked (also past one second,
+# which exercises the seconds field), and a negative timeout means "no timeout".
+include "tests/test_header.cyr"
+
+fn poll_in(fd, timeout_ms, pfd) {
+    store32(pfd, fd);
+    store16(pfd + 4, 1);   # POLLIN
+    store16(pfd + 6, 0);   # revents
+    return ag_sys_poll(pfd, 1, timeout_ms);
+}
+
+fn main() {
+    alloc_init();
+    test_group("poll-ms");
+
+    var p[8];
+    assert_eq(sys_pipe(&p), 0, "pipe");
+    var rfd = load32(&p);
+    var wfd = load32(&p + 4);
+    var pfd[8];
+
+    # --- Nothing to read ---
+    var t0 = monotonic_ms();
+    assert_eq(poll_in(rfd, 0, &pfd), 0, "timeout 0: nothing ready");
+    assert(monotonic_ms() - t0 < 50, "timeout 0 returns at once");
+
+    t0 = monotonic_ms();
+    assert_eq(poll_in(rfd, 120, &pfd), 0, "timeout 120 ms: nothing ready");
+    var waited = monotonic_ms() - t0;
+    assert(waited >= 110, "120 ms timeout waits at least ~120 ms");
+    assert(waited < 1000, "120 ms timeout is not read as seconds");
+
+    # 1,050 ms needs tv_sec = 1 and tv_nsec = 50,000,000.
+    t0 = monotonic_ms();
+    assert_eq(poll_in(rfd, 1050, &pfd), 0, "timeout 1050 ms: nothing ready");
+    waited = monotonic_ms() - t0;
+    assert(waited >= 1040, "1050 ms timeout waits past one second");
+    assert(waited < 2500, "1050 ms timeout ends");
+
+    # --- Data ready ---
+    assert_eq(sys_write(wfd, "x", 1), 1, "write one byte");
+    t0 = monotonic_ms();
+    assert_eq(poll_in(rfd, 5000, &pfd), 1, "data ready: one fd");
+    assert((load16(&pfd + 6) & 1) != 0, "revents has POLLIN");
+    assert(monotonic_ms() - t0 < 1000, "ready data returns without waiting");
+
+    # A negative timeout means no timeout. With data ready it must still return at once.
+    t0 = monotonic_ms();
+    assert_eq(poll_in(rfd, -1, &pfd), 1, "negative timeout, data ready");
+    assert(monotonic_ms() - t0 < 1000, "negative timeout with data does not block");
+
+    sys_close(rfd);
+    sys_close(wfd);
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

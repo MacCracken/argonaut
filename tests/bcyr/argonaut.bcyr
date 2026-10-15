@@ -541,7 +541,14 @@ fn main() {
     # --- Audit logging ---
 
     println("\nAudit logging:");
-    var alog = argonaut_audit_log_new();
+    # 1.16.1: the streaming chain, the one init uses by default. Every
+    # iteration rewinds the heap to `_bm`, which a retaining chain's growing
+    # entry storage and audit.cyr's lazily built Strs (source, action) do not
+    # survive: they were allocated past the mark and then overwritten. One
+    # record before the mark builds those caches where the rewind cannot
+    # reach them.
+    var alog = argonaut_audit_log_new_streaming();
+    audit_log_record(alog, "daimon", EVT_STARTING);
     var b29 = bench_new("audit_log_record");
     _bm = _heap_ptr;
     for (var i = 0; i < iters; i = i + 1) {

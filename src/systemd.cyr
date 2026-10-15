@@ -3,73 +3,113 @@
 # Ported from rust-old/src/systemd.rs
 
 # =========================================================================
-# Helpers
+# Escaping
 # =========================================================================
+#
+# ⚠ 1.16.1 audit B-2: EACH SETTING INTERPRETS DIFFERENT CHARACTERS, SO EACH
+# GETS ITS OWN ESCAPE. One sanitiser for all of them left four injections open
+# after 2026-08-24 MEDIUM-7 (systemd.service(5), systemd.exec(5),
+# systemd.unit(5) "Specifiers"):
+#   * every value here undergoes specifier expansion, so '%' is doubled
+#     everywhere — `%h` in an argument became the service user's home;
+#   * only Exec*= lines expand `$VAR`, so '$' is doubled there alone;
+#     Environment= and Description= take '$' literally and doubling it
+#     corrupted the value;
+#   * a lone ';' word separates commands on an Exec line, so it is
+#     written as `\;`;
+#   * an Environment= value sits inside a double-quoted word, where an
+#     unescaped '"' closed the word and opened a new assignment
+#     (`v" "LD_PRELOAD=/tmp/e.so`);
+#   * a newline would end the setting and start a new one, so it is folded
+#     to a space; a CR is dropped.
+# Keys and dependency names are VALIDATED instead of escaped — see
+# generate_unit.
 
-# =========================================================================
-# Sanitization helpers
-# =========================================================================
-
-# Strip newlines and escape $ to $$ for systemd
-fn sanitize_unit_value(value) {
+# Append `value` to `sb` with line breaks folded, '%' doubled, and — when
+# `is_exec` is 1 — '$' doubled. When `quoted` is 1, '"' and '\' are
+# backslash-escaped for use inside a double-quoted word.
+fn _unit_escape_into(sb, value, is_exec, quoted) {
     var data = str_data(value);
     var len = str_len(value);
-    var sb = str_builder_new();
-
     for (var i = 0; i < len; i = i + 1) {
         var c = load8(data + i);
-        if (c == 10) {       # \n -> space
-            str_builder_add_cstr(sb, " ");
-        } elif (c == 13) {   # \r -> skip
+        if (c == 10) {                  # \n -> space
+            str_builder_putc(sb, 32);
+        } elif (c == 13) {              # \r -> dropped
             continue;
-        } elif (c == 36) {   # $ -> $$
-            str_builder_add_cstr(sb, "$$");
+        } elif (c == 37) {              # % -> %%
+            str_builder_putc(sb, 37);
+            str_builder_putc(sb, 37);
+        } elif (c == 36) {              # $ -> $$ on Exec lines only
+            str_builder_putc(sb, 36);
+            if (is_exec == 1) { str_builder_putc(sb, 36); }
+        } elif (quoted == 1) {
+            if (c == 34) { str_builder_putc(sb, 92); }   # \"
+            if (c == 92) { str_builder_putc(sb, 92); }   # \\
+            str_builder_putc(sb, c);
         } else {
-            # Single char append
-            var buf[2];
-            store8(&buf, c);
-            store8(&buf + 1, 0);
-            str_builder_add_cstr(sb, &buf);
+            str_builder_putc(sb, c);
         }
     }
+    return 0;
+}
 
+# A free-text value (Description=): one line, '%' doubled, '$' literal.
+fn sanitize_unit_value(value) {
+    var sb = str_builder_new();
+    _unit_escape_into(sb, value, 0, 0);
     return str_builder_build(sb);
 }
 
-# Quote value if it contains spaces or special chars
+# One word of an Exec*= command line. Quoted when it contains whitespace or a
+# quote/backslash character (systemd splits on both quote styles and C-unescapes
+# backslashes); an empty argument is written `""` so it stays an argument; a
+# lone ';' is written `\;` so it is an argument, not a command separator.
 fn escape_systemd_value(value) {
-    var sanitized = sanitize_unit_value(value);
-    var data = str_data(sanitized);
-    var len = str_len(sanitized);
-    var needs_quote = 0;
-
-    for (var i = 0; i < len; i = i + 1) {
-        var c = load8(data + i);
-        if (c == 32 || c == 34 || c == 92) {  # space, ", backslash
-            needs_quote = 1;
-            break;
-        }
+    var data = str_data(value);
+    var len = str_len(value);
+    if (len == 0) { return str_from("\"\""); }
+    if (len == 1) {
+        if (load8(data) == 59) { return str_from("\\;"); }
     }
 
-    if (needs_quote == 0) { return sanitized; }
+    var needs_quote = 0;
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(data + i);
+        if (c == 32) { needs_quote = 1; }   # space
+        if (c == 9)  { needs_quote = 1; }   # tab
+        if (c == 10) { needs_quote = 1; }   # newline (folded to a space)
+        if (c == 34) { needs_quote = 1; }   # "
+        if (c == 39) { needs_quote = 1; }   # '
+        if (c == 92) { needs_quote = 1; }   # backslash
+    }
 
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "\"");
-    for (var i = 0; i < len; i = i + 1) {
-        var c = load8(data + i);
-        if (c == 92) {       # backslash
-            str_builder_add_cstr(sb, "\\\\");
-        } elif (c == 34) {   # quote
-            str_builder_add_cstr(sb, "\\\"");
-        } else {
-            var buf[2];
-            store8(&buf, c);
-            store8(&buf + 1, 0);
-            str_builder_add_cstr(sb, &buf);
-        }
-    }
-    str_builder_add_cstr(sb, "\"");
+    if (needs_quote == 1) { str_builder_putc(sb, 34); }
+    _unit_escape_into(sb, value, 1, needs_quote);
+    if (needs_quote == 1) { str_builder_putc(sb, 34); }
     return str_builder_build(sb);
+}
+
+# 1 when the cstr `key` is a usable environment name, [A-Za-z_][A-Za-z0-9_]*.
+fn _unit_env_key_ok(key) {
+    var c = load8(key);
+    if (c == 0) { return 0; }
+    var ok = 1;
+    var i = 0;
+    while (ok == 1 && c != 0) {
+        var good = 0;
+        if (c >= 65 && c <= 90)  { good = 1; }       # A-Z
+        if (c >= 97 && c <= 122) { good = 1; }       # a-z
+        if (c == 95)             { good = 1; }       # _
+        if (i > 0) {
+            if (c >= 48 && c <= 57) { good = 1; }    # 0-9, not first
+        }
+        if (good == 0) { ok = 0; }
+        i = i + 1;
+        c = load8(key + i);
+    }
+    return ok;
 }
 
 # =========================================================================
@@ -82,7 +122,8 @@ fn generate_unit(svc) {
     # [Unit] section
     str_builder_add_cstr(sb, "[Unit]\n");
     str_builder_add_cstr(sb, "Description=");
-    str_builder_add(sb, sanitize_unit_value(svc_def_desc(svc)));
+    var desc = svc_def_desc(svc);
+    if (desc != 0) { _unit_escape_into(sb, desc, 0, 0); }
     str_builder_add_cstr(sb, "\n");
 
     var deps = svc_def_deps(svc);
@@ -96,7 +137,11 @@ fn generate_unit(svc) {
             # were added raw — a dep carrying a newline closed the After=
             # line and opened its own section, injecting arbitrary directives
             # (e.g. a second ExecStart) into a unit systemd runs as root.
-            str_builder_add(dep_sb, sanitize_unit_value(vec_get(deps, i)));
+            # 1.16.1 audit B-2: through the unit-NAME sanitiser, not the value
+            # one. After=/Requires= are space-separated lists, so a folded
+            # newline or a plain space ("db debug-shell") still added a second
+            # unit; a name is now one [A-Za-z0-9_.-] token.
+            str_builder_add(dep_sb, sanitize_unit_name(vec_get(deps, i)));
             str_builder_add_cstr(dep_sb, ".service");
         }
         var dep_str = str_builder_build(dep_sb);
@@ -112,13 +157,18 @@ fn generate_unit(svc) {
 
     # [Service] section
     str_builder_add_cstr(sb, "[Service]\n");
+    # 1.16.1 audit B-2 LOW: each type maps to its own Type=. SVC_SIMPLE was
+    # rendered Type=notify, so systemd held a service that never sends
+    # READY=1 in "activating" until its start timeout failed it.
     var svc_type = svc_def_service_type(svc);
     if (svc_type == SVC_FORKING) {
         str_builder_add_cstr(sb, "Type=forking\n");
     } elif (svc_type == SVC_ONESHOT) {
         str_builder_add_cstr(sb, "Type=oneshot\n");
-    } else {
+    } elif (svc_type == SVC_NOTIFY) {
         str_builder_add_cstr(sb, "Type=notify\n");
+    } else {
+        str_builder_add_cstr(sb, "Type=simple\n");
     }
 
     # ExecStart
@@ -135,36 +185,53 @@ fn generate_unit(svc) {
     var env = svc_def_env(svc);
     var env_keys = map_keys(env);
     # Inline insertion sort to avoid cc3 bug #16 (new function shifts addresses)
+    # Flag-style loops: no `break` inside a while that declares `var`.
     for (var si = 1; si < vec_len(env_keys); si = si + 1) {
         var skey = vec_get(env_keys, si);
         var sj = si - 1;
-        while (sj >= 0) {
+        var placed = 0;
+        while (placed == 0 && sj >= 0) {
             var sa = vec_get(env_keys, sj);
-            # Lexicographic compare inline
+            # Lexicographic compare inline (strcmp sign)
             var sk = 0;
             var cmp = 0;
-            while (load8(sa + sk) != 0 && load8(skey + sk) != 0) {
-                if (load8(sa + sk) != load8(skey + sk)) {
-                    cmp = load8(sa + sk) - load8(skey + sk);
-                    break;
+            var scanning = 1;
+            while (scanning == 1) {
+                var ca = load8(sa + sk);
+                var cb = load8(skey + sk);
+                if (ca != cb) {
+                    cmp = ca - cb;
+                    scanning = 0;
+                } elif (ca == 0) {
+                    scanning = 0;
+                } else {
+                    sk = sk + 1;
                 }
-                sk = sk + 1;
             }
-            if (cmp == 0) { cmp = load8(sa + sk) - load8(skey + sk); }
-            if (cmp <= 0) { break; }
-            vec_set(env_keys, sj + 1, sa);
-            sj = sj - 1;
+            if (cmp <= 0) {
+                placed = 1;
+            } else {
+                vec_set(env_keys, sj + 1, sa);
+                sj = sj - 1;
+            }
         }
         vec_set(env_keys, sj + 1, skey);
     }
     for (var i = 0; i < vec_len(env_keys); i = i + 1) {
         var key = vec_get(env_keys, i);
         var val = map_get(env, key);
-        str_builder_add_cstr(sb, "Environment=\"");
-        str_builder_add_cstr(sb, key);
-        str_builder_add_cstr(sb, "=");
-        str_builder_add(sb, sanitize_unit_value(val));
-        str_builder_add_cstr(sb, "\"\n");
+        # 1.16.1 audit B-2: a key is emitted raw, so it is validated rather
+        # than escaped — one carrying a newline injected `ExecStartPre=`.
+        # Anything that is not an environment name is skipped.
+        if (val != 0) {
+            if (_unit_env_key_ok(key) == 1) {
+                str_builder_add_cstr(sb, "Environment=\"");
+                str_builder_add_cstr(sb, key);
+                str_builder_add_cstr(sb, "=");
+                _unit_escape_into(sb, val, 0, 1);
+                str_builder_add_cstr(sb, "\"\n");
+            }
+        }
     }
 
     # Restart policy

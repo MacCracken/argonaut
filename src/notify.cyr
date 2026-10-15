@@ -32,6 +32,35 @@ fn notify_msg_new() {
     return msg;
 }
 
+# 1 if the `n` bytes at `p` are exactly the `litlen`-byte literal `lit`.
+# Compares in place: `notify_parse` used to `str_from` each candidate key (and
+# the "1" it compared values against) just to call `str_eq` — up to seven
+# boxes per field, on every datagram the reactor drains (1.16.1 audit, perf).
+fn _notify_is(p, n, lit, litlen) {
+    if (n != litlen) { return 0; }
+    return memeq(p, lit, n);
+}
+
+# 1.16.1 audit A-9: MAINPID's value as a pid, or 0 when it is not one.
+# Decimal digits only, 2..2147483647. `str_to_int` skipped any non-digit and
+# took a leading '-', so `MAINPID=-1` became -1 (kill(-1, ...) is every
+# process the caller may signal), `1x2` became 12, and 99999999999 went
+# through as is. 1 is init itself and never a service's main pid.
+fn _notify_parse_pid(p, n) {
+    if (n <= 0) { return 0; }
+    if (n > 10) { return 0; }
+    var v = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        var c = load8(p + i);
+        if (c < 48) { return 0; }
+        if (c > 57) { return 0; }
+        v = v * 10 + (c - 48);
+    }
+    if (v < 2) { return 0; }
+    if (v > 2147483647) { return 0; }
+    return v;
+}
+
 # Parse an sd_notify message (newline-separated KEY=VALUE pairs)
 fn notify_parse(data, len) {
     var msg = notify_msg_new();
@@ -45,38 +74,41 @@ fn notify_parse(data, len) {
         if (c == 10 || i == len) {
             var line_len = i - line_start;
             if (line_len > 0) {
-                # Find '=' in line
+                # Find the first '=' in the line.
                 var eq_pos = 0 - 1;
                 for (var j = line_start; j < i; j = j + 1) {
-                    if (load8(data + j) == 61) {  # '='
-                        eq_pos = j;
-                        break;
-                    }
+                    if (eq_pos < 0 && load8(data + j) == 61) { eq_pos = j; }  # '='
                 }
                 if (eq_pos > line_start) {
                     # 2026-08-24 audit MEDIUM-1: str_new BORROWS `data`, which
                     # is the shared module-level receive buffer — every later
                     # datagram overwrote the Strs handed back for earlier ones
                     # (notify_drain returned N messages all aliasing the last
-                    # one). str_clone gives each message its own bytes.
-                    var key = str_clone(str_new(data + line_start, eq_pos - line_start));
-                    var val = str_clone(str_new(data + eq_pos + 1, i - eq_pos - 1));
+                    # one). Each message gets its own bytes: `str_from_buf`
+                    # copies (and NUL-terminates) without the throwaway header
+                    # `str_clone(str_new(...))` allocated first.
+                    var kp = data + line_start;
+                    var kn = eq_pos - line_start;
+                    var vp = data + eq_pos + 1;
+                    var vn = i - eq_pos - 1;
+                    var key = str_from_buf(kp, kn);
+                    var val = str_from_buf(vp, vn);
 
                     map_set(fields, key, val);
 
                     # Match known keys
-                    if (str_eq(key, str_from("READY"))) {
-                        store64(msg, str_eq(val, str_from("1")));
-                    } elif (str_eq(key, str_from("STATUS"))) {
+                    if (_notify_is(kp, kn, "READY", 5)) {
+                        store64(msg, _notify_is(vp, vn, "1", 1));
+                    } elif (_notify_is(kp, kn, "STATUS", 6)) {
                         store64(msg + 8, val);
-                    } elif (str_eq(key, str_from("MAINPID"))) {
-                        store64(msg + 16, str_to_int(val));
-                    } elif (str_eq(key, str_from("WATCHDOG"))) {
-                        store64(msg + 24, str_eq(val, str_from("1")));
-                    } elif (str_eq(key, str_from("RELOADING"))) {
-                        store64(msg + 32, str_eq(val, str_from("1")));
-                    } elif (str_eq(key, str_from("STOPPING"))) {
-                        store64(msg + 40, str_eq(val, str_from("1")));
+                    } elif (_notify_is(kp, kn, "MAINPID", 7)) {
+                        store64(msg + 16, _notify_parse_pid(vp, vn));
+                    } elif (_notify_is(kp, kn, "WATCHDOG", 8)) {
+                        store64(msg + 24, _notify_is(vp, vn, "1", 1));
+                    } elif (_notify_is(kp, kn, "RELOADING", 9)) {
+                        store64(msg + 32, _notify_is(vp, vn, "1", 1));
+                    } elif (_notify_is(kp, kn, "STOPPING", 8)) {
+                        store64(msg + 40, _notify_is(vp, vn, "1", 1));
                     }
                 }
             }
@@ -94,24 +126,34 @@ fn notify_parse(data, len) {
 # Create a notify listener bound to a socket path.
 # Returns socket fd or -1 on error.
 fn notify_bind(path) {
-    # Remove stale socket
-    sys_unlink(str_data(path));
-
-    # Ensure parent directory exists
-    sys_mkdir("/run/argonaut", 448);  # 0o700 — argonaut-internal; no other process should traverse
-
-    # socket(AF_UNIX=1, SOCK_DGRAM=2, 0)
-    var fd = sys_socket(1, 2, 0);
-    if (fd < 0) { return 0 - 1; }
+    # sun_path holds 107 bytes and a NUL. A longer path is REFUSED, not
+    # truncated — a shortened path binds (and first unlinks) a different
+    # file. 1.16.1 audit.
+    var path_len = str_len(path);
+    if (path_len <= 0 || path_len > 107) { return 0 - 1; }
 
     # Build sockaddr_un
     var addr[110];
     memset(&addr, 0, 110);
     store16(&addr, 1);  # AF_UNIX
-    var path_data = str_data(path);
-    var path_len = str_len(path);
-    if (path_len > 107) { path_len = 107; }
-    memcpy(&addr + 2, path_data, path_len);
+    memcpy(&addr + 2, str_data(path), path_len);
+
+    # Remove stale socket. Through the NUL-terminated copy in sun_path, not
+    # `str_data(path)`: a Str is not NUL-terminated at its length, so a path
+    # that is a view into a longer buffer unlinked some other name and the
+    # bind below then failed on the stale socket. 1.16.1 audit.
+    sys_unlink(&addr + 2);
+
+    # Ensure parent directory exists
+    sys_mkdir("/run/argonaut", 448);  # 0o700 — argonaut-internal; no other process should traverse
+
+    # socket(AF_UNIX=1, SOCK_DGRAM=2 | SOCK_CLOEXEC=0x80000, 0)
+    # 1.16.1 audit A-8: close-on-exec. Without it every service PID 1 spawned
+    # inherited the notify fd and could read — and so swallow — the other
+    # services' READY / WATCHDOG datagrams. 0x80000 is SOCK_CLOEXEC on both
+    # x86_64 and aarch64.
+    var fd = sys_socket(1, 2 | 0x80000, 0);
+    if (fd < 0) { return 0 - 1; }
 
     # bind(fd, &addr, sizeof(sa_family) + path_len + 1)
     var ret = sys_bind(fd, &addr, 2 + path_len + 1);
@@ -126,9 +168,15 @@ fn notify_bind(path) {
     # M1: enable SO_PASSCRED so recvmsg() with SCM_CREDENTIALS gives us
     # the kernel-stamped sender credentials. notify_try_recv_authenticated
     # below relies on this for the per-datagram peer-cred check.
+    # 1.16.1 audit A-8: checked. A socket without it delivers no credentials,
+    # so every datagram would be dropped as NOCRED — a listener that is bound
+    # and can never accept anything. Fail the bind instead.
     var one[4];
     store32(&one, 1);
-    sys_setsockopt(fd, 1, 16, &one, 4);   # SOL_SOCKET=1, SO_PASSCRED=16
+    if (sys_setsockopt(fd, 1, 16, &one, 4) < 0) {   # SOL_SOCKET=1, SO_PASSCRED=16
+        sys_close(fd);
+        return 0 - 1;
+    }
 
     return fd;
 }
@@ -157,7 +205,7 @@ enum NotifyRecvOutcome {
     NOTIFY_RECV_EMPTY = 0;         # nothing queued — the ONLY "stop draining"
     NOTIFY_RECV_OK = 1;            # authenticated and attributed
     NOTIFY_RECV_NOCRED = 2;        # consumed; no/invalid SCM_CREDENTIALS
-    NOTIFY_RECV_TRUNCATED = 3;     # consumed; MSG_CTRUNC, credentials untrustworthy
+    NOTIFY_RECV_TRUNCATED = 3;     # consumed; MSG_CTRUNC (credentials) or MSG_TRUNC (payload) cut short
     NOTIFY_RECV_UNATTRIBUTED = 4;  # consumed; authenticated but not a known service pid
 }
 
@@ -198,7 +246,13 @@ fn notify_try_recv_authenticated(fd, expected_pids) {
     # and MSG_CTRUNC means the ancillary data was cut short so the credentials
     # cannot be trusted even if the header looks plausible.
     var mflags = load32(&mh + 48);
-    if (mflags & 8 != 0) { _notify_last = NOTIFY_RECV_TRUNCATED; return 0; }   # MSG_CTRUNC
+    if ((mflags & 8) != 0) { _notify_last = NOTIFY_RECV_TRUNCATED; return 0; }   # MSG_CTRUNC
+    # 1.16.1 audit A-9: MSG_TRUNC — the datagram was longer than the receive
+    # buffer and its tail is gone. Parsing the head acted on a message the
+    # sender never sent: a cut can land inside a value (`MAINPID=12345`
+    # arriving as `MAINPID=12`). Dropped, and reported as truncated so the
+    # drain carries on past it.
+    if ((mflags & 0x20) != 0) { _notify_last = NOTIFY_RECV_TRUNCATED; return 0; }
     if (ctrllen < 28) { _notify_last = NOTIFY_RECV_NOCRED; return 0; }
     var cmsg_len = load64(&ctrl);
     if (cmsg_len < 28) { _notify_last = NOTIFY_RECV_NOCRED; return 0; }
@@ -258,10 +312,13 @@ fn notify_try_recv(fd) {
 # Returns vec of NotifyMessage ptrs.
 fn notify_drain(fd, limit) {
     var messages = vec_new();
-    for (var i = 0; i < limit; i = i + 1) {
+    var draining = 1;
+    var i = 0;
+    while (draining == 1 && i < limit) {
         var msg = notify_try_recv(fd);
-        if (msg == 0) { break; }
-        vec_push(messages, msg);
+        if (msg == 0) { draining = 0; }
+        else { vec_push(messages, msg); }
+        i = i + 1;
     }
     return messages;
 }
@@ -276,7 +333,11 @@ fn send_notify(socket_path, message) {
     store16(&addr, 1);  # AF_UNIX
     var path_data = str_data(socket_path);
     var path_len = str_len(socket_path);
-    if (path_len > 107) { path_len = 107; }
+    # Refused, not truncated: a shortened path is another socket (1.16.1 audit).
+    if (path_len > 107) {
+        sys_close(fd);
+        return 0 - 1;
+    }
     memcpy(&addr + 2, path_data, path_len);
 
     var msg_data = str_data(message);

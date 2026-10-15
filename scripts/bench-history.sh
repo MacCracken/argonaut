@@ -38,6 +38,8 @@ echo "${BENCH_OUTPUT}"
 # toolchains emitted integer microseconds (4us). Normalize every token to
 # microseconds (avg_us/min_us/max_us) with 3-decimal precision so rows stay
 # comparable across the whole history regardless of the emitting toolchain.
+# bench_main reprints every micro under "=== Summary ===", so parsing stops
+# there: one row per micro per label.
 echo "${BENCH_OUTPUT}" | LC_ALL=C awk -v ts="${TIMESTAMP}" -v lbl="${LABEL}" '
     function tous(tok,   v, u) {
         if (!match(tok, /[0-9.]+/)) { return "" }
@@ -48,7 +50,8 @@ echo "${BENCH_OUTPUT}" | LC_ALL=C awk -v ts="${TIMESTAMP}" -v lbl="${LABEL}" '
         if (u == "s")  { return v * 1000000 }
         return v   # "us" or bare
     }
-    /avg.*min=.*max=/ {
+    /^=== Summary ===/ { done = 1 }
+    !done && /avg.*min=.*max=/ {
         name = $0; sub(/:.*/, "", name); gsub(/^[ \t]+|[ \t]+$/, "", name)
         a = $0; sub(/^.*:[ \t]*/, "", a);  sub(/[ \t]*avg.*/, "", a)
         mn = $0; sub(/^.*min=/, "", mn);   sub(/[ \t].*/, "", mn)

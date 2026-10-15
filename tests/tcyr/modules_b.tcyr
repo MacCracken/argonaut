@@ -11,7 +11,8 @@ fn main() {
     var unit = generate_unit(sd);
     assert(str_contains(unit, str_from("[Unit]")), "u [Unit]");
     assert(str_contains(unit, str_from("[Service]")), "u [Service]");
-    assert(str_contains(unit, str_from("Type=notify")), "u Type");
+    # 1.16.1 audit B-2 LOW: SVC_SIMPLE (the default) is Type=simple, not notify.
+    assert(str_contains(unit, str_from("Type=simple")), "u Type");
     assert(str_contains(unit, str_from("ExecStart=/usr/bin/myapp")), "u Exec");
     assert(str_contains(unit, str_from("Restart=on-failure")), "u Restart");
     assert(str_contains(unit, str_from("multi-user.target")), "u target");
@@ -33,7 +34,7 @@ fn main() {
     var de = alloc(72);
     store64(de, TMP_DIRECTORY);
     store64(de + 8, str_from("/run/myapp"));
-    store64(de + 24, 755);
+    store64(de + 24, 493);   # 0755 (the mode is octal; 1.16.1 audit B-3)
     store64(de + 32, 0 - 1);
     store64(de + 40, 0 - 1);
     vec_push(entries, de);
@@ -43,7 +44,7 @@ fn main() {
     var be = alloc(72);
     store64(be, TMP_DIRECTORY);
     store64(be + 8, str_from("relative"));
-    store64(be + 24, 755);
+    store64(be + 24, 493);   # 0755
     vec_push(bad, be);
     assert_eq(validate_tmpfile_entries(bad), 0 - 1, "rel path bad");
 
@@ -51,7 +52,7 @@ fn main() {
     var oe = alloc(72);
     store64(oe, TMP_DIRECTORY);
     store64(oe + 8, str_from("/run/ok"));
-    store64(oe + 24, 755);
+    store64(oe + 24, 493);   # 0755
     vec_push(ok, oe);
     assert_eq(validate_tmpfile_entries(ok), 0, "abs path ok");
 

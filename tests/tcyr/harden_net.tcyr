@@ -1,0 +1,617 @@
+# harden_net.tcyr — 1.16.1 audit A-1..A-9: the network-facing health checks, the /etc/hosts
+# resolver and the sd_notify socket.
+#
+# Every peer here is local and self-contained: a server is a forked child of this test, bound
+# to 127.0.0.1 on a kernel-chosen port (bind + listen + getsockname in the parent, then fork),
+# so nothing depends on the network or on a helper outside the suite. Tests run unprivileged.
+include "tests/test_header.cyr"
+
+# =========================================================================
+# Local peers
+# =========================================================================
+
+enum HnMode {
+    HN_OK = 1;        # read the request, answer 200 at once
+    HN_DRIP = 2;      # read the request, then one byte of a status line every 150 ms, no newline
+    HN_SILENT = 3;    # read the request, say nothing for 4 s, close
+    HN_SPLIT = 4;     # status line split across two writes 60 ms apart
+    HN_SLOW_OK = 5;   # answer 200 after 100 ms
+}
+
+var _hn_req_buf = 0;
+
+# A listening TCP socket on 127.0.0.1 with a kernel-chosen port. Returns the fd or -1, and
+# writes the port to *port_out.
+fn hn_listen(backlog, port_out) {
+    var fd = sys_socket(2, 1, 0);
+    if (fd < 0) { return 0 - 1; }
+    var sa[16];
+    memset(&sa, 0, 16);
+    store16(&sa, 2);
+    store8(&sa + 4, 127);
+    store8(&sa + 7, 1);
+    if (sys_bind(fd, &sa, 16) < 0) {
+        sys_close(fd);
+        return 0 - 1;
+    }
+    if (sys_listen(fd, backlog) < 0) {
+        sys_close(fd);
+        return 0 - 1;
+    }
+    var sl[8];
+    store64(&sl, 16);
+    if (sys_getsockname(fd, &sa, &sl) < 0) {
+        sys_close(fd);
+        return 0 - 1;
+    }
+    store64(port_out, (load8(&sa + 2) << 8) | load8(&sa + 3));
+    return fd;
+}
+
+fn hn_read_request(cfd) {
+    var pfd[8];
+    store32(&pfd, cfd);
+    store16(&pfd + 4, 1);
+    store16(&pfd + 6, 0);
+    if (ag_sys_poll(&pfd, 1, 2000) > 0) { sys_read(cfd, _hn_req_buf, 1024); }
+    return 0;
+}
+
+fn hn_respond(cfd, mode) {
+    var ok = "HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n";
+    if (mode == HN_OK) { sys_write(cfd, ok, strlen(ok)); }
+    if (mode == HN_SLOW_OK) {
+        sleep_ms(100);
+        sys_write(cfd, ok, strlen(ok));
+    }
+    if (mode == HN_SPLIT) {
+        sys_write(cfd, "HTTP/1.0 2", 10);
+        sleep_ms(60);
+        sys_write(cfd, "00 OK\r\n\r\n", 9);
+    }
+    if (mode == HN_DRIP) {
+        # A plausible status line that never ends: 20 bytes over ~3 s, no LF.
+        var drip = "HTTP/1.0 200 OK drip";
+        var k = 0;
+        var going = 1;
+        while (going == 1) {
+            sleep_ms(150);
+            if (sys_write(cfd, drip + k, 1) != 1) { going = 0; }
+            k = k + 1;
+            if (k >= 20) { going = 0; }
+        }
+    }
+    if (mode == HN_SILENT) { sleep_ms(4000); }
+    return 0;
+}
+
+# Fork a server child that handles up to `count` connections in `mode`. Returns its pid
+# (or -1) and writes the port to *port_out.
+fn hn_spawn(mode, count, port_out) {
+    if (_hn_req_buf == 0) { _hn_req_buf = alloc(1024); }
+    var lfd = hn_listen(16, port_out);
+    if (lfd < 0) { return 0 - 1; }
+    var pid = sys_fork();
+    if (pid == 0) {
+        var served = 0;
+        while (served < count) {
+            var cfd = sys_accept4(lfd, 0, 0, 0);
+            if (cfd >= 0) {
+                hn_read_request(cfd);
+                hn_respond(cfd, mode);
+                sys_close(cfd);
+            }
+            served = served + 1;
+        }
+        syscall(SYS_EXIT, 0);
+    }
+    sys_close(lfd);
+    return pid;
+}
+
+fn hn_reap(pid) {
+    if (pid <= 0) { return 0; }
+    var st[8];
+    sys_kill(pid, 9);
+    sys_waitpid(pid, &st, 0);
+    return 0;
+}
+
+# A listener whose accept queue is already full: backlog 0 holds one completed connection, and
+# Linux DROPS every later SYN while the queue is full, so a further connect hangs in SYN_SENT —
+# a blackhole on loopback, no network needed. Returns the listener fd; the filler fd goes to
+# *filler_out so the caller can close both.
+fn hn_blackhole(port_out, filler_out) {
+    var lfd = hn_listen(0, port_out);
+    if (lfd < 0) { return 0 - 1; }
+    var cfd = sys_socket(2, 1, 0);
+    var sa[16];
+    memset(&sa, 0, 16);
+    store16(&sa, 2);
+    var p = load64(port_out);
+    store8(&sa + 2, (p >> 8) & 255);
+    store8(&sa + 3, p & 255);
+    store8(&sa + 4, 127);
+    store8(&sa + 7, 1);
+    sys_connect(cfd, &sa, 16);
+    store64(filler_out, cfd);
+    return lfd;
+}
+
+fn hn_url(port, suffix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "http://127.0.0.1:");
+    str_builder_add_int(sb, port);
+    str_builder_add_cstr(sb, suffix);
+    return str_builder_build(sb);
+}
+
+# 2^64 + p in decimal: str_to_int wraps silently mod 2^64, so this digit run lands on p.
+fn hn_wrapped_port(p) {
+    var buf = alloc(24);
+    memcpy(buf, "18446744073709551616", 20);
+    store8(buf + 20, 0);
+    var add = p;
+    var carry = 0;
+    var i = 19;
+    while (i >= 0) {
+        var d = (load8(buf + i) - 48) + (add % 10) + carry;
+        add = add / 10;
+        carry = d / 10;
+        store8(buf + i, 48 + (d % 10));
+        i = i - 1;
+    }
+    return buf;
+}
+
+fn hn_check(check_type, target, port, timeout) {
+    var hc = alloc(sizeof(HealthCheck));
+    store64(hc, check_type);
+    store64(hc + 8, target);
+    store64(hc + 16, port);
+    store64(hc + 24, 0);
+    store64(hc + 32, timeout);
+    store64(hc + 40, 0);
+    return execute_health_check(str_from("hn"), hc, 0);
+}
+
+fn hn_passed(r) { return load64(r + 16); }
+
+fn hn_msg_has(r, needle) {
+    var m = load64(r + 32);
+    if (m == 0) { return 0; }
+    return str_contains(m, str_from(needle));
+}
+
+# A datagram socketpair with SO_PASSCRED on the receiving end. fds -> *rfd_out, *sfd_out.
+fn hn_dgram_pair(rfd_out, sfd_out) {
+    var fds[8];
+    if (sys_socketpair(1, 2, 0, &fds) != 0) { return 0 - 1; }
+    var rfd = load32(&fds);
+    var one[4];
+    store32(&one, 1);
+    sys_setsockopt(rfd, 1, 16, &one, 4);
+    store64(rfd_out, rfd);
+    store64(sfd_out, load32(&fds + 4));
+    return 0;
+}
+
+fn hn_main_pid_of(text) {
+    var nm = notify_parse(text, strlen(text));
+    return load64(nm + 16);
+}
+
+# A loopback port with nothing listening: bind, read the port, close.
+fn hn_closed_port() {
+    var slot = alloc(8);
+    var fd = hn_listen(1, slot);
+    if (fd < 0) { return 9; }
+    sys_close(fd);
+    return load64(slot);
+}
+
+# Bytes allocated per call by execute_health_check(hc), after one warm-up call.
+fn hn_check_bytes(hc, pid) {
+    var svc = str_from("hn");
+    execute_health_check(svc, hc, pid);
+    var before = alloc_used();
+    var k = 0;
+    while (k < 20) {
+        execute_health_check(svc, hc, pid);
+        k = k + 1;
+    }
+    return (alloc_used() - before) / 20;
+}
+
+# Bytes allocated per call by notify_parse(text).
+fn hn_parse_bytes(text) {
+    var n = strlen(text);
+    notify_parse(text, n);
+    var before = alloc_used();
+    var k = 0;
+    while (k < 20) {
+        notify_parse(text, n);
+        k = k + 1;
+    }
+    return (alloc_used() - before) / 20;
+}
+
+fn hn_scan(hosts, name) {
+    return hosts_scan(str_data(hosts), str_len(hosts), str_from(name));
+}
+
+# "/tmp/argonaut-hn-<pid>-aaaa..." padded to exactly `len` bytes.
+fn hn_sock_path(len) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/argonaut-hn-");
+    str_builder_add_int(sb, sys_getpid());
+    str_builder_add_cstr(sb, "-");
+    var k = str_len(str_builder_build(sb));
+    while (k < len) {
+        str_builder_add_cstr(sb, "a");
+        k = k + 1;
+    }
+    return str_builder_build(sb);
+}
+
+fn main() {
+    alloc_init();
+    var port_slot = alloc(8);
+    var aux_slot = alloc(8);
+
+    # =====================================================================
+    # A-1 MEDIUM — the HTTP timeout bounds the whole check, not each read
+    # =====================================================================
+    test_group("a1-http-per-check-deadline");
+
+    var drip_pid = hn_spawn(HN_DRIP, 1, port_slot);
+    assert(drip_pid > 0, "A-1: drip server forked");
+    var t0 = monotonic_ms();
+    var r_drip = hn_check(HC_HTTP_GET, hn_url(load64(port_slot), "/"), 0, 300);
+    var drip_ms = monotonic_ms() - t0;
+    hn_reap(drip_pid);
+    assert(drip_ms < 1000, "A-1: a peer dripping one byte per 150 ms cannot hold a 300 ms check");
+    assert_eq(hn_passed(r_drip), 0, "A-1: a status line unfinished inside the budget FAILS");
+    assert(hn_msg_has(r_drip, "HTTP response timeout"), "A-1: the failure is reported as a timeout");
+
+    # A prompt answer and a split status line still pass under the single deadline.
+    var ok_pid = hn_spawn(HN_OK, 1, port_slot);
+    var r_ok = hn_check(HC_HTTP_GET, hn_url(load64(port_slot), "/healthz"), 0, 2000);
+    hn_reap(ok_pid);
+    assert_eq(hn_passed(r_ok), 1, "A-1: a prompt 200 passes");
+    assert(hn_msg_has(r_ok, "HTTP 200"), "A-1: the message carries the status");
+
+    var split_pid = hn_spawn(HN_SPLIT, 1, port_slot);
+    var r_split = hn_check(HC_HTTP_GET, hn_url(load64(port_slot), "/"), 0, 2000);
+    hn_reap(split_pid);
+    assert_eq(hn_passed(r_split), 1, "A-1: a status line split across segments still passes");
+
+    # The pause between ready-check attempts comes out of the same budget.
+    var rc_dead = ready_check_new(HC_TCP_CONNECT, str_from("127.0.0.1"), hn_closed_port(), 300, 3, 2000);
+    t0 = monotonic_ms();
+    var rr_dead = execute_ready_check(str_from("rc"), rc_dead, 0);
+    var rc_ms = monotonic_ms() - t0;
+    assert_eq(load64(rr_dead + 16), 0, "A-1: a ready check against a refused port fails");
+    assert(rc_ms < 1000, "A-1: the retry pause is cut to the ready check's remaining budget");
+
+    # =====================================================================
+    # A-3 MEDIUM — an /etc/hosts lookup allocates nothing per call
+    # =====================================================================
+    test_group("a3-etc-hosts-zero-alloc");
+
+    var lh = str_from("localhost");
+    var miss = str_from("definitely.not.in.hosts.invalid");
+    assert(resolve_host_ipv4(lh) >= 0, "A-3: localhost resolves");
+    resolve_host_ipv4(miss);
+    var a3_before = alloc_used();
+    var a3_i = 0;
+    while (a3_i < 50) {
+        resolve_host_ipv4(lh);
+        a3_i = a3_i + 1;
+    }
+    assert_eq(alloc_used() - a3_before, 0, "A-3: 50 resolving lookups allocate 0 bytes");
+    var a3_mbefore = alloc_used();
+    a3_i = 0;
+    while (a3_i < 50) {
+        resolve_host_ipv4(miss);
+        a3_i = a3_i + 1;
+    }
+    assert_eq(alloc_used() - a3_mbefore, 0, "A-3: 50 missing lookups allocate 0 bytes");
+
+    # The parsing rules, unchanged by the rewrite, against a crafted file.
+    test_group("a3-hosts-scan-rules");
+    var hsb = str_builder_new();
+    str_builder_add_cstr(hsb, "# comment line\n\n127.0.0.1 localhost\n  \t10.0.0.6\tlead\ttabbed\n");
+    str_builder_add_cstr(hsb, "10.0.0.7 real # fake\n10.0.0.8 glued#comment\n10.0.0.9 a1 a2 a3\n");
+    str_builder_add_cstr(hsb, "::1 v6only\nfe80::1%lo0 v6b\n127.0.0.01 lz\n10.0.0.15#x n15\n");
+    str_builder_add_cstr(hsb, "10.0.0.18\n10.0.0.19 next\n10.0.0.13 dup\n10.0.0.14 dup\n");
+    str_builder_add_cstr(hsb, "10.0.0.12 hostname\n10.0.0.17 t17   \n10.0.0.10 last");
+    var hosts = str_builder_build(hsb);
+    var net10 = 167772160;
+    assert_eq(hn_scan(hosts, "localhost"), 2130706433, "hosts: plain line");
+    assert_eq(hn_scan(hosts, "lead"), net10 + 6, "hosts: leading blanks and tab separators");
+    assert_eq(hn_scan(hosts, "tabbed"), net10 + 6, "hosts: tab-separated alias");
+    assert_eq(hn_scan(hosts, "real"), net10 + 7, "hosts: name before an inline comment");
+    assert_eq(hn_scan(hosts, "fake"), 0 - 1, "hosts: a name inside an inline comment is not a name");
+    assert_eq(hn_scan(hosts, "glued"), net10 + 8, "hosts: '#' ends a name");
+    assert_eq(hn_scan(hosts, "comment"), 0 - 1, "hosts: text after a glued '#' is a comment");
+    assert_eq(hn_scan(hosts, "glued#comment"), 0 - 1, "hosts: the glued token is not a name");
+    assert_eq(hn_scan(hosts, "a1"), net10 + 9, "hosts: first alias");
+    assert_eq(hn_scan(hosts, "a3"), net10 + 9, "hosts: last alias");
+    assert_eq(hn_scan(hosts, "v6only"), 0 - 1, "hosts: an IPv6 line is skipped");
+    assert_eq(hn_scan(hosts, "v6b"), 0 - 1, "hosts: an IPv6 scoped line is skipped");
+    assert_eq(hn_scan(hosts, "lz"), 0 - 1, "hosts: a leading-zero octet is not an address");
+    assert_eq(hn_scan(hosts, "n15"), 0 - 1, "hosts: '#' does not end the address token");
+    assert_eq(hn_scan(hosts, "next"), net10 + 19, "hosts: an address with no names does not eat the next line");
+    assert_eq(hn_scan(hosts, "dup"), net10 + 13, "hosts: the first matching line wins");
+    assert_eq(hn_scan(hosts, "hostname"), net10 + 12, "hosts: exact name");
+    assert_eq(hn_scan(hosts, "host"), 0 - 1, "hosts: a prefix is not a match");
+    assert_eq(hn_scan(hosts, "hostnamex"), 0 - 1, "hosts: a longer name is not a match");
+    assert_eq(hn_scan(hosts, "t17"), net10 + 17, "hosts: trailing blanks");
+    assert_eq(hn_scan(hosts, "last"), net10 + 10, "hosts: no trailing newline");
+    assert_eq(hn_scan(hosts, "line"), 0 - 1, "hosts: a comment line is skipped");
+    assert_eq(hn_scan(hosts, ""), 0 - 1, "hosts: an empty name never matches");
+
+    # 200 lines, looked up at the end and missed: still nothing allocated.
+    var big_sb = str_builder_new();
+    var bl = 0;
+    while (bl < 200) {
+        str_builder_add_cstr(big_sb, "10.0.");
+        str_builder_add_int(big_sb, bl / 256);
+        str_builder_add_cstr(big_sb, ".");
+        str_builder_add_int(big_sb, bl % 256);
+        str_builder_add_cstr(big_sb, " host");
+        str_builder_add_int(big_sb, bl);
+        str_builder_add_cstr(big_sb, " alias");
+        str_builder_add_int(big_sb, bl);
+        str_builder_add_cstr(big_sb, "\n");
+        bl = bl + 1;
+    }
+    var big = str_builder_build(big_sb);
+    var big_last = str_from("alias199");
+    var big_miss = str_from("host200");
+    assert_eq(hosts_scan(str_data(big), str_len(big), big_last), net10 + 199, "hosts: 200-line file, last alias");
+    var big_before = alloc_used();
+    var bk = 0;
+    while (bk < 20) {
+        hosts_scan(str_data(big), str_len(big), big_last);
+        hosts_scan(str_data(big), str_len(big), big_miss);
+        bk = bk + 1;
+    }
+    assert_eq(alloc_used() - big_before, 0, "A-3: a 200-line scan allocates 0 bytes, hit or miss");
+
+    # =====================================================================
+    # A-5 LOW — the URL path cannot split the request line
+    # =====================================================================
+    test_group("a5-http-path-bytes");
+
+    var inj_pid = hn_spawn(HN_OK, 8, port_slot);
+    var inj_port = load64(port_slot);
+    var r_inj = hn_check(HC_HTTP_GET, hn_url(inj_port, "/a HTTP/1.0\r\nX-Injected: yes"), 0, 2000);
+    assert_eq(hn_passed(r_inj), 0, "A-5: CR/LF in the path FAILS the check");
+    assert(hn_msg_has(r_inj, "path has invalid byte"), "A-5: the message names the path");
+    var r_sp = hn_check(HC_HTTP_GET, hn_url(inj_port, "/a b"), 0, 2000);
+    assert(hn_msg_has(r_sp, "path has invalid byte"), "A-5: a space in the path is refused");
+    var r_tab = hn_check(HC_HTTP_GET, hn_url(inj_port, "/a\tb"), 0, 2000);
+    assert(hn_msg_has(r_tab, "path has invalid byte"), "A-5: a tab in the path is refused");
+    var del_url = hn_url(inj_port, "/a?b");
+    store8(str_data(del_url) + str_len(del_url) - 2, 127);
+    var r_del = hn_check(HC_HTTP_GET, del_url, 0, 2000);
+    assert(hn_msg_has(r_del, "path has invalid byte"), "A-5: DEL in the path is refused");
+    var r_clean = hn_check(HC_HTTP_GET, hn_url(inj_port, "/healthz?probe=1&x=%20"), 0, 2000);
+    assert_eq(hn_passed(r_clean), 1, "A-5: an ordinary path with a query still passes");
+    hn_reap(inj_pid);
+
+    # =====================================================================
+    # A-6 LOW — a timeout <= 0 is the 2000 ms default, never "no timeout"
+    # =====================================================================
+    test_group("a6-timeout-clamp");
+
+    var silent_pid = hn_spawn(HN_SILENT, 1, port_slot);
+    t0 = monotonic_ms();
+    var r_neg = hn_check(HC_HTTP_GET, hn_url(load64(port_slot), "/"), 0, 0 - 1);
+    var neg_ms = monotonic_ms() - t0;
+    hn_reap(silent_pid);
+    assert_eq(hn_passed(r_neg), 0, "A-6: HTTP, timeout -1, silent peer: FAILS");
+    assert(neg_ms < 2500, "A-6: HTTP, timeout -1 is bounded at ~2 s, not until the peer closes");
+    assert(neg_ms >= 1500, "A-6: HTTP, timeout -1 gets the 2 s default, not zero");
+
+    var slow_pid = hn_spawn(HN_SLOW_OK, 1, port_slot);
+    var r_zero = hn_check(HC_HTTP_GET, hn_url(load64(port_slot), "/"), 0, 0);
+    hn_reap(slow_pid);
+    assert_eq(hn_passed(r_zero), 1, "A-6: HTTP, timeout 0 gets the default: a 100 ms answer passes");
+
+    var bh_lfd = hn_blackhole(port_slot, aux_slot);
+    var bh_port = load64(port_slot);
+    var lo = resolve_host_ipv4(str_from("127.0.0.1"));
+    t0 = monotonic_ms();
+    var bh_probe = connect_bounded(lo, bh_port, 200);
+    var bh_ms = monotonic_ms() - t0;
+    if (bh_probe >= 0) { sys_close(bh_probe); }
+    if (bh_probe < 0) {
+        if (bh_ms >= 150) {
+            t0 = monotonic_ms();
+            var r_tneg = hn_check(HC_TCP_CONNECT, str_from("127.0.0.1"), bh_port, 0 - 1);
+            var tneg_ms = monotonic_ms() - t0;
+            assert_eq(hn_passed(r_tneg), 0, "A-6: TCP, timeout -1, SYN dropped: FAILS");
+            assert(tneg_ms < 2500, "A-6: TCP, timeout -1 is bounded at ~2 s, not the SYN-retry window");
+        }
+    }
+    sys_close(load64(aux_slot));
+    sys_close(bh_lfd);
+
+    var tcp_pid = hn_spawn(HN_OK, 1, port_slot);
+    var r_tzero = hn_check(HC_TCP_CONNECT, str_from("127.0.0.1"), load64(port_slot), 0);
+    hn_reap(tcp_pid);
+    assert_eq(hn_passed(r_tzero), 1, "A-6: TCP, timeout 0 gets the default and connects");
+
+    # =====================================================================
+    # A-7 LOW — ports outside 1..65535, and junk in the HTTP port, are refused
+    # =====================================================================
+    test_group("a7-port-validation");
+
+    var pv_pid = hn_spawn(HN_OK, 16, port_slot);
+    var pv_port = load64(port_slot);
+
+    var r_wrap = hn_check(HC_TCP_CONNECT, str_from("127.0.0.1"), pv_port + 65536, 500);
+    assert_eq(hn_passed(r_wrap), 0, "A-7: TCP port + 65536 does not wrap onto a live port");
+    assert(hn_msg_has(r_wrap, "TCP check: port out of range"), "A-7: TCP 65536+ is out of range");
+    var r_p0 = hn_check(HC_TCP_CONNECT, str_from("127.0.0.1"), 0, 500);
+    assert(hn_msg_has(r_p0, "TCP check: port out of range"), "A-7: TCP port 0 is out of range");
+    var r_pn = hn_check(HC_TCP_CONNECT, str_from("127.0.0.1"), 0 - 1, 500);
+    assert(hn_msg_has(r_pn, "TCP check: port out of range"), "A-7: TCP port -1 is out of range");
+    var r_pok = hn_check(HC_TCP_CONNECT, str_from("127.0.0.1"), pv_port, 500);
+    assert_eq(hn_passed(r_pok), 1, "A-7: TCP on the real port still passes");
+
+    var r_junk = hn_check(HC_HTTP_GET, hn_url(pv_port, "abc/"), 0, 500);
+    assert_eq(hn_passed(r_junk), 0, "A-7: HTTP ':<port>abc' is refused, not read as <port>");
+    assert(hn_msg_has(r_junk, "HTTP check: invalid port"), "A-7: junk after the port digits is named");
+
+    var wsb = str_builder_new();
+    str_builder_add_cstr(wsb, "http://127.0.0.1:");
+    str_builder_add_cstr(wsb, hn_wrapped_port(pv_port));
+    str_builder_add_cstr(wsb, "/");
+    var r_long = hn_check(HC_HTTP_GET, str_builder_build(wsb), 0, 500);
+    assert_eq(hn_passed(r_long), 0, "A-7: HTTP 2^64+<port> does not wrap onto a live port");
+    assert(hn_msg_has(r_long, "port out of range"), "A-7: a 20-digit port is out of range");
+
+    var r_six = hn_check(HC_HTTP_GET, str_from("http://127.0.0.1:000080/"), 0, 500);
+    assert(hn_msg_has(r_six, "port out of range"), "A-7: more than five port digits are refused");
+    var r_big = hn_check(HC_HTTP_GET, str_from("http://127.0.0.1:65536/"), 0, 500);
+    assert(hn_msg_has(r_big, "port out of range"), "A-7: 65536 is out of range");
+    var r_noslash = hn_check(HC_HTTP_GET, hn_url(pv_port, ""), 0, 2000);
+    assert_eq(hn_passed(r_noslash), 1, "A-7: a port running to the end of the URL still passes");
+    hn_reap(pv_pid);
+
+    # =====================================================================
+    # A-8 LOW — the notify socket is close-on-exec, and SO_PASSCRED is checked
+    # =====================================================================
+    test_group("a8-notify-socket-cloexec");
+
+    var npath = str_from(test_scratch("/tmp/argonaut-harden-net-notify.sock"));
+    var nfd = notify_bind(npath);
+    assert(nfd >= 0, "A-8: notify_bind succeeds");
+    if (nfd >= 0) {
+        assert_eq(sys_fcntl(nfd, 1, 0) & 1, 1, "A-8: the notify fd is FD_CLOEXEC — not inherited by services");
+        assert_eq(sys_fcntl(nfd, 3, 0) & 2048, 2048, "A-8: the notify fd is still O_NONBLOCK");
+        var pc[8];
+        var pcl[8];
+        store64(&pc, 0);
+        store64(&pcl, 4);
+        assert_eq(ag_sys_getsockopt(nfd, 1, 16, &pc, &pcl), 0, "A-8: SO_PASSCRED readable");
+        assert_eq(load32(&pc), 1, "A-8: SO_PASSCRED is on");
+        sys_close(nfd);
+    }
+    sys_unlink(str_data(npath));
+
+    # A path is NUL-terminated from sun_path, not from the Str's bytes: a view
+    # into a longer buffer must still unlink and rebind its own stale socket.
+    var vfull = hn_sock_path(60);
+    var vbuf = alloc(str_len(vfull) + 8);
+    memcpy(vbuf, str_data(vfull), str_len(vfull));
+    memcpy(vbuf + str_len(vfull), "XYZ", 4);
+    var vview = str_new(vbuf, str_len(vfull));
+    var stale = notify_bind(vfull);
+    assert(stale >= 0, "notify: first bind leaves a socket file behind");
+    if (stale >= 0) { sys_close(stale); }
+    var vfd = notify_bind(vview);
+    assert(vfd >= 0, "notify: a non-NUL-terminated path still replaces its stale socket");
+    if (vfd >= 0) { sys_close(vfd); }
+    sys_unlink(str_data(vfull));
+
+    # sun_path holds 107 bytes: a longer path is refused, never truncated.
+    var p107 = hn_sock_path(107);
+    var p120 = hn_sock_path(120);
+    sys_unlink(str_data(p107));
+    var lfd107 = notify_bind(p107);
+    assert(lfd107 >= 0, "notify: a 107-byte path binds");
+    var fd120 = notify_bind(p120);
+    assert_eq(fd120, 0 - 1, "notify: a 120-byte path is refused, not bound as its first 107 bytes");
+    if (fd120 >= 0) { sys_close(fd120); }
+    if (lfd107 >= 0) {
+        assert_eq(send_notify(p120, str_from("READY=1\n")), 0 - 1,
+          "notify: send_notify refuses a 120-byte path");
+        assert_eq(notify_try_recv(lfd107), 0, "notify: nothing reached the 107-byte socket");
+        sys_close(lfd107);
+    }
+    sys_unlink(str_data(p107));
+
+    # =====================================================================
+    # A-9 LOW — truncated datagrams are dropped; MAINPID is parsed strictly
+    # =====================================================================
+    test_group("a9-notify-trunc-mainpid");
+
+    var me = vec_new();
+    vec_push(me, sys_getpid());
+    if (hn_dgram_pair(port_slot, aux_slot) == 0) {
+        var rfd = load64(port_slot);
+        var sfd = load64(aux_slot);
+        var big = alloc(1100);
+        memset(big, 120, 1100);
+        memcpy(big, "READY=1\nSTATUS=", 15);
+        sys_sendto(sfd, big, 1100, 0, 0, 0);
+        var nm_big = notify_try_recv_authenticated(rfd, me);
+        assert_eq(nm_big, 0, "A-9: a datagram longer than the buffer is dropped, not half-parsed");
+        assert_eq(notify_recv_outcome(), NOTIFY_RECV_TRUNCATED, "A-9: the drop is reported as truncated");
+
+        # Exactly the buffer size is not truncated.
+        sys_sendto(sfd, big, 1024, 0, 0, 0);
+        var nm_fit = notify_try_recv_authenticated(rfd, me);
+        assert(nm_fit != 0, "A-9: a 1024-byte datagram still fits and parses");
+        if (nm_fit != 0) { assert_eq(load64(nm_fit), 1, "A-9: and its READY=1 counts"); }
+
+        # The drain continues past a dropped datagram.
+        sys_sendto(sfd, "READY=1\n", 8, 0, 0, 0);
+        var nm_next = notify_try_recv_authenticated(rfd, me);
+        assert(nm_next != 0, "A-9: the next datagram is received normally");
+        sys_close(rfd);
+        sys_close(sfd);
+    }
+
+    assert_eq(hn_main_pid_of("MAINPID=-1\n"), 0, "A-9: MAINPID=-1 is ignored");
+    assert_eq(hn_main_pid_of("MAINPID=1x2\n"), 0, "A-9: MAINPID=1x2 is ignored, not read as 12");
+    assert_eq(hn_main_pid_of("MAINPID=99999999999\n"), 0, "A-9: MAINPID past pid_t is ignored");
+    assert_eq(hn_main_pid_of("MAINPID=2147483648\n"), 0, "A-9: MAINPID=2^31 is ignored");
+    assert_eq(hn_main_pid_of("MAINPID=1\n"), 0, "A-9: MAINPID=1 (init) is ignored");
+    assert_eq(hn_main_pid_of("MAINPID=0\n"), 0, "A-9: MAINPID=0 is ignored");
+    assert_eq(hn_main_pid_of("MAINPID=\n"), 0, "A-9: an empty MAINPID is ignored");
+    assert_eq(hn_main_pid_of("MAINPID= 42\n"), 0, "A-9: a MAINPID with a space is ignored");
+    assert_eq(hn_main_pid_of("MAINPID=+42\n"), 0, "A-9: a signed MAINPID is ignored");
+    assert_eq(hn_main_pid_of("MAINPID=4242\n"), 4242, "A-9: a valid MAINPID is taken");
+    assert_eq(hn_main_pid_of("MAINPID=2\n"), 2, "A-9: MAINPID=2 is the lowest accepted");
+    assert_eq(hn_main_pid_of("MAINPID=2147483647\n"), 2147483647, "A-9: MAINPID=2^31-1 is accepted");
+    assert_eq(hn_main_pid_of("READY=1\nMAINPID=77"), 77, "A-9: MAINPID without a trailing newline");
+
+    # =====================================================================
+    # Per-call allocation on the reactor path (1.16.1 audit, perf)
+    # =====================================================================
+    test_group("perf-per-tick-alloc");
+
+    # A health check allocates its result struct (the history ring keeps it)
+    # and nothing else.
+    var rsz = sizeof(HealthCheckResult);
+    var dead_port = hn_closed_port();
+    assert_eq(hn_check_bytes(health_check_new(HC_PROCESS_ALIVE, 0, 0, 5000, 200, 3), sys_getpid()), rsz,
+      "perf: process-alive check allocates only its result");
+    assert_eq(hn_check_bytes(health_check_new(HC_TCP_CONNECT, str_from("127.0.0.1"), dead_port, 5000, 200, 3), 0), rsz,
+      "perf: TCP check on an address allocates only its result");
+    assert_eq(hn_check_bytes(health_check_new(HC_TCP_CONNECT, str_from("localhost"), dead_port, 5000, 200, 3), 0), rsz,
+      "perf: TCP check on a hosts name allocates only its result");
+    var perf_pid = hn_spawn(HN_OK, 30, port_slot);
+    var perf_hc = health_check_new(HC_HTTP_GET, hn_url(load64(port_slot), "/healthz"), 0, 5000, 2000, 3);
+    assert_eq(hn_check_bytes(perf_hc, 0), rsz, "perf: a passing HTTP check allocates only its result");
+    hn_reap(perf_pid);
+    assert_eq(hn_check_bytes(health_check_new(HC_HTTP_GET, hn_url(dead_port, "/x"), 0, 5000, 200, 3), 0), rsz,
+      "perf: a failing HTTP check allocates only its result");
+
+    # Recognising a known sd_notify key costs nothing over an unknown one of the
+    # same shape: the comparison itself does not allocate.
+    assert_eq(hn_parse_bytes("WATCHDOG=1\n"), hn_parse_bytes("ZZZZZZZZ=1\n"),
+      "perf: matching WATCHDOG allocates nothing beyond the message itself");
+    assert_eq(hn_parse_bytes("READY=1\n"), hn_parse_bytes("ZZZZZ=1\n"),
+      "perf: matching READY allocates nothing beyond the message itself");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

@@ -60,18 +60,24 @@ fn ag_sys_getsockopt(fd, level, optname, optval, optlen): i64 {
     #endif
 }
 
-# poll(fds, nfds, timeout_ms) — readiness wait for the TCP/HTTP health checks.
+# poll(fds, nfds, timeout_ms) — readiness wait for the TCP/HTTP health checks,
+# with poll(2)'s millisecond timeout, issued as the stdlib's `sys_ppoll`.
 #
-# ⚠ Deliberately the x86 number on BOTH arches. aarch64 has no `poll`; the
-# native equivalent is ppoll(73), which takes a `struct timespec` instead of a
-# millisecond int — but 73 is claimed by the ESYSXLAT ladder as x86 `flock` and
-# rewritten to 32, so it cannot be issued directly. Source-7 IS in the ladder
-# and is translated to ppoll WITH the ms -> timespec conversion (and a negative
-# timeout mapped to a NULL timespec, i.e. block forever), so it is correct on
-# both targets. This mirrors what the stdlib itself does in `chrono.sleep_ms`,
-# which issues `syscall(7, 0, 0, ms)` under CYRIUS_TARGET_LINUX for both arches.
+# aarch64 has no `poll`, only ppoll, which takes a `struct timespec`. Until
+# 1.16.1 this issued x86 poll (7) on both arches and relied on the aarch64
+# translation to rewrite it into ppoll with the conversion. `sys_ppoll`
+# (cyrius 6.7.9+) reaches ppoll directly on every Linux target (x86_64 271,
+# aarch64 73), so the conversion lives here: a negative timeout is a NULL
+# timespec (no timeout), anything else is {ms / 1000, (ms % 1000) * 1e6}.
+# No signal mask is passed. `ts` is static storage, written in full on every
+# call (the kernel may write the remaining time back into it).
+# `tests/tcyr/poll_ms.tcyr` pins the contract on both arches.
 fn ag_sys_poll(fds, nfds, timeout_ms): i64 {
-    return syscall(7, fds, nfds, timeout_ms);
+    if (timeout_ms < 0) { return sys_ppoll(fds, nfds, 0, 0, 8); }
+    var ts[16];
+    store64(&ts, timeout_ms / 1000);
+    store64(&ts + 8, (timeout_ms % 1000) * 1000000);
+    return sys_ppoll(fds, nfds, &ts, 0, 8);
 }
 
 # clock_gettime(clockid, timespec) — backs now_ms / monotonic_ms.
@@ -82,6 +88,18 @@ fn ag_sys_clock_gettime(clockid, ts): i64 {
     #endif
     #ifdef CYRIUS_ARCH_AARCH64
     return syscall(113, clockid, ts);
+    #endif
+}
+
+# setpgid(pid, pgid) — puts a timed child in its own process group, so a
+# timeout can signal the whole group (1.16.1). No stdlib wrapper.
+# x86_64 109 (native) / aarch64 154 (native, ladder-safe).
+fn ag_sys_setpgid(pid, pgid): i64 {
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(109, pid, pgid);
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(154, pid, pgid);
     #endif
 }
 

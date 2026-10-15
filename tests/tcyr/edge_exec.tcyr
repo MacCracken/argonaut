@@ -52,8 +52,9 @@ fn main() {
     assert_eq(load64(result), 1, "eb rootfs skip");
     # No verity inputs = skip
     assert_eq(load64(result + 8), 0, "eb no verity");
-    # luks off + no device = luks_unlocked=1 (skip = success)
-    assert_eq(load64(result + 16), 1, "eb luks skip");
+    # luks off = luks_unlocked=0: nothing was unlocked, and fleet
+    # registration reports it as luks_active (1.16.1 audit B-6; was 1).
+    assert_eq(load64(result + 16), 0, "eb luks skip");
     assert(load64(result + 24) >= 0, "eb time");
 
     # --- validate_edge_profile: within budget ---

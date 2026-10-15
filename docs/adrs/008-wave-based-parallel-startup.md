@@ -56,3 +56,7 @@ From 1.15.6:
   Wave 3: [agnoshi, ifran]
   ```
   The same test pins this plan and the matching linear order. Neither depends on the order services were defined in.
+
+## Amendment — 1.16.1 (2026-10-14): one implementation
+
+The Negative above is resolved. Both functions now call one level-synchronous Kahn's pass, `_svc_kahn_levels` in `src/services.cyr`. It returns the levels as waves for `resolve_service_waves`, or reads them flat for `resolve_service_order`. The waves version used to rescan every key of the in-degree map once per wave, which made it O(waves × services). Sharing the pass halved `resolve_waves_chain_20` (63.9 → 32.7 µs) and cut `resolve_waves_desktop` by a fifth (CHANGELOG [1.16.1] Performance). The output is unchanged: `tests/tcyr/resolve_order.tcyr` passes as it did at 1.15.6.

@@ -34,13 +34,12 @@ fn load_env_file(path, env_map) {
             if (line_len > 0) {
                 var first = load8(buf + line_start);
                 if (first != 35) {  # not '#'
-                    # Find '=' separator
+                    # Find '=' separator (first one; flag-style, no break)
                     var eq_pos = 0 - 1;
-                    for (var j = line_start; j < i; j = j + 1) {
-                        if (load8(buf + j) == 61) {  # '='
-                            eq_pos = j;
-                            break;
-                        }
+                    var j = line_start;
+                    while (eq_pos < 0 && j < i) {
+                        if (load8(buf + j) == 61) { eq_pos = j; }   # '='
+                        j = j + 1;
                     }
                     if (eq_pos > line_start) {
                         # Null-terminate key in-place for map lookup
@@ -111,27 +110,56 @@ enum ArgAccessMode { ARG_F_OK = 0; ARG_X_OK = 1; }
 #
 # The envp exec_vec_str passes is empty, so a PATH inherited from the parent
 # would not help even if execve honoured it. Resolution has to happen here.
+#
+# ⚠ STATIC RESULT. 1.16.1 audit B-8. This built a vec and a fresh Str per
+# candidate directory on every call — 272 bytes for a bare `true`, once per
+# health poll per service, in an arena PID 1 never resets. The candidate is
+# now composed in `_RSB_PATH` and returned through the static Str `_RSB_STR`,
+# so a resolved name is valid only until the next call. That is all
+# `run_safe_cmd_timeout` needs: it reads the result, forks, and the child
+# execs its own copy. The result for an explicit path is the caller's Str,
+# unchanged. Global scope, so `[34]` is 34 SLOTS = 272 bytes: the longest
+# directory (10) + NAME_MAX (255) + NUL. A longer name cannot be a file name
+# and resolves to nothing.
+var _RSB_PATH[34];
+var _RSB_STR[2];
+
+# sbin first: these are admin tools. On a merged-usr system the first two
+# resolve through the symlink anyway; on a split-usr one they do not, which is
+# exactly why all four are tried.
+fn _rsb_dir(i) {
+    if (i == 0) { return "/usr/sbin/"; }
+    if (i == 1) { return "/sbin/"; }
+    if (i == 2) { return "/usr/bin/"; }
+    return "/bin/";
+}
+
 fn _resolve_safe_binary(name) {
     # Already an explicit path — caller's choice, use it verbatim.
     if (str_index_of(name, 47) >= 0) { return name; }
+    var nlen = str_len(name);
+    if (nlen == 0) { return 0; }
+    if (nlen > 255) { return 0; }
 
-    # sbin first: these are admin tools. On a merged-usr system the first
-    # two resolve through the symlink anyway; on a split-usr one they do not,
-    # which is exactly why all four are tried.
-    var dirs = vec_new();
-    vec_push(dirs, "/usr/sbin/");
-    vec_push(dirs, "/sbin/");
-    vec_push(dirs, "/usr/bin/");
-    vec_push(dirs, "/bin/");
-
-    for (var i = 0; i < vec_len(dirs); i = i + 1) {
-        var sb = str_builder_new();
-        str_builder_add_cstr(sb, vec_get(dirs, i));
-        str_builder_add_str(sb, name);
-        var cand = str_builder_build(sb);
-        if (sys_access(str_data(cand), ARG_X_OK) == 0) { return cand; }
+    var buf = &_RSB_PATH;
+    var found = 0;
+    var i = 0;
+    while (found == 0 && i < 4) {
+        var dir = _rsb_dir(i);
+        var dlen = strlen(dir);
+        memcpy(buf, dir, dlen);
+        memcpy(buf + dlen, str_data(name), nlen);
+        store8(buf + dlen + nlen, 0);
+        if (sys_access(buf, ARG_X_OK) == 0) {
+            var res = &_RSB_STR;
+            store64(res, buf);
+            store64(res + 8, dlen + nlen);
+            found = 1;
+        }
+        i = i + 1;
     }
-    return 0;
+    if (found == 0) { return 0; }
+    return &_RSB_STR;
 }
 
 # Default wall-clock bound for a SafeCommand. Generous: these are
@@ -205,10 +233,19 @@ fn run_safe_cmd_timeout(cmd, timeout_ms) {
     var pid = sys_fork();
     if (pid < 0) { return 0 - 1; }
     if (pid == 0) {
+        # 1.16.1 audit A-2: lead a process group of its own, so a timeout
+        # can kill everything this command started — a health check's hung
+        # curl/psql grandchild survived the old direct-child SIGKILL, and one
+        # more accumulated under PID 1 on every probe.
+        ag_sys_setpgid(0, 0);
         reset_child_signal_mask();
         sys_execve(str_data(resolved), argv_buf, envp);
         sys_exit(127);
     }
+    # The parent sets the group too, so it exists before any timeout can
+    # signal it whichever side runs first (the job-control race). EACCES
+    # once the child has exec'd is expected and harmless.
+    ag_sys_setpgid(pid, pid);
 
     var deadline = monotonic_ms() + timeout_ms;
     while (monotonic_ms() < deadline) {
@@ -230,13 +267,19 @@ fn run_safe_cmd_timeout(cmd, timeout_ms) {
 
     # Over budget. Kill it and reap, so PID 1 is not left with a stray
     # child and the caller gets a failure rather than a hang.
-    process_kill(pid);
+    # 1.16.1 audit A-2: SIGKILL the whole group (pid is its leader), then the
+    # direct child as a fallback should the group not exist. Orphaned
+    # descendants are reaped by the subreaper sweep (proc_table_reap_orphans).
+    if (pid > 1) {
+        if (sys_kill(0 - pid, SIGKILL) < 0) { process_kill(pid); }
+    }
     var kill_deadline = monotonic_ms() + 500;
-    while (monotonic_ms() < kill_deadline) {
+    var kdone = 0;
+    while (kdone == 0 && monotonic_ms() < kill_deadline) {
         var kbuf[8];
         store64(&kbuf, 0);
-        if (sys_waitpid(pid, &kbuf, WNOHANG) != 0) { break; }
-        sleep_ms(20);
+        if (sys_waitpid(pid, &kbuf, WNOHANG) != 0) { kdone = 1; }
+        else { sleep_ms(20); }
     }
     return 0 - 1;
 }
@@ -260,20 +303,14 @@ fn run_safe_cmd_sequence(cmds) {
 # =========================================================================
 
 # Spawn a service process. Returns child PID or -1 on error.
-# 1.6.1 — exec_env_str (Str-shape argv) — see run_safe_cmd note.
+#
+# 1.16.1 audit B-9: a forwarder. This used to hand the service's environment
+# MAP to the stdlib's exec_env_str, which expects a vec — it faulted before
+# forking — and would have returned the child's exit code, not the pid
+# documented above. Nothing in argonaut or kybernet called it.
+#deprecated("use fork_exec_service")
 fn spawn_service(svc_def) {
-    var binary = svc_def_binary(svc_def);
-    var args = svc_def_args(svc_def);
-
-    var argv = vec_new();
-    vec_push(argv, binary);
-    for (var i = 0; i < vec_len(args); i = i + 1) {
-        vec_push(argv, vec_get(args, i));
-    }
-
-    var env = svc_def_env(svc_def);
-
-    return exec_env_str(argv, env);
+    return fork_exec_service(svc_def);
 }
 
 # reset_child_signal_mask: clear the inherited signal mask
@@ -317,17 +354,58 @@ fn argonaut_extra_env() { return _extra_envp; }
 # build_default_envp: minimal PATH-only environment vec for services spawned
 # without an explicit env (1.6.3 audit MEDIUM-2). The pre-1.6.3 empty envp
 # dropped PATH entirely; this gives every service a usable PATH without
-# needing per-service config. Full `svc_def_env` map → flat-cstrs conversion
-# lands when a service legitimately needs custom env. Since 1.12.0 it also
-# appends whatever argonaut_set_extra_env registered.
+# needing per-service config. Since 1.12.0 it also appends whatever
+# argonaut_set_extra_env registered. A service's own map is merged by
+# build_service_envp below.
 fn build_default_envp() {
+    return build_service_envp(0);
+}
+
+# 1 if `env` (a cstr-keyed map, or 0) defines the key of the "KEY=value"
+# cstr `entry`; `keys` is map_keys(env), or 0 for none.
+fn _env_keys_define(keys, entry) {
+    if (keys == 0) { return 0; }
+    var klen = 0;
+    var c = load8(entry);
+    while (c != 0 && c != 61) {     # up to '='
+        klen = klen + 1;
+        c = load8(entry + klen);
+    }
+    var hit = 0;
+    var i = 0;
+    while (hit == 0 && i < vec_len(keys)) {
+        var k = vec_get(keys, i);
+        if (strlen(k) == klen) {
+            if (memeq(k, entry, klen) == 1) { hit = 1; }
+        }
+        i = i + 1;
+    }
+    return hit;
+}
+
+# The envp for a service: the defaults (PATH, then the extra-env seam), then
+# the service's own `environment` map. `svc_def` may be 0 (defaults only).
+#
+# ⚠ 1.16.1 audit B-10: A DEFAULT THE SERVICE DEFINES IS LEFT OUT. The service's
+# entries used to be appended after the defaults on the theory that the last
+# duplicate wins. It does not: glibc's and musl's getenv return the FIRST
+# match, so a service that set its own PATH still got argonaut's.
+fn build_service_envp(svc_def) {
+    var skeys = 0;
+    if (svc_def != 0) {
+        var senv = svc_def_env(svc_def);
+        if (senv != 0) { skeys = map_keys(senv); }
+    }
     var v = vec_new();
-    vec_push(v, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    var dpath = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    if (_env_keys_define(skeys, dpath) == 0) { vec_push(v, dpath); }
     if (_extra_envp != 0) {
         for (var i = 0; i < vec_len(_extra_envp); i = i + 1) {
-            vec_push(v, vec_get(_extra_envp, i));
+            var xe = vec_get(_extra_envp, i);
+            if (_env_keys_define(skeys, xe) == 0) { vec_push(v, xe); }
         }
     }
+    if (svc_def != 0) { _append_service_env(v, svc_def); }
     return v;
 }
 
@@ -344,8 +422,10 @@ fn build_default_envp() {
 # child. Those two have been silently ineffective for the life of the field.
 #
 # Called in the CHILD after fork, so the allocations here are copy-on-write and
-# die with the exec. Service entries come AFTER the defaults, so a service may
-# deliberately override PATH; the last duplicate wins in every libc's getenv.
+# die with the exec. A service may deliberately override PATH or an extra-env
+# entry: build_service_envp leaves out every default whose key the service's
+# map defines, because getenv returns the FIRST match, not the last (1.16.1
+# audit B-10).
 fn _append_service_env(v, svc_def) {
     var env = svc_def_env(svc_def);
     if (env == 0) { return 0; }
@@ -464,11 +544,10 @@ fn fork_exec_service(svc_def) {
 
         # Environment (1.6.3 audit MEDIUM-2): pass a minimal
         # default envp containing PATH. Pre-1.6.3 passed empty
-        # envp; services lost PATH silently. Full map →
-        # flat-cstrs lands when a service surfaces a need for
-        # custom env beyond PATH.
-        var env_vec = build_default_envp();
-        _append_service_env(env_vec, svc_def);
+        # envp; services lost PATH silently. The service's own
+        # map is merged in, overriding any default it defines
+        # (1.15.0; 1.16.1 audit B-10).
+        var env_vec = build_service_envp(svc_def);
         var envc = vec_len(env_vec);
         var envp_buf = alloc((envc + 1) * 8);
         var enpi = 0;
@@ -570,21 +649,38 @@ fn process_kill(pid) {
     return sys_kill(pid, SIGKILL);
 }
 
+# Exit code for a waitpid status: the exit status, 128+signal, or -1.
+fn _wait_status_code(status) {
+    if (WIFEXITED(status)) { return WEXITSTATUS(status); }
+    if (WIFSIGNALED(status)) { return 128 + WTERMSIG(status); }
+    return 0 - 1;
+}
+
 # Graceful stop: SIGTERM, wait up to timeout_ms, then SIGKILL.
 # Returns exit code or -1.
+#
+# ⚠ 1.16.1 audit B-7: ONLY OUR OWN CHILD IS SIGNALLED. waitpid failing (ECHILD)
+# means `pid` is not — or is no longer — our child: something else reaped it,
+# and the number may already belong to an unrelated process. This used to treat
+# that as "still running": it SIGTERMed first, waited out the whole timeout,
+# then SIGKILLed whatever held the pid by then. A probe now runs before the
+# first signal and every wait failure ends the stop without signalling.
 fn process_stop(pid, timeout_ms) {
+    if (pid <= 0) { return 0 - 1; }
+    var status_buf[8];
+    store64(&status_buf, 0);
+    var probe = sys_waitpid(pid, &status_buf, WNOHANG);
+    if (probe > 0) { return _wait_status_code(load32(&status_buf)); }
+    if (probe < 0) { return 0 - 1; }
+
     process_terminate(pid);
 
     var deadline = monotonic_ms() + timeout_ms;
     while (monotonic_ms() < deadline) {
-        var status_buf[8];
+        store64(&status_buf, 0);
         var ret = sys_waitpid(pid, &status_buf, WNOHANG);
-        if (ret > 0) {
-            var status = load64(&status_buf);
-            if (WIFEXITED(status)) { return WEXITSTATUS(status); }
-            if (WIFSIGNALED(status)) { return 128 + WTERMSIG(status); }
-            return 0 - 1;
-        }
+        if (ret > 0) { return _wait_status_code(load32(&status_buf)); }
+        if (ret < 0) { return 0 - 1; }
         sleep_ms(50);
     }
 
@@ -595,38 +691,57 @@ fn process_stop(pid, timeout_ms) {
     # Wait up to 500ms for SIGKILL
     var kill_deadline = monotonic_ms() + 500;
     while (monotonic_ms() < kill_deadline) {
-        var status_buf[8];
-        var ret = sys_waitpid(pid, &status_buf, WNOHANG);
-        if (ret > 0) {
-            var status = load64(&status_buf);
-            if (WIFEXITED(status)) { return WEXITSTATUS(status); }
-            if (WIFSIGNALED(status)) { return 128 + WTERMSIG(status); }
-            return 0 - 1;
-        }
+        store64(&status_buf, 0);
+        var kret = sys_waitpid(pid, &status_buf, WNOHANG);
+        if (kret > 0) { return _wait_status_code(load32(&status_buf)); }
+        if (kret < 0) { return 0 - 1; }
         sleep_ms(10);
     }
 
     return 0 - 1;
 }
 
+# (name, code) result pair for proc_table_stop_all.
+fn _stop_result(name, code) {
+    var pair = alloc(16);
+    store64(pair, str_from(name));
+    store64(pair + 8, code);
+    return pair;
+}
+
 # Stop all tracked processes
+#
+# 1.16.1 audit B-7: as process_stop — a pid whose waitpid fails is not our
+# child, so it is reported (-1) and never signalled: not SIGTERMed up front,
+# and not SIGKILLed after a wait it could never satisfy.
 fn proc_table_stop_all(timeout_ms) {
     var results = vec_new();
     var keys = proc_table_keys();
+    var remaining = vec_new();
 
-    # Send SIGTERM to all
+    # Probe, then send SIGTERM to every pid that is still our running child
     for (var i = 0; i < vec_len(keys); i = i + 1) {
         var name = vec_get(keys, i);
         var pid = map_get(g_proc_table, name);
-        if (pid > 0) { process_terminate(pid); }
+        if (pid > 0) {
+            var pbuf[8];
+            store64(&pbuf, 0);
+            var probe = sys_waitpid(pid, &pbuf, WNOHANG);
+            if (probe > 0) {
+                var pcode = 0 - 1;
+                if (WIFEXITED(load32(&pbuf))) { pcode = WEXITSTATUS(load32(&pbuf)); }
+                vec_push(results, _stop_result(name, pcode));
+            } elif (probe < 0) {
+                vec_push(results, _stop_result(name, 0 - 1));
+            } else {
+                process_terminate(pid);
+                vec_push(remaining, name);
+            }
+        }
     }
 
     # Wait with timeout
     var deadline = monotonic_ms() + timeout_ms;
-    var remaining = vec_new();
-    for (var i = 0; i < vec_len(keys); i = i + 1) {
-        vec_push(remaining, vec_get(keys, i));
-    }
 
     while (vec_len(remaining) > 0 && monotonic_ms() < deadline) {
         var still_alive = vec_new();
@@ -635,16 +750,15 @@ fn proc_table_stop_all(timeout_ms) {
             var pid = map_get(g_proc_table, name);
             if (pid > 0) {
                 var status_buf[8];
+                store64(&status_buf, 0);
                 var ret = sys_waitpid(pid, &status_buf, WNOHANG);
                 if (ret > 0) {
                     var status = load64(&status_buf);
                     var code = 0 - 1;
                     if (WIFEXITED(status)) { code = WEXITSTATUS(status); }
-                    # Pack name + code into result
-                    var pair = alloc(16);
-                    store64(pair, str_from(name));
-                    store64(pair + 8, code);
-                    vec_push(results, pair);
+                    vec_push(results, _stop_result(name, code));
+                } elif (ret < 0) {
+                    vec_push(results, _stop_result(name, 0 - 1));
                 } else {
                     vec_push(still_alive, name);
                 }
@@ -661,10 +775,7 @@ fn proc_table_stop_all(timeout_ms) {
         var name = vec_get(remaining, i);
         var pid = map_get(g_proc_table, name);
         if (pid > 0) { process_kill(pid); }
-        var pair = alloc(16);
-        store64(pair, str_from(name));
-        store64(pair + 8, 0 - 1);
-        vec_push(results, pair);
+        vec_push(results, _stop_result(name, 0 - 1));
     }
 
     # Clear the table
@@ -765,12 +876,17 @@ fn proc_table_reap() {
 # construction: the caller owns the storage.
 fn proc_table_reap_orphans_into(out, cap) {
     var n = 0;
-    for (var guard = 0; guard < 256; guard = guard + 1) {
+    var draining = 1;
+    var guard = 0;
+    while (draining == 1 && guard < 256) {
         var status_buf[8];
         var ret = sys_waitpid(0 - 1, &status_buf, WNOHANG);
-        if (ret <= 0) { break; }   # 0 = no exited child; <0 = ECHILD/ESRCH
-        if (out != 0 && n < cap) { store64(out + n * 8, ret); }
-        n = n + 1;
+        if (ret <= 0) { draining = 0; }   # 0 = no exited child; <0 = ECHILD/ESRCH
+        else {
+            if (out != 0 && n < cap) { store64(out + n * 8, ret); }
+            n = n + 1;
+        }
+        guard = guard + 1;
     }
     return n;
 }
@@ -800,14 +916,53 @@ fn read_pid_file(path) {
     return read_pid_file_safe(path, sys_getuid());
 }
 
+# open(2) O_NOCTTY: 0x100 on x86_64 and aarch64 alike; the stdlib defines none.
+enum ArgOpenFlag { ARG_O_NOCTTY = 256; }
+
+# A pid file's content as a pid: decimal digits only, optionally one trailing
+# '\n', value 2..2147483647 — otherwise -1. 1.16.1 audit B-1: `str_to_int`
+# joined every digit in the buffer ("12 junk 34" -> 1234) and had no pid_t
+# bound, so "4294967295" became kill(-1) once the kernel truncated it.
+fn _parse_pid_strict(p, n) {
+    if (n <= 0) { return 0 - 1; }
+    if (load8(p + n - 1) == 10) { n = n - 1; }
+    if (n == 0) { return 0 - 1; }
+    if (n > 10) { return 0 - 1; }   # 2147483647 is ten digits
+    var v = 0;
+    var ok = 1;
+    var i = 0;
+    while (ok == 1 && i < n) {
+        var c = load8(p + i);
+        if (c < 48) { ok = 0; }
+        if (c > 57) { ok = 0; }
+        if (ok == 1) { v = v * 10 + (c - 48); }
+        i = i + 1;
+    }
+    if (ok == 0) { return 0 - 1; }
+    if (v < 2) { return 0 - 1; }
+    if (v > 2147483647) { return 0 - 1; }
+    return v;
+}
+
 # read_pid_file_safe — M4 (CVE-2025-4598 class).
 # Reads the pid integer from `path` AND verifies the file is owned
 # by `expected_uid` and is not group/other-writable. Pass -1 as
 # `expected_uid` to skip the ownership check (legacy callers).
 # Pass 0 to require root ownership; the production wiring should
 # pass the service's expected runtime uid.
+#
+# ⚠ 1.16.1 audit B-1: THE CHECKS ABOVE VET THE OPENED FILE, SO WHAT GETS OPENED
+# MATTERS. A plain open(O_RDONLY) followed a symlink, so the owner/mode checks
+# fstat'ed its TARGET: a link to another daemon's root-owned 0644 pid file
+# passed, and argonaut adopted — and later SIGKILLed — that daemon. A FIFO
+# with no writer parked PID 1 in open(2) for good. So: O_NOFOLLOW (a symlink
+# is ELOOP), O_NONBLOCK (a FIFO opens at once and fails S_ISREG below),
+# O_NOCTTY (a tty node cannot become init's controlling terminal), O_CLOEXEC.
+# O_NOFOLLOW / O_NONBLOCK / O_CLOEXEC are the stdlib's per-arch values (arm64
+# O_NOFOLLOW is not x86's). The content is parsed by _parse_pid_strict.
 fn read_pid_file_safe(path, expected_uid) {
-    var fd = sys_open(str_data(path), 0, 0);   # O_RDONLY
+    var oflags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK | ARG_O_NOCTTY | O_CLOEXEC;
+    var fd = sys_open(str_data(path), oflags, 0);
     if (fd < 0) { return 0 - 1; }
 
     # fstat(fd, &stat_buf) — offsets via the arch-dispatched Stat enum.
@@ -830,6 +985,13 @@ fn read_pid_file_safe(path, expected_uid) {
     var st_mode = load32(&stat_buf + STAT_MODE);
     var st_uid  = load32(&stat_buf + STAT_UID);
 
+    # 1.16.1 audit B-1: a regular file only (S_IFMT 0xF000, S_IFREG 0x8000) —
+    # never a FIFO, socket, device or directory.
+    if ((st_mode & 0xF000) != 0x8000) {
+        sys_close(fd);
+        return 0 - 1;
+    }
+
     # Reject group- or other-writable pid files (mode & 0o022 = 18 dec).
     if ((st_mode & 18) != 0) {
         sys_close(fd);
@@ -845,11 +1007,9 @@ fn read_pid_file_safe(path, expected_uid) {
     var buf[64];
     var n = sys_read(fd, &buf, 63);
     sys_close(fd);
-    if (n <= 0) { return 0 - 1; }
-    store8(&buf + n, 0);
 
-    var pid = str_to_int(str_new(&buf, n));
-    if (pid <= 0) { return 0 - 1; }
+    var pid = _parse_pid_strict(&buf, n);
+    if (pid < 0) { return 0 - 1; }
     if (process_alive(pid) == 0) { return 0 - 1; }
     return pid;
 }

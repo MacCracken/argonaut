@@ -51,17 +51,16 @@ fn main() {
         # Reap exited processes
         var reaped = init_reap_services(init);
 
-        # Run health checks
+        # Run health checks. The returned vec is reused: it is valid
+        # until the next init_poll_health call.
         init_poll_health(init, tracker);
 
         # Enforce watchdog timeouts
         init_enforce_watchdog(init);
 
-        # Sleep 1 second
-        var ts[16];
-        store64(&ts, 1);
-        store64(&ts + 8, 0);
-        syscall(35, &ts, 0);
+        # Sleep 1 second. Use the stdlib's sleep_ms, never a raw
+        # syscall number: x86_64's 35 (nanosleep) is unlinkat on aarch64.
+        sleep_ms(1000);
     }
 
     return 0;

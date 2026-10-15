@@ -22,11 +22,16 @@ fn configure_readonly_rootfs() {
     vec_push(overlays, str_from("/var/log"));
     vec_push(overlays, str_from("/var/tmp"));
 
+    # 1.16.1 audit B-5: an explicit mode= on every tmpfs, and nodev on all.
+    # Without mode= a tmpfs root is 1777, so /var/run and /var/log were
+    # world-writable: any local user could pre-create a root daemon's pid
+    # file, socket or log before the daemon started. Only the two scratch
+    # directories are sticky world-writable, and say so.
     var sizes = vec_new();
-    vec_push(sizes, str_from("size=64M,noexec,nosuid"));
-    vec_push(sizes, str_from("size=16M,nosuid"));
-    vec_push(sizes, str_from("size=32M,nosuid"));
-    vec_push(sizes, str_from("size=16M,noexec,nosuid"));
+    vec_push(sizes, str_from("size=64M,mode=1777,noexec,nosuid,nodev"));
+    vec_push(sizes, str_from("size=16M,mode=0755,nosuid,nodev"));
+    vec_push(sizes, str_from("size=32M,mode=0755,nosuid,nodev"));
+    vec_push(sizes, str_from("size=16M,mode=1777,noexec,nosuid,nodev"));
 
     for (var i = 0; i < vec_len(overlays); i = i + 1) {
         var cmd = safe_cmd_new(str_from("mount"));
@@ -116,6 +121,7 @@ fn unlock_luks(encrypted_device, mapped_name) {
     safe_cmd_add_arg(cmd, str_from("0"));
     safe_cmd_add_arg(cmd, str_from("--tries"));
     safe_cmd_add_arg(cmd, str_from("1"));
+    safe_cmd_add_arg(cmd, str_from("--"));   # 1.16.1 audit B-11: positionals follow
     safe_cmd_add_arg(cmd, encrypted_device);
     safe_cmd_add_arg(cmd, mapped_name);
     vec_push(cmds, cmd);
@@ -123,10 +129,14 @@ fn unlock_luks(encrypted_device, mapped_name) {
     return cmds;
 }
 
+# 1.16.1 audit B-11: validates the name like unlock_luks (0 when invalid) and
+# ends option parsing before it, so no name can reach cryptsetup as an option.
 fn close_luks(mapped_name) {
+    if (validate_mapper_name(mapped_name) == 0) { return 0; }
     var cmds = vec_new();
     var cmd = safe_cmd_new(str_from("cryptsetup"));
     safe_cmd_add_arg(cmd, str_from("close"));
+    safe_cmd_add_arg(cmd, str_from("--"));
     safe_cmd_add_arg(cmd, mapped_name);
     vec_push(cmds, cmd);
     return cmds;
@@ -165,7 +175,21 @@ fn execute_edge_boot(config, root_device, hash_device, root_hash, luks_device) {
 
     # Step 2: dm-verity
     sakshi_info("dm-verity", 9);
-    if (str_len(root_device) > 0 && str_len(hash_device) > 0 && str_len(root_hash) > 0) {
+    # 1.16.1 audit B-6: verity is requested by supplying its inputs, so SOME
+    # but not all of them is a misconfiguration to report, not a reason to
+    # skip verification silently. It fails like any other verity failure.
+    var verity_given = 0;
+    if (str_len(root_device) > 0) { verity_given = verity_given + 1; }
+    if (str_len(hash_device) > 0) { verity_given = verity_given + 1; }
+    if (str_len(root_hash) > 0) { verity_given = verity_given + 1; }
+    if (verity_given > 0 && verity_given < 3) {
+        vec_push(load64(result + 40), str_from("dm-verity inputs incomplete"));
+        store64(result + 24, monotonic_ms() - start);
+        var wbp = load64(result + 24) <= load64(config + 24);
+        store64(result + 32, wbp);
+        return result;
+    }
+    if (verity_given == 3) {
         var verity_cmds = verify_rootfs_integrity(root_device, hash_device, root_hash);
         if (verity_cmds == 0) {
             vec_push(load64(result + 40), str_from("dm-verity validation failed"));
@@ -186,17 +210,24 @@ fn execute_edge_boot(config, root_device, hash_device, root_hash, luks_device) {
     }
 
     # Step 3: LUKS unlock
+    # 1.16.1 audit B-6: luks_unlocked means a volume WAS unlocked. It used to
+    # be 1 whenever no unlock was attempted — LUKS disabled, or enabled with
+    # no device — and fleet_registration_from_system reported that as
+    # luks_active=1. Enabled without a device is now an error, and disabled is
+    # simply 0.
     sakshi_info("luks", 4);
     var luks_enabled = load64(config + 8);
-    if (luks_enabled && str_len(luks_device) > 0) {
-        var luks_cmds = unlock_luks(luks_device, str_from("agnos-data"));
-        if (luks_cmds != 0 && run_safe_cmd_sequence(luks_cmds) == 0) {
-            store64(result + 16, 1);
+    if (luks_enabled) {
+        if (str_len(luks_device) == 0) {
+            vec_push(load64(result + 40), str_from("LUKS enabled but no device configured"));
         } else {
-            vec_push(load64(result + 40), str_from("LUKS unlock failed"));
+            var luks_cmds = unlock_luks(luks_device, str_from("agnos-data"));
+            if (luks_cmds != 0 && run_safe_cmd_sequence(luks_cmds) == 0) {
+                store64(result + 16, 1);
+            } else {
+                vec_push(load64(result + 40), str_from("LUKS unlock failed"));
+            }
         }
-    } else {
-        store64(result + 16, 1);
     }
 
     # Step 4: Boot time budget
@@ -224,11 +255,10 @@ fn parse_meminfo_total_mb() {
     var needle_len = 9;
     for (var i = 0; i < n - needle_len; i = i + 1) {
         var found = 1;
-        for (var j = 0; j < needle_len; j = j + 1) {
-            if (load8(buf + i + j) != load8(needle + j)) {
-                found = 0;
-                break;
-            }
+        var j = 0;
+        while (found == 1 && j < needle_len) {
+            if (load8(buf + i + j) != load8(needle + j)) { found = 0; }
+            j = j + 1;
         }
         if (found) {
             # Skip whitespace after "MemTotal:"
@@ -319,7 +349,7 @@ fn fleet_registration_from_system(boot_result) {
 
     store64(reg + 16, str_from("edge"));
     store64(reg + 24, load64(boot_result + 8));   # verity_active
-    store64(reg + 32, load64(boot_result + 16));   # luks_active
+    store64(reg + 32, load64(boot_result + 16));   # luks_active: an actual unlock (B-6)
 
     # Read kernel version
     n = file_read_all("/proc/version", &buf, 255);

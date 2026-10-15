@@ -155,10 +155,14 @@ fn is_hex64(s) {
 # [a-zA-Z0-9_-]{1,32} — same predicate yukti uses for sysfs basenames.
 # Defends LUKS open against control-byte / slash injection in the
 # /dev/mapper/<name> path. (LOW-1.)
+# 1.16.1 audit B-11: and never a leading '-', which cryptsetup would parse as
+# an option ("--help", "-q"). The argv also ends options with "--".
 fn validate_mapper_name(name) {
     var len = str_len(name);
     if (len == 0 || len > 32) { return 0; }
     var data = str_data(name);
+    if (load8(data) == 45) { return 0; }   # '-'
+
     for (var i = 0; i < len; i = i + 1) {
         var c = load8(data + i);
         var ok = 0;

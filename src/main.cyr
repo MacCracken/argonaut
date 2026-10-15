@@ -140,9 +140,16 @@ fn main() {
         # supervisor loop).
         if (pid1_harness_requested() == 1) {
             pid1_run_harness(init);
+            sys_sync();
             sys_reboot(RB_POWER_OFF);
             return 0;
         }
+
+        # 1.16.1 audit C-9: turn Ctrl-Alt-Del into a SIGINT to PID 1
+        # (LINUX_REBOOT_CMD_CAD_OFF = 0). Left on, the kernel reboots on the
+        # spot with no sync and this loop never hears about it; off, SIGINT
+        # arrives on the signalfd below and takes the clean reboot path.
+        sys_reboot(0);
 
         # Block SIGTERM + SIGINT + SIGCHLD so they're delivered via
         # signalfd rather than as async handlers (which are tricky
@@ -160,18 +167,39 @@ fn main() {
         # reading fd -1 with the shutdown signals masked — an unkillable PID 1
         # that never powers off. Unblock and fail loudly instead of silently
         # becoming unresponsive.
+        # 1.16.1 audit C-9: and never return. PID 1 returning from main is a
+        # kernel panic (a kernel built without CONFIG_SIGNALFD hit this on
+        # every boot). Without a signalfd there is no clean shutdown, but
+        # orphans are still reaped and the system stays up.
         if (sfd < 0) {
             println("argonaut: signalfd failed — cannot supervise; unblocking signals");
             sys_sigprocmask(SIG_UNBLOCK, sigset, 0);
-            return 1;
+            while (1 == 1) {
+                init_reap_services(init);
+                sleep_ms(1000);
+            }
         }
 
         println("argonaut: pid1 loop ready");
 
+        # 1.16.1 audit P-3: sleep in poll until a signal arrives (no timeout)
+        # instead of waking every 100 ms. SIGCHLD is what makes reaping due,
+        # and it reaches PID 1 for reparented orphans too, so an idle system
+        # wakes PID 1 zero times, and an exit or a SIGTERM is handled at once
+        # rather than up to 100 ms later.
         var siginfo = alloc(128);         # struct signalfd_siginfo
+        var spfd = alloc(8);              # struct pollfd for sfd
+        var reboot_cmd = RB_POWER_OFF;
         var loop = 1;
         while (loop == 1) {
             init_reap_services(init);
+            # One sweep collects at most 256 orphans, and pending SIGCHLDs
+            # coalesce into one signal, so a full sweep may have left zombies
+            # that no further signal will announce. Sweep until one comes
+            # back short.
+            while (init_last_orphan_count() >= 256) {
+                init_reap_services(init);
+            }
             # Drain any pending signals from the signalfd
             # (non-blocking; -1 / EAGAIN on empty is fine).
             var draining = 1;
@@ -182,18 +210,28 @@ fn main() {
                 } else {
                     var sig = load32(siginfo);
                     if (sig == SIGTERM) { loop = 0; }
-                    if (sig == SIGINT)  { loop = 0; }
+                    # SIGINT is the kernel's Ctrl-Alt-Del (see CAD_OFF above):
+                    # reboot, as Ctrl-Alt-Del did before, but cleanly.
+                    if (sig == SIGINT) {
+                        loop = 0;
+                        reboot_cmd = RB_AUTOBOOT;
+                    }
                     # SIGCHLD: nothing extra — next loop iter
                     # already calls init_reap_services.
                 }
             }
             if (loop == 1) {
-                sleep_ms(100);
+                store32(spfd, sfd);
+                store16(spfd + 4, 1);     # POLLIN
+                store16(spfd + 6, 0);
+                ag_sys_poll(spfd, 1, 0 - 1);
             }
         }
 
         println("argonaut: pid1 shutdown clean");
-        sys_reboot(RB_POWER_OFF);
+        # 1.16.1 audit C-9: flush filesystem buffers before the power goes.
+        sys_sync();
+        sys_reboot(reboot_cmd);
         return 0;
     }
 

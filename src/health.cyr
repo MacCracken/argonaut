@@ -258,11 +258,13 @@ fn check_command(cmd_str, timeout_ms) {
     store8((&_HC_CMD_BUF) + slen, 0);
 
     # Split in place: each word becomes its own NUL-terminated C string.
+    # (A `continue`, not a `break`, ends the loop on trailing spaces: this loop
+    # declares a `var`, where `break` is unreliable — 1.16.1 audit cleanup.)
     var nwords = 0;
     var i = 0;
     while (i < slen) {
         while (i < slen && load8((&_HC_CMD_BUF) + i) == 32) { i = i + 1; }
-        if (i >= slen) { break; }
+        if (i >= slen) { continue; }
         # ⚠ REFUSE, DO NOT TRUNCATE. 1.14.0.
         #
         # This was `while (i < slen && nwords < 16)`, which silently DROPPED
@@ -328,12 +330,142 @@ fn health_result_new(service, check_type_str, passed, latency, message) {
     return result;
 }
 
+# ⚠ CONSTANT RESULT STRINGS ARE BOXED ONCE. 1.16.1 audit (perf).
+#
+# Every check used to `str_from` its type label and its fixed message on every
+# call: 32 of the 80 bytes a TCP tick allocated, once per health poll per
+# service on PID 1's reactor path, in an arena init never resets. A Str over a
+# string literal is immutable, so each one is boxed on first use and shared by
+# every result after it. The result struct itself is still fresh per call — the
+# health history ring keeps it.
+var _HC_CONST[32];
+
+enum HcConst {
+    HCS_TYPE_HTTP = 0;
+    HCS_TYPE_TCP = 1;
+    HCS_TYPE_COMMAND = 2;
+    HCS_TYPE_PROC = 3;
+    HCS_TYPE_UNKNOWN = 4;
+    HCS_NO_TARGET = 5;
+    HCS_TCP_PORT = 6;
+    HCS_TCP_NORESOLVE = 7;
+    HCS_TCP_OK = 8;
+    HCS_TCP_FAIL = 9;
+    HCS_PROC_DEAD = 10;
+    HCS_CMD_FAIL = 11;
+    HCS_HTTP_SCHEME = 12;
+    HCS_HTTP_PORT_BAD = 13;
+    HCS_HTTP_PORT_RANGE = 14;
+    HCS_HTTP_PATH = 15;
+    HCS_HTTP_HOST_BYTE = 16;
+    HCS_HTTP_NORESOLVE = 17;
+    HCS_HTTP_WRITE = 18;
+    HCS_HTTP_INVALID = 19;
+    HCS_HTTP_READ = 20;
+    HCS_HTTP_TIMEOUT = 21;
+    HCS_HTTP_SOCKET = 22;
+}
+
+fn _hc_const(slot, cstr) {
+    var s = load64((&_HC_CONST) + slot * 8);
+    if (s == 0) {
+        s = str_from(cstr);
+        store64((&_HC_CONST) + slot * 8, s);
+    }
+    return s;
+}
+
+fn _hc_type_label(check_type) {
+    var slot = HCS_TYPE_UNKNOWN;
+    if (check_type == HC_HTTP_GET) { slot = HCS_TYPE_HTTP; }
+    if (check_type == HC_TCP_CONNECT) { slot = HCS_TYPE_TCP; }
+    if (check_type == HC_COMMAND) { slot = HCS_TYPE_COMMAND; }
+    if (check_type == HC_PROCESS_ALIVE) { slot = HCS_TYPE_PROC; }
+    return _hc_const(slot, health_check_type_str(check_type));
+}
+
+# A failed result with a constant message, for the early exits (latency 0).
+fn _hc_fail(service_name, check_type, slot, cstr) {
+    return health_result_new(service_name, _hc_type_label(check_type), 0, 0,
+      _hc_const(slot, cstr));
+}
+
+# "HTTP <code>" for a parsed status (0..999), boxed once per code in a table
+# allocated on first use; same reasoning as `_HC_CONST`.
+var _hc_status_msgs = 0;
+
+fn _hc_status_msg(code) {
+    if (_hc_status_msgs == 0) {
+        _hc_status_msgs = alloc(1000 * 8);
+        memset(_hc_status_msgs, 0, 1000 * 8);
+    }
+    var s = load64(_hc_status_msgs + code * 8);
+    if (s == 0) {
+        var msb = str_builder_new();
+        str_builder_add_cstr(msb, "HTTP ");
+        str_builder_add_int(msb, code);
+        s = str_builder_build(msb);
+        store64(_hc_status_msgs + code * 8, s);
+    }
+    return s;
+}
+
+# The HTTP arm's host and path, and its request, without a per-call
+# allocation: two Str boxes rewritten in place over the URL's own bytes (the
+# `_hc_str` pattern), and one builder whose length is reset each call — it
+# grows once, to the longest request seen, and is written straight to the
+# socket. Nothing retains any of the three past the call.
+var _HC_HOST_VIEW = 0;
+var _HC_PATH_VIEW = 0;
+var _HC_REQ_SB = 0;
+
+fn _hc_view(box, p, n) {
+    if (box == 0) { return str_new(p, n); }
+    store64(box, p);
+    store64(box + 8, n);
+    return box;
+}
+
+# max(0, deadline - now): what is left of one check's budget.
+fn _hc_left(deadline) {
+    var left = deadline - monotonic_ms();
+    if (left < 0) { return 0; }
+    return left;
+}
+
+# 1.16.1 audit A-5: 1 if the URL path can go into the request line as it is.
+# A byte <= 0x20 (CR, LF, space, tab, NUL, ...) or DEL would end or split the
+# request line: `/a HTTP/1.0\r\nX-Injected: yes` sent a header of the
+# config's choosing. Same rule as `sanitize_host_for_header`, plus the space.
+fn _hc_path_ok(p, n) {
+    for (var i = 0; i < n; i = i + 1) {
+        var c = load8(p + i);
+        if (c <= 32) { return 0; }
+        if (c == 127) { return 0; }
+    }
+    return 1;
+}
+
 fn execute_health_check(service_name, hc, pid) {
     var start = monotonic_ms();
     var check_type = load64(hc);      # HealthCheckType
     var target = load64(hc + 8);      # Str ptr
     var port = load64(hc + 16);
     var timeout = load64(hc + 32);    # timeout_ms
+
+    # 1.16.1 audit A-6: `timeout <= 0` is the 2000 ms default, as
+    # `check_command` already does. A negative value reached `ag_sys_poll` as
+    # "no timeout", so a TCP connect to a host that drops SYN, or an HTTP peer
+    # that accepts and never answers, held PID 1's reactor indefinitely; 0
+    # failed almost every check.
+    if (timeout <= 0) { timeout = 2000; }
+
+    # 1.16.1 audit A-1: ONE deadline for the whole check. The HTTP arm handed
+    # the full `timeout` to the connect and to every poll in its read loop, so
+    # a peer dripping a byte every (timeout - e) ms without a newline held the
+    # caller for up to ~512 x timeout — measured: a 200 ms check held 2,252 ms
+    # and then reported PASSED. Every wait now gets only what is left.
+    var deadline = start + timeout;
 
     var passed = 0;
     var message = 0;
@@ -347,9 +479,8 @@ fn execute_health_check(service_name, hc, pid) {
     # target is a check that FAILS.
     if (check_type != HC_PROCESS_ALIVE) {
         if (target == 0) {
-            return health_result_new(service_name,
-              str_from(health_check_type_str(check_type)), 0, 0,
-              str_from("health check: no target configured"));
+            return _hc_fail(service_name, check_type, HCS_NO_TARGET,
+              "health check: no target configured");
         }
     }
 
@@ -362,27 +493,33 @@ fn execute_health_check(service_name, hc, pid) {
         # **LOW-1 (1.5.5 audit):** pre-resolve once and dispatch to
         # `tcp_connect_ip` with the resolved value rather than letting
         # `check_tcp_connect` re-resolve internally.
-        var tcp_ip = resolve_host_ipv4(target);
-        if (tcp_ip < 0) {
-            passed = 0;
-            message = str_from("TCP check: host did not resolve");
+        # 1.16.1 audit A-7: the port is range-checked like the HTTP arm's.
+        # `connect_bounded` keeps only its low 16 bits, so 70000 probed 4464
+        # and 0 / -1 probed ports nobody configured.
+        if (port < 1 || port > 65535) {
+            message = _hc_const(HCS_TCP_PORT, "TCP check: port out of range");
         } else {
-            passed = tcp_connect_ip(tcp_ip, port, timeout);
-            if (passed) {
-                message = str_from("TCP connect succeeded");
+            var tcp_ip = resolve_host_ipv4(target);
+            if (tcp_ip < 0) {
+                message = _hc_const(HCS_TCP_NORESOLVE, "TCP check: host did not resolve");
             } else {
-                message = str_from("TCP connect failed");
+                passed = tcp_connect_ip(tcp_ip, port, _hc_left(deadline));
+                if (passed) {
+                    message = _hc_const(HCS_TCP_OK, "TCP connect succeeded");
+                } else {
+                    message = _hc_const(HCS_TCP_FAIL, "TCP connect failed");
+                }
             }
         }
     } elif (check_type == HC_PROCESS_ALIVE) {
         passed = check_process_alive(pid);
         if (passed == 0) {
-            message = str_from("process not alive");
+            message = _hc_const(HCS_PROC_DEAD, "process not alive");
         }
     } elif (check_type == HC_COMMAND) {
         passed = check_command(target, timeout);
         if (passed == 0) {
-            message = str_from("command check failed");
+            message = _hc_const(HCS_CMD_FAIL, "command check failed");
         }
     } elif (check_type == HC_HTTP_GET) {
         # HTTP GET: connect, send GET request, validate status line
@@ -393,37 +530,62 @@ fn execute_health_check(service_name, hc, pid) {
         # 2026-08-24 audit HIGH-1: this used to `return 0` — a NULL pointer —
         # while every other path in this function returns a
         # HealthCheckResult. Both callers dereference immediately
-        # (`load64(result + 16)` at :468 below and src/init.cyr:676), so an
-        # https:// / HTTP:// / bare host:port target read address 0x10 during
-        # the health pass. Under PID 1 that is a kernel panic. An
+        # (`load64(result + 16)` in `execute_ready_check` and src/init.cyr), so
+        # an https:// / HTTP:// / bare host:port target read address 0x10
+        # during the health pass. Under PID 1 that is a kernel panic. An
         # unsupported scheme is a check that FAILS, not one that returns
         # nothing.
-        if (str_starts_with(target, "http://") == 0) {
-            return health_result_new(service_name,
-              str_from(health_check_type_str(check_type)), 0, 0,
-              str_from("HTTP check: unsupported scheme (only http:// is supported)"));
+        # Compared in place: a literal passed as a `: Str` argument is boxed
+        # in a fresh Str on every call (16 B per tick).
+        var scheme_ok = 0;
+        if (url_len >= 7) { scheme_ok = memeq(url_data, "http://", 7); }
+        if (scheme_ok == 0) {
+            return _hc_fail(service_name, check_type, HCS_HTTP_SCHEME,
+              "HTTP check: unsupported scheme (only http:// is supported)");
         }
         var offset = 7;
-        # Parse host and port
+        # Parse host and port: the first ':' before the first '/'.
         var colon_pos = 0 - 1;
         var slash_pos = url_len;
-        for (var i = offset; i < url_len; i = i + 1) {
-            var c = load8(url_data + i);
-            if (c == 58 && colon_pos < 0) { colon_pos = i; }
-            if (c == 47) { slash_pos = i; break; }
+        var ui = offset;
+        while (ui < url_len) {
+            var c = load8(url_data + ui);
+            if (c == 58 && colon_pos < 0) { colon_pos = ui; }
+            if (c == 47) {
+                slash_pos = ui;
+                ui = url_len;
+            } else {
+                ui = ui + 1;
+            }
         }
         var http_port = 80;
         var host_end = slash_pos;
         if (colon_pos > 0) {
             host_end = colon_pos;
+            # 1.16.1 audit A-7: everything between ':' and the path is the
+            # port, digits only. The parser used to stop at the first
+            # non-digit, so `:8080abc` probed 8080, and it fed `str_to_int`,
+            # which wraps silently: a 20-digit run equal to 2^64 + p probed p.
+            # An empty port keeps the default 80, as RFC 3986 allows.
             var port_start = colon_pos + 1;
-            var port_end = port_start;
-            while (port_end < slash_pos && load8(url_data + port_end) >= 48 && load8(url_data + port_end) <= 57) {
-                port_end = port_end + 1;
+            var ndigits = slash_pos - port_start;
+            var port_val = 0;
+            var port_ok = 1;
+            for (var qi = port_start; qi < slash_pos; qi = qi + 1) {
+                var pc = load8(url_data + qi);
+                if (pc < 48) { port_ok = 0; }
+                if (pc > 57) { port_ok = 0; }
+                if (ndigits <= 5) { port_val = port_val * 10 + (pc - 48); }
             }
-            if (port_end > port_start) {
-                http_port = str_to_int(str_new(url_data + port_start, port_end - port_start));
+            if (port_ok == 0) {
+                return _hc_fail(service_name, check_type, HCS_HTTP_PORT_BAD,
+                  "HTTP check: invalid port");
             }
+            if (ndigits > 5) {
+                return _hc_fail(service_name, check_type, HCS_HTTP_PORT_RANGE,
+                  "HTTP check: port out of range");
+            }
+            if (ndigits > 0) { http_port = port_val; }
         }
 
         # LOW-2 (1.5.5 audit): reject ports outside the valid TCP
@@ -431,16 +593,23 @@ fn execute_health_check(service_name, hc, pid) {
         # clear "port out of range" message instead of a silent
         # connect failure on a wraparound port.
         if (http_port < 1 || http_port > 65535) {
-            return health_result_new(service_name,
-              str_from(health_check_type_str(check_type)), 0, 0,
-              str_from("HTTP check: port out of range"));
+            return _hc_fail(service_name, check_type, HCS_HTTP_PORT_RANGE,
+              "HTTP check: port out of range");
+        }
+
+        # The path goes into the request line verbatim (1.16.1 audit A-5).
+        var path_len = url_len - slash_pos;
+        if (_hc_path_ok(url_data + slash_pos, path_len) == 0) {
+            return _hc_fail(service_name, check_type, HCS_HTTP_PATH,
+              "HTTP check: path has invalid byte");
         }
 
         # H1 (closed 1.5.2): resolve the configured host via
         # `resolve_host_ipv4`. Unresolvable inputs short-circuit with
         # a clear message rather than the silent-localhost fallback
         # that shipped pre-1.4.0.
-        var host_str = str_new(url_data + offset, host_end - offset);
+        var host_str = _hc_view(_HC_HOST_VIEW, url_data + offset, host_end - offset);
+        _HC_HOST_VIEW = host_str;
 
         # LOW-3 (1.5.5 audit): defense-in-depth — block CRLF / NUL /
         # control bytes from reaching the `Host:` header builder.
@@ -448,30 +617,22 @@ fn execute_health_check(service_name, hc, pid) {
         # refactor that skips the resolver shouldn't re-open the
         # injection class.
         if (sanitize_host_for_header(host_str) == 0) {
-            return health_result_new(service_name,
-              str_from(health_check_type_str(check_type)), 0, 0,
-              str_from("HTTP check: host has invalid byte"));
+            return _hc_fail(service_name, check_type, HCS_HTTP_HOST_BYTE,
+              "HTTP check: host has invalid byte");
         }
 
         var http_ip = resolve_host_ipv4(host_str);
         if (http_ip < 0) {
-            return health_result_new(service_name,
-              str_from(health_check_type_str(check_type)), 0, 0,
-              str_from("HTTP check: host did not resolve"));
+            return _hc_fail(service_name, check_type, HCS_HTTP_NORESOLVE,
+              "HTTP check: host did not resolve");
         }
 
-        # M2: heap-copy + NUL-terminate the path. The legacy code
-        # set `path` to a raw pointer into url_data, then passed it
-        # to str_builder_add_cstr which reads until NUL — undefined
-        # for Str-data pointers (not guaranteed NUL-terminated).
-        var path = "/";
-        var path_len = 1;
-        if (slash_pos < url_len) {
-            path_len = url_len - slash_pos;
-            var path_buf = alloc(path_len + 1);
-            memcpy(path_buf, url_data + slash_pos, path_len);
-            store8(path_buf + path_len, 0);
-            path = path_buf;
+        # M2: the path is measured, never read up to a NUL — a Str's bytes
+        # are not NUL-terminated at its length. An absent path is "/".
+        var path = 0;
+        if (path_len > 0) {
+            path = _hc_view(_HC_PATH_VIEW, url_data + slash_pos, path_len);
+            _HC_PATH_VIEW = path;
         }
 
         # ⚠ BOUNDED CONNECT — 1.13.10, kybernet audit MEDIUM-4. This was a
@@ -479,124 +640,123 @@ fn execute_health_check(service_name, hc, pid) {
         # caller for the kernel's whole SYN-retry window (~127 s) regardless of
         # `timeout_ms`. In kybernet the caller is PID 1's reactor. Shares one
         # implementation with `tcp_connect_ip` now so the two cannot drift.
-        var fd = connect_bounded(http_ip, http_port, timeout);
+        var fd = connect_bounded(http_ip, http_port, _hc_left(deadline));
         if (fd >= 0) {
-            var ret = 0;
-            if (ret == 0) {
-                # Send HTTP GET request. Host: header echoes the
-                # configured host (not hardcoded 127.0.0.1) so
-                # virtual-host servers route the request correctly.
-                var req_sb = str_builder_new();
-                str_builder_add_cstr(req_sb, "GET ");
-                str_builder_add_cstr(req_sb, path);
-                str_builder_add_cstr(req_sb, " HTTP/1.0\r\nHost: ");
-                str_builder_add(req_sb, host_str);
-                str_builder_add_cstr(req_sb, "\r\nConnection: close\r\n\r\n");
-                var req = str_builder_build(req_sb);
-                var req_data = str_data(req);
-                var req_len = str_len(req);
-                # 2026-08-24 audit LOW-3: check the write. A short or failed
-                # write used to fall through to the poll below and surface as
-                # "HTTP response timeout", blaming the peer for a local error.
-                var wrote = sys_write(fd, req_data, req_len);
-                if (wrote != req_len) {
-                    message = str_from("HTTP request write failed");
-                    sys_close(fd);
-                    return health_result_new(service_name,
-                      str_from(health_check_type_str(check_type)), 0, 0, message);
-                }
+            # Send HTTP GET request. Host: header echoes the
+            # configured host (not hardcoded 127.0.0.1) so
+            # virtual-host servers route the request correctly.
+            if (_HC_REQ_SB == 0) { _HC_REQ_SB = str_builder_new(); }
+            var req_sb = _HC_REQ_SB;
+            # Empty the reused builder. The stdlib has no clear call; a
+            # str_builder keeps its buffer at +0, length at +8 and capacity at
+            # +16 (lib/str.cyr), and the request below is written straight
+            # from +0 / +8, so no Str is built per check.
+            store64(req_sb + 8, 0);
+            str_builder_add_cstr(req_sb, "GET ");
+            if (path == 0) { str_builder_add_cstr(req_sb, "/"); }
+            else { str_builder_add(req_sb, path); }
+            str_builder_add_cstr(req_sb, " HTTP/1.0\r\nHost: ");
+            str_builder_add(req_sb, host_str);
+            str_builder_add_cstr(req_sb, "\r\nConnection: close\r\n\r\n");
+            var req_data = load64(req_sb);
+            var req_len = load64(req_sb + 8);
+            # 2026-08-24 audit LOW-3: check the write. A short or failed
+            # write used to fall through to the poll below and surface as
+            # "HTTP response timeout", blaming the peer for a local error.
+            var wrote = sys_write(fd, req_data, req_len);
+            if (wrote != req_len) {
+                sys_close(fd);
+                return _hc_fail(service_name, check_type, HCS_HTTP_WRITE,
+                  "HTTP request write failed");
+            }
 
-                # Read response (just need status line)
-                var resp[512];
-                # Poll for data with timeout
-                var pfd[8];
-                store32(&pfd, fd);
-                store16(&pfd + 4, 1);  # POLLIN
-                store16(&pfd + 6, 0);
-                var poll_ret = ag_sys_poll(&pfd, 1, timeout);
-                if (poll_ret > 0) {
-                    # 2026-08-24 audit LOW-3: a single read() assumed the whole
-                    # status line arrived in one segment. A server that splits
-                    # "HTTP/1.1 200 OK" across TCP segments returned n < 12 and
-                    # was reported as an "invalid HTTP response" — a FALSE
-                    # negative that restarts a healthy service under PID 1.
-                    # Keep reading until the status line is complete (CR/LF
-                    # seen, or enough bytes to hold a code), the peer closes,
-                    # or the poll budget is spent.
-                    var n = 0;
-                    var reading = 1;
-                    while (reading == 1) {
-                        var got = sys_read(fd, &resp + n, 511 - n);
-                        if (got <= 0) { reading = 0; }
+            # Read response (just need status line)
+            var resp[512];
+            # Poll for data, inside what is left of the budget.
+            var pfd[8];
+            store32(&pfd, fd);
+            store16(&pfd + 4, 1);  # POLLIN
+            store16(&pfd + 6, 0);
+            var poll_ret = ag_sys_poll(&pfd, 1, _hc_left(deadline));
+            if (poll_ret > 0) {
+                # 2026-08-24 audit LOW-3: a single read() assumed the whole
+                # status line arrived in one segment. A server that splits
+                # "HTTP/1.1 200 OK" across TCP segments returned n < 12 and
+                # was reported as an "invalid HTTP response" — a FALSE
+                # negative that restarts a healthy service under PID 1.
+                # Keep reading until the status line is complete (CR/LF
+                # seen, or enough bytes to hold a code), the peer closes,
+                # or the poll budget is spent.
+                # A budget spent before the line completes is a timeout and a
+                # FAILED check (1.16.1 audit A-1), not a parse of whatever had
+                # dribbled in by then.
+                var n = 0;
+                var reading = 1;
+                var timed_out = 0;
+                while (reading == 1) {
+                    var got = sys_read(fd, &resp + n, 511 - n);
+                    if (got <= 0) { reading = 0; }
+                    else {
+                        n = n + got;
+                        if (n >= 511) { reading = 0; }
                         else {
-                            n = n + got;
-                            if (n >= 511) { reading = 0; }
+                            var saw_eol = 0;
+                            for (var ri = 0; ri < n; ri = ri + 1) {
+                                if (load8(&resp + ri) == 10) { saw_eol = 1; }
+                            }
+                            if (saw_eol == 1) { reading = 0; }
                             else {
-                                var saw_eol = 0;
-                                for (var ri = 0; ri < n; ri = ri + 1) {
-                                    if (load8(&resp + ri) == 10) { saw_eol = 1; }
-                                }
-                                if (saw_eol == 1) { reading = 0; }
-                                else {
-                                    var pr = ag_sys_poll(&pfd, 1, timeout);
-                                    if (pr <= 0) { reading = 0; }
-                                }
+                                var pr = ag_sys_poll(&pfd, 1, _hc_left(deadline));
+                                if (pr == 0) { timed_out = 1; }
+                                if (pr <= 0) { reading = 0; }
                             }
                         }
                     }
-                    if (n > 0) {
-                        store8(&resp + n, 0);
-                        # L5: parse status by finding the first space
-                        # rather than hardcoding offsets 9-11. Handles
-                        # any HTTP/x.y prefix length without misreading.
-                        if (n >= 12 && load8(&resp) == 72 && load8(&resp + 1) == 84) {
-                            var status_code = 0;
-                            var sp = 0 - 1;
-                            for (var si = 0; si < n; si = si + 1) {
-                                if (load8(&resp + si) == 32) { sp = si; break; }
-                            }
-                            if (sp >= 0 && sp + 3 < n) {
-                                var d0 = load8(&resp + sp + 1) - 48;
-                                var d1 = load8(&resp + sp + 2) - 48;
-                                var d2 = load8(&resp + sp + 3) - 48;
-                                if (d0 >= 0 && d0 <= 9 && d1 >= 0 && d1 <= 9 && d2 >= 0 && d2 <= 9) {
-                                    status_code = d0 * 100 + d1 * 10 + d2;
-                                }
-                            }
-                            if (status_code >= 200 && status_code < 400) {
-                                passed = 1;
-                                var msb = str_builder_new();
-                                str_builder_add_cstr(msb, "HTTP ");
-                                str_builder_add_int(msb, status_code);
-                                message = str_builder_build(msb);
-                            } else {
-                                var msb = str_builder_new();
-                                str_builder_add_cstr(msb, "HTTP ");
-                                str_builder_add_int(msb, status_code);
-                                message = str_builder_build(msb);
-                            }
-                        } else {
-                            message = str_from("invalid HTTP response");
+                }
+                if (timed_out == 1) {
+                    message = _hc_const(HCS_HTTP_TIMEOUT, "HTTP response timeout");
+                } elif (n > 0) {
+                    store8(&resp + n, 0);
+                    # L5: parse status by finding the first space
+                    # rather than hardcoding offsets 9-11. Handles
+                    # any HTTP/x.y prefix length without misreading.
+                    if (n >= 12 && load8(&resp) == 72 && load8(&resp + 1) == 84) {
+                        var status_code = 0;
+                        var sp = 0 - 1;
+                        for (var si = 0; si < n; si = si + 1) {
+                            if (sp < 0 && load8(&resp + si) == 32) { sp = si; }
                         }
+                        if (sp >= 0 && sp + 3 < n) {
+                            var d0 = load8(&resp + sp + 1) - 48;
+                            var d1 = load8(&resp + sp + 2) - 48;
+                            var d2 = load8(&resp + sp + 3) - 48;
+                            if (d0 >= 0 && d0 <= 9 && d1 >= 0 && d1 <= 9 && d2 >= 0 && d2 <= 9) {
+                                status_code = d0 * 100 + d1 * 10 + d2;
+                            }
+                        }
+                        if (status_code >= 200 && status_code < 400) {
+                            passed = 1;
+                        }
+                        message = _hc_status_msg(status_code);
                     } else {
-                        message = str_from("HTTP read failed");
+                        message = _hc_const(HCS_HTTP_INVALID, "invalid HTTP response");
                     }
                 } else {
-                    message = str_from("HTTP response timeout");
+                    message = _hc_const(HCS_HTTP_READ, "HTTP read failed");
                 }
             } else {
-                message = str_from("HTTP connect failed");
+                message = _hc_const(HCS_HTTP_TIMEOUT, "HTTP response timeout");
             }
             sys_close(fd);
         } else {
-            message = str_from("HTTP socket failed");
+            message = _hc_const(HCS_HTTP_SOCKET, "HTTP socket failed");
         }
     }
 
     var latency = monotonic_ms() - start;
 
-    var result = health_result_new(service_name,
-      str_from(health_check_type_str(check_type)), passed, latency, message);
+    var result = health_result_new(service_name, _hc_type_label(check_type),
+      passed, latency, message);
 
     # Trace result
     if (passed) {
@@ -652,7 +812,14 @@ fn execute_ready_check(service_name, rc, pid) {
         }
 
         if (attempt < retries) {
-            sleep_ms(retry_delay);
+            # 1.16.1 audit A-1: the pause between attempts comes out of the
+            # same overall budget. It slept the whole `retry_delay` even when
+            # less than that was left, so a 300 ms ready check with a 2 s
+            # delay answered "timed out" after 2 s.
+            var nap = retry_delay;
+            var left = timeout - (monotonic_ms() - overall_start);
+            if (nap > left) { nap = left; }
+            sleep_ms(nap);
         }
     }
 

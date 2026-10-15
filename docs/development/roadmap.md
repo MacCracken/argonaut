@@ -7,18 +7,43 @@ work only.
 
 ---
 
+## Toolchain — holding at cyrius 6.7.9
+
+**The pin stays at cyrius 6.7.9 (libro 2.11.0) until further cyrius releases.**
+The next move starts from cyrius's `docs/development/ecosystem-migration.md`,
+at its 6.7.10 section, and from libro's release that matches the new fold.
+
+Checklist for that move (each step was needed at 1.15.5 or 1.16.0):
+
+- [ ] Read the migration notes for every release in range. List the changes that
+      alter what already-compiling code computes, and scan `src/` and `tests/` for
+      each shape with comments and strings stripped. A green suite proves nothing
+      about them; the method is in CHANGELOG [1.16.0] Audited.
+- [ ] Move `cyrius` in `cyrius.cyml` and `qemu/helpers/cyrius.cyml`, and `[deps.libro]`.
+- [ ] **Delete `cyrius.lock` and `lib/` before `cyrius deps`.** Otherwise old commit
+      pins and leaves the new toolchain no longer needs survive into the lock.
+- [ ] Check every resolved library against its upstream tag byte-for-byte.
+- [ ] Re-cut the qemu L3 helper (`qemu/helpers/`), then delete the `cyrius.lock`
+      its resolve writes.
+- [ ] **Re-check the two stdlib layouts argonaut reads directly** (`state.md`
+      Toolchain): hashmap entry slots walked in `src/init.cyr`, and the
+      `str_builder` length that `src/health.cyr` resets.
+- [ ] Re-check `src/syscall_compat.cyr`. When the stdlib gains a wrapper for
+      `getsockopt`, `getsid`, `setpgid` or `clock_gettime`, move to it, with the
+      `qemu -strace` before/after check that 1.15.6–1.16.1 used.
+- [ ] State the consumer floor. A consumer that compiles argonaut's `src/` needs
+      at least the toolchain argonaut's own calls require (≥ 6.6.8 today).
+- [ ] Run the full gates plus the bench gate against `1.16.1-audit-bench-streaming`.
+
+---
+
 ## Security enforcement — filed by the 2026-08-24 P(-1) audit
 
 **seccomp / Landlock / capabilities are modelled but NOT enforced.**
 `src/security.cyr` contains zero syscalls: it renders description strings
-and builds one `setpriv` SafeCommand that nothing executes. `svc_def_new`
-stores `0` for all three fields and no spawn path reads them. Every service
-`fork_exec_service` starts inherits PID 1's full root privileges.
-`docs/architecture/feature-gaps.md` claimed this was "Implemented (v0.9.0)
-… + agnosys integration" until 1.8.6 corrected it — wrong twice over, since
-agnosys was dropped from the dependency graph at 1.8.4.
-
-### Scope
+and builds one `setpriv` SafeCommand that nothing executes. No spawn path
+reads those fields, so every service `fork_exec_service` starts inherits
+PID 1's full root privileges.
 
 - [ ] **`PR_SET_NO_NEW_PRIVS` + seccomp BPF filter** applied in the
       `fork_exec_service` child between `reset_child_signal_mask()` and
@@ -27,12 +52,13 @@ agnosys was dropped from the dependency graph at 1.8.4.
 - [ ] **Landlock ruleset** (`landlock_create_ruleset` /
       `landlock_add_rule` / `landlock_restrict_self`) from the existing
       `LandlockConfig`.
-- [ ] **Capability drop + uid/gid switch.** Note the ordering trap: setgid
-      and setgroups must precede setuid, or the drop is incomplete. There
-      is currently no uid/gid field on `ServiceDef` — it needs one.
-- [ ] **cgroup membership** as the PID-identity invariant, closing the
-      PID-reuse window that audit MEDIUM-9 only narrows. Prerequisite for
-      trusting a PID across a signal.
+- [ ] **Capability drop + uid/gid switch.** Ordering trap: setgid and
+      setgroups must precede setuid, or the drop is incomplete. There is no
+      uid/gid field on `ServiceDef` yet.
+- [ ] **cgroup membership (or pidfd) as the PID-identity invariant.** This
+      closes the PID-reuse window between reading a PID and signalling it. The
+      2026-10-14 audit's B-1 closed the PID-file side (symlinks, FIFOs, loose
+      parsing); the reuse window is open by design until this lands.
 - [ ] Regression tests per mechanism, plus a qemu-harness assertion that a
       spawned service genuinely cannot perform a denied syscall.
 
@@ -40,163 +66,100 @@ Until this lands, **do not describe argonaut as sandboxing services.**
 
 ---
 
-## Current — v1.6.3 (shipped 2026-05-11) — 1.6.x arc CLOSED
+## Hardening follow-ups — from the 2026-10-14 audit
 
-L3 end-to-end lands via `qemu/helpers/l3-helper.cyr` — a 12 KB
-statically-linked cyrius helper that writes `sid=N pid=M\n` to
-`/l3.marker` via raw syscalls. No shell, no dyn-loader,
-sidesteps the busybox-shell blockers from 1.6.2. Spawned by
-`fork_exec_service`; the harness wrapper greps the marker +
-asserts `sid == pid` (proves setsid ran before exec). 1.6.x
-closeout P(-1) audit per CLAUDE.md procedure:
-**0 CRITICAL / 0 HIGH**; 2 MEDIUM closed with regression tests
-(`fork_exec_service` child inherited the PID-1 sigmask block;
-empty envp dropped PATH for spawned services); 3 LOW (1
-closed, 2 documented). Closes the 2026-04-26 audit's PID-1
-graduation re-audit trigger. See
-[CHANGELOG 1.6.3](../../CHANGELOG.md#163--2026-05-11) and
-[`docs/audit/2026-05-11-audit.md`](../audit/2026-05-11-audit.md).
+Deferred findings; details in [`docs/audit/2026-10-14-audit.md`](../audit/2026-10-14-audit.md).
 
-The 1.6.x arc is CLOSED for the PID-1 graduation theme: boot
-smoke (1.6.0), clean SIGTERM/SIGINT shutdown via signalfd
-(1.6.2), orphan reap under real-PID-1 reparenting (M3, 1.6.2),
-`fork_exec_service` controlling-TTY decoupling validated via
-setsid (L3, 1.6.3). The static helper pattern unlocks future
-end-to-end tests for any service-lifecycle behaviour that
-needs PID-1 validation.
+- [ ] **Ordered shutdown (C-8, LOW).** Today `init_stop_all` SIGTERMs everything
+      at once, leaves services RUNNING with stale pids, and writes no audit
+      record. kybernet builds `init_plan_shutdown` and then calls only this.
+      The proposed fix is an `init_execute_shutdown` that walks
+      `resolve_service_waves` in reverse:
+      - SIGTERM each wave, then reap it against one deadline per wave;
+      - SIGKILL stragglers;
+      - set every service STOPPED, audited;
+      - finish with a `proc_table_stop_all` sweep for untracked pids and an
+        audit flush.
 
-One arc-extension slot follows before 1.7.0: **1.6.4 — native
-aarch64 CI** (scope below). Manual real-hardware Pi smoke
-already validated via `scripts/aarch64-pi-smoke.sh` (added
-post-1.6.3) — argonaut runs cleanly on a real RPi4, init in
-~536 µs. CI is the durable form.
-
----
-
-## Next — v1.6.4 — Native aarch64 CI
-
-Theme: durable per-arch validation. The 1.5.4 qemu-user sweep
-(`scripts/aarch64-sweep.sh`) catches codegen regressions but
-not real-hardware behaviour (fork/setsid emulation gaps; the
-1.5.4-filed sigil Ed25519-aarch64 quirk reproduces under
-qemu-user but its real-hardware status is unknown). The
-1.6.3-shipped `scripts/aarch64-pi-smoke.sh` proves the
-real-hw path works end-to-end but is manual — a developer has
-to run it. CI makes it automatic per push.
-
-### Scope
-
-- [ ] **Native aarch64 GitHub Actions runner** — either
-  `ubuntu-24.04-arm` (GitHub-hosted, free for public repos
-  since 2024-09) or a self-hosted Raspberry Pi runner the
-  AGNOS infra fleet already runs for sibling repos. Decide
-  based on agnos / kybernet's choice; consistency across the
-  ecosystem outweighs per-repo optimization.
-- [ ] **CI job: aarch64 build + test sweep** — adds an
-  `aarch64-native` job to `.github/workflows/ci.yml`,
-  parallel to the existing x86_64 job. Builds via
-  `cycc_aarch64` (was `cc5_aarch64` pre-Cyrius-6.0), runs
-  the full `.tcyr` suite natively, runs
-  the qemu PID-1 harness if KVM is available (qemu-system-aarch64
-  + `-cpu host` on a real aarch64 host). No `qemu-user`
-  emulation — this is the real-arch coverage.
-- [ ] **`tests/tcyr/aarch64_findings.tcyr`** — new
-  arch-specific test file separate from `audit_findings.tcyr`
-  (which stays portable / arch-agnostic). Houses the
-  real-hw retest assertions for the 1.5.4-filed sigil Ed25519
-  aarch64 quirk and any other arch-gated findings as they
-  surface. Run by the native-aarch64 CI job and the manual
-  `scripts/aarch64-pi-smoke.sh`; skipped under x86_64 sweeps
-  (gated by a small arch probe at suite entry).
-- [ ] **Re-test the upstream sigil Ed25519 aarch64 quirk** on
-  real hardware — the 1.5.4-filed issue (`ed25519_verify`
-  accepts wrong pk on aarch64) was reproduced under qemu-user.
-  If real-hw passes, file an update against the sigil issue
-  ("qemu-user-only; real hardware clean") so sigil can scope
-  the fix accordingly. Test lives in
-  `tests/tcyr/aarch64_findings.tcyr`.
-- [ ] **Per-arch known-failure budget** — `scripts/aarch64-sweep.sh`
-  already has the budget pattern (KNOWN-FAIL accounting); the
-  native runner won't have the qemu-user emulation
-  exceptions (fork/setsid land cleanly on real hardware), so
-  the budget should be empty or near-empty. If a CI run
-  surfaces a real-arch-only failure, that's the signal to
-  file a new sigil / cyrius / libro issue and (if MEDIUM+)
-  add a regression assertion to `aarch64_findings.tcyr`.
-- [ ] **Release publish gate** — once the CI job is green,
-  flip `argonaut-<VER>-aarch64-linux` in release.yml from
-  "best-effort if `cycc_aarch64` exists" to "hard
-  requirement when the CI job passes" — every release ships
-  a tested aarch64 binary, not just a built one.
-
-### Out of scope
-
-- **Apple Silicon (Asahi Linux)**: same arch as the RPi but
-  different boot path; would be a third runner. Defer to
-  consumer demand.
-- **Cross-arch service exec testing**: argonaut is
-  always single-arch at runtime (supervisor is on one host;
-  it spawns services on the same host), so sign-on-aarch64 →
-  verify-on-x86_64 paths aren't reachable in production.
+      About 80–100 lines, plus a one-line change in kybernet.
+- [ ] **Emergency shell.**
+      - Replace `password_hash`'s unsalted single-round SHA-256 with a real KDF
+        (needs a dependency the thin sigil surface lacks).
+      - Revisit the `require_auth = 0` default. Deciding it needs the recovery
+        story, so the two travel together.
+- [ ] **Remove or rename the unauthenticated `notify_try_recv` / `notify_drain`.**
+      They skip the SO_PEERCRED check and cannot detect a truncated datagram.
+      No production caller.
+- [ ] **systemd unit generation:**
+      - `WatchdogSec=` is emitted even under `Type=simple`.
+      - An ExecStart binary beginning with `-`, `@`, `:`, `+` or `!` is read as
+        a systemd prefix; require an absolute path.
+- [ ] **tmpfiles natively.** 1.16.1 made the external commands symlink-safe
+      (`chown -h`, `ln -sfnT`). A native `mkdirat` / `openat(O_NOFOLLOW)` /
+      `fchown` / `fchmod` implementation removes the commands entirely.
+- [ ] **TPM PCR policy (CVE-2026-32606 class).** argonaut neither enrols nor
+      seals keys, so this is a kybernet enrolment question: check that its
+      policy cannot hand the LUKS key to a swapped root partition.
+- [ ] **PERF: audit only health transitions.** Every passing probe writes an
+      audit record (~4 µs and 16 B). Recording only pass↔fail changes would cut
+      that about 100×, but it changes what the audit log holds, so it needs a
+      decision first.
 
 ---
 
-## Open — gated on external work
+## Native aarch64 CI
 
-### Per-service env override
+The qemu-user sweep (`scripts/aarch64-sweep.sh`) catches codegen regressions,
+not real-hardware behaviour. `scripts/aarch64-pi-smoke.sh` proves the real-hardware
+path by hand (argonaut initialises in ~536 µs on an RPi4); CI would make it
+automatic. (The sigil Ed25519 aarch64 quirk this item once waited on was
+resolved upstream on 2026-05-21.)
 
-- [ ] **`fork_exec_service` map → flat-cstrs** — 1.6.3
-  shipped a default envp containing only PATH. Consumers
-  needing per-service env (HOME, locale, LD_LIBRARY_PATH, etc.)
-  surface a need for the full `svc_def_env` map → flat
-  `KEY=VAL` cstr conversion. Lands when the first such
-  consumer appears.
+- [ ] **A native aarch64 runner:** `ubuntu-24.04-arm` or a self-hosted Pi.
+      Choose to match agnos / kybernet.
+- [ ] **CI job:** an `aarch64-native` build and the full `.tcyr` suite, plus the
+      qemu PID-1 harness when KVM is available.
+- [ ] **Release gate:** once that job is green, the `argonaut-<VER>-aarch64-linux`
+      artifact becomes a hard requirement rather than best-effort.
 
-### Gated on external work
+---
 
-- [ ] **WitnessAnchor publishing** — libro's anchor primitive
-  for cross-snapshot trust pins. Gated on consumer demand +
-  AGNOS federation protocol (libro's own roadmap calls this
-  out under "Ecosystem-blocked").
-- [ ] **Durable signing-key rotation** — current 1.5.3 shape
-  generates ephemeral signing keys per `audit_log_keygen()`
-  call. Long-running supervisor sessions across boots want a
-  persisted key. Lands when kybernet wires a real
-  key-management surface; argonaut's API stays stable.
+## Gated on external work
+
+- [ ] **WitnessAnchor publishing** — libro's anchor primitive for
+      cross-snapshot trust pins. Gated on consumer demand and the AGNOS
+      federation protocol.
+- [ ] **Durable signing-key rotation** — `audit_log_keygen()` generates an
+      ephemeral key per call. Lands when kybernet has a key-management surface;
+      argonaut's API stays stable.
 
 ---
 
 ## Kybernet integration (separate repo)
 
-Tracked in [kybernet](https://github.com/MacCracken/kybernet). Argonaut
-keeps the API stable; consumer wiring is kybernet-side work per the
-project-boundaries rule. Argonaut 1.0+ exposes everything kybernet
-needs.
+Tracked in [kybernet](https://github.com/MacCracken/kybernet), which consumes
+argonaut's `src/` as a library. kybernet-side work follows the project-boundaries
+rule. Open items that involve argonaut:
 
-- [ ] Wire kybernet to `init_start_service` / `init_stop_service`
-- [ ] Wire kybernet to `boot_execution_plan_waves`
-- [ ] Wire kybernet to `init_plan_shutdown`
-- [ ] Seccomp/Landlock application in `pre_exec`
-- [ ] Control socket for agnoshi runtime commands
-- [ ] Real-hardware boot validation (RPi4, NUC)
+- [ ] **Take 1.16.x.** It needs cyrius ≥ 6.6.8 and a review of CHANGELOG
+      [1.16.1] Breaking (behaviour): start refusal, the 90 s start timeout, the
+      restart window, the reused `init_poll_health` result, the bounded HTTP
+      check and the strict PID-file reader.
+- [ ] Call the ordered shutdown once it lands (above), instead of `init_stop_all`.
+- [ ] Seccomp / Landlock application in `pre_exec`, with the enforcement work
+      above.
+- [ ] A control socket for agnoshi runtime commands.
+- [ ] Real-hardware boot validation (RPi4, NUC).
 
 ---
 
-## v1.0.0 Criteria — All Met (2026-04-12)
+## Hygiene
 
-Retained for historical context.
-
-- [x] All P0 / P1 library gaps closed
-- [x] API stable (ADR-012)
-- [x] 12 ADRs for major design decisions
-- [x] Security posture documented and reviewed
-- [x] QEMU boot: minimal < 3s (2.98s); desktop < 3s (2.9s with real daimon)
-- [x] Crash recovery (exponential backoff, restart limit, GiveUp)
-- [x] Shutdown ordering (clean stop → sync → poweroff)
-- [x] Sakshi tracing integrated
-- [x] Cyrius port complete, rust-old removed (v0.96.1)
-- [x] Libro 1.0.3 → 2.0.5 audit chain (real SHA-256, not shim)
-- [x] Lifecycle audit recording
+- [ ] **`0 - N` → `-N`.** 80 sites in `src/` still use the pre-3.10.3 form.
+      Cosmetic, so batch it as a patch of its own where it cannot hide a
+      functional change.
+- [ ] **The release workflow should bump `state.md`.** It is still edited by
+      hand every release.
 
 ---
 
@@ -210,29 +173,3 @@ Retained for historical context.
   when)
 - **D-Bus interface** — only if AGNOS desktop requires it
 - **Timer-based services** — that's samay's domain
-
-## Open — after 1.16.0
-
-- [ ] **`ag_sys_poll` → the stdlib's `sys_ppoll`** (cyrius 6.7.9+). `ag_sys_poll` issues x86 `poll` (7) on both
-  architectures and relies on the aarch64 translation to turn it into `ppoll` with a ms → timespec conversion. The
-  stdlib's `sys_ppoll` reaches `ppoll` directly on every Linux target. The move needs the conversion done in
-  argonaut (a negative timeout becomes a NULL timespec), and the same `qemu -strace` check that 1.15.6 and 1.16.0
-  ran for `sendto` / `fcntl`. Optional: the current path is correct, just indirect.
-- [ ] **The next toolchain move** starts from cyrius's `ecosystem-migration.md`, at the 6.7.10 section. Delete
-  `cyrius.lock` and `lib/` before `cyrius deps`, re-cut the qemu L3 helper, and repeat 1.16.0's 6.7.x
-  silent-semantics audit for whatever the new releases change.
-
-## Done at 1.16.0 — cyrius 6.7.9
-
-- [x] **Toolchain 6.6.20 → 6.7.9, libro 2.10.8 → 2.11.0.** No source change was needed, and the 6.7.x audit found
-  nothing (CHANGELOG [1.16.0] Audited).
-- [x] **`fcntl` uses the stdlib's `sys_fcntl`; `ag_sys_fcntl` and `ag_sys_sendto` are removed.** A consumer
-  compiling argonaut's `src/` needs cyrius ≥ 6.6.8 (CHANGELOG [1.16.0] Breaking).
-- [x] **Closeout pass** for the minor (CHANGELOG [1.16.0]).
-
-## Done at 1.15.6 — follow-ups from the cyrius 6.6.20 pin move
-
-- [x] **The startup order is deterministic.** Each wave is sorted bytewise by name, and `resolve_service_order` is
-  the waves read in sequence (ADR 008 amendment, `tests/tcyr/resolve_order.tcyr`).
-- [x] **`sendto` uses the stdlib's `sys_sendto`.** `ag_sys_sendto` remains as a deprecated forwarder until 1.16.0.
-  `fcntl` moved to the 1.16.0 list above.

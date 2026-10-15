@@ -6,6 +6,39 @@
 # Generate tmpfile commands
 # =========================================================================
 
+# A file mode in OCTAL, as chmod(1) / mkdir -m read it: 493 -> "755",
+# 432 -> "660", 2541 -> "4755", 0 -> "0".
+#
+# 1.16.1 audit B-3: the mode field is octal (validate_tmpfile_entries bounds
+# it at 4095 = 0o7777) but was rendered with the decimal formatters, so 0o660
+# became `chmod 432`, which chmod reads as 0o432 — other-writable — and 0o755
+# became `mkdir -m 493` (not an octal number at all). A negative mode is
+# refused by the validator; unvalidated, it renders as "0", the most
+# restrictive reading, never as a sign.
+fn tmpfile_mode_octal(mode) {
+    var sb = str_builder_new();
+    if (mode <= 0) {
+        str_builder_putc(sb, 48);
+        return str_builder_build(sb);
+    }
+    var digits = 0;
+    var t = mode;
+    while (t > 0) { digits = digits + 1; t = t / 8; }
+    var d = digits - 1;
+    while (d >= 0) {
+        var shift = d * 3;
+        str_builder_putc(sb, 48 + ((mode >> shift) & 7));
+        d = d - 1;
+    }
+    return str_builder_build(sb);
+}
+
+# B-4 LOW (1.16.1 audit): these commands run as root against paths that may
+# already exist, so none of them may act THROUGH a symlink planted there:
+# `chown -h` changes the link itself, `ln -sfnT` replaces a link rather than
+# creating a new one inside the directory it points at. `mkdir -p` / `mknod`
+# / `chmod` keep a check-then-use window between commands; closing it needs a
+# native openat/fchownat/fchmodat rewrite, which is out of scope here.
 fn generate_tmpfile_commands(entries) {
     var cmds = vec_new();
 
@@ -19,23 +52,26 @@ fn generate_tmpfile_commands(entries) {
             var uid = load64(entry + 32);
             var gid = load64(entry + 40);
 
-            var mode_sb = str_builder_new();
-            str_builder_add_int(mode_sb, dir_mode);
-
             var mkdir_cmd = safe_cmd_new(str_from("mkdir"));
             safe_cmd_add_arg(mkdir_cmd, str_from("-p"));
             safe_cmd_add_arg(mkdir_cmd, str_from("-m"));
-            safe_cmd_add_arg(mkdir_cmd, str_builder_build(mode_sb));
+            safe_cmd_add_arg(mkdir_cmd, tmpfile_mode_octal(dir_mode));
             safe_cmd_add_arg(mkdir_cmd, path);
             vec_push(cmds, mkdir_cmd);
 
             if (uid >= 0 || gid >= 0) {
+                # "uid:gid", "uid" or ":gid". Never "uid:" — GNU chown reads
+                # a trailing ':' as "and the group of uid's login", which is
+                # a group change nobody asked for (1.16.1 audit B-4).
                 var owner_sb = str_builder_new();
                 if (uid >= 0) { str_builder_add_int(owner_sb, uid); }
-                str_builder_add_cstr(owner_sb, ":");
-                if (gid >= 0) { str_builder_add_int(owner_sb, gid); }
+                if (gid >= 0) {
+                    str_builder_add_cstr(owner_sb, ":");
+                    str_builder_add_int(owner_sb, gid);
+                }
 
                 var chown_cmd = safe_cmd_new(str_from("chown"));
+                safe_cmd_add_arg(chown_cmd, str_from("-h"));
                 safe_cmd_add_arg(chown_cmd, str_builder_build(owner_sb));
                 safe_cmd_add_arg(chown_cmd, path);
                 vec_push(cmds, chown_cmd);
@@ -44,7 +80,7 @@ fn generate_tmpfile_commands(entries) {
             var sym_target = load64(entry + 16);
 
             var ln_cmd = safe_cmd_new(str_from("ln"));
-            safe_cmd_add_arg(ln_cmd, str_from("-sf"));
+            safe_cmd_add_arg(ln_cmd, str_from("-sfnT"));
             safe_cmd_add_arg(ln_cmd, sym_target);
             safe_cmd_add_arg(ln_cmd, path);
             vec_push(cmds, ln_cmd);
@@ -75,7 +111,7 @@ fn generate_tmpfile_commands(entries) {
             vec_push(cmds, mknod_cmd);
 
             var chmod_cmd = safe_cmd_new(str_from("chmod"));
-            safe_cmd_add_arg(chmod_cmd, str_from_int(dev_mode));
+            safe_cmd_add_arg(chmod_cmd, tmpfile_mode_octal(dev_mode));
             safe_cmd_add_arg(chmod_cmd, path);
             vec_push(cmds, chmod_cmd);
         }
@@ -107,6 +143,9 @@ fn validate_tmpfile_entries(entries) {
         if (etype == TMP_DIRECTORY || etype == TMP_DEVICE) {
             var vmode = load64(entry + 24);
             if (vmode > 4095) {  # 0o7777
+                return 0 - 1;
+            }
+            if (vmode < 0) {     # 1.16.1 audit B-3: a mode is never negative
                 return 0 - 1;
             }
         }

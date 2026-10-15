@@ -7,6 +7,261 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.16.1] — 2026-10-14
+
+**A hardening and optimization pass. 13 MEDIUM and 18 LOW findings are fixed, each MEDIUM
+behind a test that failed first. `ag_sys_poll` now issues ppoll through the stdlib. The
+PID-1 loop no longer wakes while idle, and dependency resolution is up to twice as fast.**
+
+- **Audit report:** `docs/audit/2026-10-14-audit.md` (0 CRITICAL / 0 HIGH / 13 MEDIUM /
+  18 LOW fixed; 6 LOW and 1 PERF deferred to the roadmap).
+- **Tests:** 38 suites and 1,336 assertions, 0 failures, on x86_64 and under qemu-aarch64.
+- **Bench gate:** a win; nothing slows down beyond the ±2 µs band.
+- Toolchain and dependencies are unchanged (cyrius 6.7.9, libro 2.11.0).
+
+### Security
+
+All 13 MEDIUM findings are in the audit report, with the evidence for each. The reachability
+tags mean:
+- **kybernet:** reached through kybernet's PID-1 reactor and its config.
+- **library:** no in-tree or kybernet caller.
+
+| Id | Reach | Defect | Fix |
+|---|---|---|---|
+| A-1 | kybernet | The HTTP check's timeout was per read: a peer dripping one byte at a time held a 200 ms check for 2.25 s, and it then reported **passed** | One deadline per check |
+| A-2 | kybernet | A timed-out health command's grandchildren (curl, psql) kept running and piled up under PID 1 | The child leads a process group, and the whole group is killed |
+| A-3 | kybernet | The `/etc/hosts` lookup allocated on every probe (9.6 KB per call on a 200-line file) | No allocation |
+| B-1 | kybernet | The PID-file reader followed symlinks (so argonaut adopted, and later killed, another daemon's pid), blocked PID 1 on a FIFO, and parsed `"12 junk 34"` as 1234. CVE-2018-16888 class | `O_NOFOLLOW` / `O_NONBLOCK`, regular files only, strict 2..2³¹−1 parse |
+| B-2 | library | Unit-file injection survived 2026-08-24 MEDIUM-7, through Environment keys, `"` in values, spaces in dependencies, `%` specifiers and a lone `;` | Each setting gets its own escape; invalid keys are dropped |
+| B-3 | library | tmpfiles modes were written in decimal but read as octal: 0o660 became `chmod 432` (other-writable) | Octal rendering |
+| B-5 | library | Edge-boot tmpfs mounts left `/var/run` and `/var/log` world-writable, and none set `nodev` | `mode=0755` / `1777`, `nodev` |
+| C-1 | kybernet | A STARTING service could not be stopped, and restarting it ran a second copy | STARTING→STOPPING is valid; starts are refused unless STOPPED / FAILED |
+| C-2 | kybernet | The restart limit was a lifetime budget, so a monthly crash eventually gave up for good | The count resets after a 10 s stable run |
+| C-3 | kybernet | Watchdog and health deadlines used the wall clock: an NTP step forward killed every watchdogged service | Monotonic clock |
+| C-4 | kybernet | Oneshot and forking starts blocked in `waitpid` with no bound, so a hung oneshot wedged PID 1 | 90 s start timeout, then the group is killed |
+| C-5 | library | Persistent audit broke its own chain, so the next boot silently fell back to in-memory | Every lifecycle record is persisted |
+| C-6 | kybernet | `init_poll_health` allocated about 232 B per tick | Reused vecs |
+
+**The LOW fixes** are tabulated in the audit report:
+- **Health checks:** CR/LF in the URL path (CVE-2025-60876 class); unbounded `timeout ≤ 0`;
+  unchecked ports.
+- **Notify:** the socket wasn't close-on-exec; `MSG_TRUNC` datagrams were parsed and
+  `MAINPID` was unvalidated; Str-view paths were unlinked wrongly.
+- **tmpfiles:** commands followed symlinks.
+- **Edge boot:** LUKS and verity failed open.
+- **Process stop:** `process_stop` signalled pids that were no longer its child.
+- **`spawn_service`:** it crashed on every call.
+- **Service environment:** a service could not override PATH.
+- **LUKS mapper names:** names beginning with `-` were accepted.
+- **Init bookkeeping:** stale proc-table entries; leaked sakshi spans; duplicate watchdog
+  kills; a notify drain that never promoted READY=1.
+- **The shipped binary (C-9):**
+  - PID 1 no longer returns, which panicked the kernel, if `signalfd` fails.
+  - It runs `sync()` before poweroff.
+  - Ctrl-Alt-Del now reaches PID 1 as SIGINT and reboots cleanly, instead of a kernel hard
+    reboot with no sync.
+
+**Known-CVE sweep, 2025–2026** (table in the audit report): three classes apply to argonaut
+and are fixed above.
+- CVE-2026-15060 / -15059: a PID taken from an untrusted source is signalled → B-1.
+- CVE-2026-40225: a newline injects a key=value directive → B-2.
+- CVE-2025-60876: CR/LF in an HTTP request target → A-5.
+
+None of the other systemd advisories of the period apply.
+
+### Breaking (behaviour)
+
+A consumer that uses these APIs will see the changes below. kybernet is the only known
+consumer, and the notes say where it is affected. Taking 1.16.1 still needs cyrius ≥ 6.6.8,
+as 1.16.0 did.
+
+- **`init_start_service` refuses a STARTING, RUNNING or STOPPING service** (it returns -1,
+  writes no record and forks nothing). Before, it forked another copy. **Migration:** stop
+  the service first, or call `init_restart_service`, which now stops a STARTING service
+  before starting it again.
+- **Oneshot and forking starts time out after 90 s by default.** **Migration:** a consumer
+  with a legitimately longer start calls `argonaut_set_start_timeout_ms(ms)`; `≤ 0` restores
+  the default.
+- **Restart counts reset after a stable run of 10 s or more** (`RESTART_STABLE_MS`). A crash
+  after a long run is restarted with the base backoff delay instead of giving up. A crash
+  loop still gives up at `max_restarts`.
+- **`init_poll_health`'s returned vec is reused**, valid until the next call. kybernet
+  consumes it immediately, which is safe.
+- **`last_hc`, `last_notify`, `started_at` and the init's boot start/complete times are
+  monotonic milliseconds.** None of them is exported, and kybernet reads none of them.
+- **Health checks:**
+  - An HTTP check never runs past its timeout. A status line still unfinished when it
+    expires is a failure ("HTTP response timeout").
+  - A TCP or HTTP timeout `≤ 0` means 2000 ms. Before, -1 meant no limit.
+  - New failure messages: "TCP check: port out of range", "HTTP check: invalid port",
+    "HTTP check: path has invalid byte". URLs with spaces must be percent-encoded.
+  - Result messages and type labels are shared constant Strs.
+- **`read_pid_file_safe`** refuses symlinks, FIFOs and anything but a regular file, and
+  accepts only digits with one optional trailing newline, valued 2..2147483647.
+- **`run_safe_cmd_timeout` children lead their own process group.**
+- **`process_stop` / `proc_table_stop_all`** return -1 without signalling a pid that is no
+  longer their child. `process_stop(pid ≤ 0)` returns -1; before, it sent `kill(0)` or
+  `kill(-1)`.
+- **Service environment:** a key the service defines suppresses argonaut's default for that
+  key (PATH, or anything from `argonaut_set_extra_env`). New `build_service_envp(svc_def)`.
+- **`generate_unit`:**
+  - `SVC_SIMPLE` renders `Type=simple`, not `Type=notify`.
+  - `%` is doubled in every value; `$` is doubled only on the Exec line.
+  - Env keys outside `[A-Za-z_][A-Za-z0-9_]*` are dropped.
+  - Dependency names use the unit-filename sanitiser (`getty@tty1` → `getty_tty1.service`,
+    the same name argonaut gives that service's own unit file).
+  - `sanitize_unit_value` no longer doubles `$`.
+- **tmpfiles: the mode field is the mode's numeric value. 0o755 is stored as 493.** It is
+  now rendered in octal. ⚠ **Migration:** a consumer that stored the decimal number 755,
+  as some old tests did, now gets mode 0o1363. Store 493. There is no in-tree or kybernet
+  caller.
+- **Edge boot:**
+  - The four tmpfs option strings now include `mode=` and `nodev`.
+  - `luks_unlocked` and the fleet's `luks_active` are 0 when LUKS is disabled.
+  - LUKS enabled with no device, or incomplete dm-verity inputs, record an error.
+  - cryptsetup argv puts `--` before positionals; mapper names may not begin with `-`.
+- **`notify_bind`** returns -1 for an empty path, a path over 107 bytes, or a failed
+  `SO_PASSCRED`. `send_notify` refuses paths over 107 bytes. Datagrams over 1024 bytes are
+  dropped, and an invalid `MAINPID` leaves `main_pid` 0.
+- **`spawn_service`** is `#deprecated` and forwards to `fork_exec_service`, so it returns
+  the child pid as documented. It used to crash.
+- **The shipped `/sbin/init`:** SIGINT (Ctrl-Alt-Del) **reboots**; SIGTERM still powers off.
+
+### Added
+
+- `ag_sys_setpgid(pid, pgid)` (x86_64 109 / aarch64 154, verified under `qemu -strace` on
+  both).
+- `argonaut_set_start_timeout_ms` / `argonaut_start_timeout_ms`, and the
+  `DEFAULT_START_TIMEOUT_MS` and `RESTART_STABLE_MS` constants.
+- `build_service_envp`, `audit_log_record_str`, `tmpfile_mode_octal`, `parse_ipv4_span` and
+  `hosts_scan`.
+- `docs/audit/2026-10-14-audit.md`.
+
+### Changed
+
+- **`ag_sys_poll` issues the stdlib's `sys_ppoll`** (cyrius 6.7.9+). Its signature is
+  unchanged.
+  - It converts milliseconds to a timespec itself: a negative timeout is a NULL timespec.
+  - Before, it issued x86 `poll` (7) on both architectures and relied on the aarch64
+    translation to turn it into ppoll.
+  - `tests/tcyr/poll_ms.tcyr` (15 assertions) pins the contract on both architectures and
+    passed before and after the change: ready data returns at once, a zero timeout returns
+    at once, an idle wait lasts as long as asked (including past one second), and a
+    negative timeout means no limit.
+  - Under `qemu -strace` the aarch64 trace is unchanged, and on x86_64 `poll(fd,1,ms)`
+    became `ppoll(fd,1,ts,NULL)` with the same results.
+- **One dependency resolver.** `resolve_service_order` and `resolve_service_waves` share
+  `_svc_kahn_levels`, a level-synchronous Kahn's pass, so ADR 008's accepted duplication is
+  gone (amendment added). The output is unchanged; `resolve_order.tcyr` passes as it did.
+- **The PID-1 loop** (`src/main.cyr`, the shipped binary):
+  - It blocks in poll on the signalfd instead of sleeping 100 ms per tick, so it never wakes
+    while idle and handles SIGCHLD / SIGTERM at once.
+  - A sweep that comes back full (256 orphans) is repeated before blocking, because
+    coalesced SIGCHLDs announce no more.
+  - It runs `sync()` before poweroff or reboot.
+  - Ctrl-Alt-Del is turned off at the kernel (`reboot(CAD_OFF)`), so it arrives as SIGINT.
+  - If `signalfd` fails it falls back to a reap-only loop instead of returning.
+  - Measured as PID 1 of an unprivileged pid namespace (`unshare -Urpf`): 0 idle wakeups in
+    3 s (was about 10/s); 300 simultaneous orphans reaped, 0 zombies; SIGTERM shuts down
+    cleanly.
+- **`scripts/bench-history.sh`** stops parsing at `=== Summary ===`, so each label records
+  29 rows, not 58. This fixes the duplicate-row defect open since 1.8.3.
+- **The `audit_log_record` bench** (`src/bench_main.cyr`, `tests/bcyr/argonaut.bcyr`)
+  measures the streaming chain init uses, and records once before its heap mark.
+  - Every iteration rewinds the heap. A retaining chain's entry storage, and audit.cyr's
+    lazily built Strs, were allocated past the mark and overwritten, and only allocation
+    order kept that from crashing.
+  - Its numbers do not compare with earlier rows; `1.16.1-audit-bench-streaming` is the
+    first row with the fixed bench.
+- **`docs/guides/quickstart.md`:** the example loop slept with `syscall(35, …)`, a raw x86
+  `nanosleep` that is `unlinkat` on aarch64. It now calls `sleep_ms`.
+- **Code style:** every `break` inside a loop that declares `var`, in the files this pass
+  touched, is converted to the flag style CLAUDE.md requires.
+
+### Performance
+
+The gate ran `./scripts/bench-history.sh "1.16.1-hardening"` against `1.16.0-cyrius-6.7.9`
+on a quiet host (load 0.4). A 24-round interleaved A/B of the 1.16.0 tag against 1.16.1,
+pinned to one core, gives these medians:
+
+| bench | 1.16.0 | 1.16.1 | Δ | why |
+|---|---:|---:|---:|---|
+| **resolve_waves_chain_20** | 63.931 | **32.732** | **−48.8 %** | P-1: no per-wave `map_keys` |
+| **resolve_waves_desktop** | 15.148 | **12.006** | **−20.7 %** | P-1 |
+| resolve_waves_wide_20 | 14.972 | 12.913 | −13.8 % | P-1 (more than recovers 1.15.6's sort cost) |
+| **stats_desktop** | 1.375 | **0.287** | **−79.1 %** | P-2: in-place map walk |
+| plan_runlevel_switch | 5.499 | 4.026 | −26.8 % | P-2 |
+| plan_shutdown_reboot / _poweroff | 15.206 / 15.335 | 14.041 / 13.834 | −7.7 / −9.8 % | P-2 |
+| generate_unit | 4.892 | 4.162 | −14.9 % | `str_builder_putc` escapes |
+| resolve_order_chain_50 / _100 | 106.698 / 217.255 | 100.678 / 211.858 | −5.6 / −2.5 % | noise-bound; no claim |
+| init_new_desktop | 24.991 | 24.885 | −0.4 % | |
+| audit_log_record | 4.268 | 4.298 | +0.7 % | |
+| generate_tmpfile_cmds_20 | 12.417 | 13.468 | **+1.051** | octal formatting and the extra `-h` argument |
+| mark_all_steps_complete | 46.356 | 47.880 | **+1.524** | two monotonic clock reads per init (C-3) |
+
+**Verdict: win, no regression.** Every micro is within ±2 µs of 1.16.0 or faster. The two
+that read slower are inside the band and are the cost of B-3/B-4 and C-3. The gate rows
+agree, including `resolve_waves_chain_20` 56.682 → 30.352 µs and `stats_desktop` 1.449 →
+0.205 µs.
+
+**Allocation per call:**
+- An HTTP check that passes: 416 → 48 B.
+- A TCP check: 80 → 48 B.
+- A hosts lookup: 32–9,600 → 0 B.
+- A bare-name command check: 272 → 0 B beyond the result.
+- `init_poll_health`: 232 → 0 B beyond the probe's own result.
+- `notify_parse` of `WATCHDOG=1`: 648 → 536 B.
+- `init_stats`: 200 → 48 B.
+
+**Binary size:** x86_64 434,600 → **443,848 B** (+9,248; 2,544 unreachable fns, 845,564 B
+eliminated); aarch64 1,503,424 → **1,569,992 B** (+66,568). aarch64 DCE fills dead code with
+NOPs rather than compacting, so every new function shows in full.
+
+### Tests
+
+- **`tests/tcyr/harden_net.tcyr`**, 98 assertions, 44 failing before the fixes.
+- **`tests/tcyr/harden_proc.tcyr`**, 106 assertions; 56 of the 96 written before the fixes
+  failed. The 10 written afterwards cover B-10's new function.
+- **`tests/tcyr/harden_core.tcyr`**, 99 assertions, 40 failing before the fixes.
+- **`tests/tcyr/poll_ms.tcyr`**, 15 assertions; a behaviour pin that passed before and after.
+- **`health_exec.tcyr`** gains a bare-name zero-allocation case, which failed before the fix
+  at 272 B per call.
+- **Existing tests changed on purpose:**
+  - `modules_b` and `api_a`: decimal 755 → 493; `Type=simple`.
+  - `audit_findings`: MEDIUM-7's dependency now goes through the unit-name sanitiser.
+  - `edge_exec`: LUKS disabled → `luks_unlocked` 0.
+  - `health_due` and `notify_semantics`: stamp `monotonic_ms()`.
+- **Test-first:** every MEDIUM's tests were run against the pre-fix code and failed there.
+  The per-finding counts are in the audit report.
+
+### Verification
+
+- **Tests:** 38 suites, **1,336 assertions, 0 failures**, on x86_64 and under qemu-aarch64.
+  Test builds add one warning kind, the deliberate `spawn_service` deprecation warning in
+  `harden_proc`.
+- **Gates:** lint, `fmt --check` and `cyrius vet` are clean on every file CI gates.
+  `cyrius deps --verify` passes 60 / 60, and the `--check-lib-sync` DCE build gives
+  443,848 B.
+- **Syscall traces:** every `sendto`, `fcntl` and `poll` line recorded under `qemu -strace`
+  in six suites is identical before and after the hardening patches, on both architectures.
+- **qemu PID-1 harness under KVM at `-m 256M`:** M3, L3 and the boot test pass.
+- **Version:** `VERSION` reads 1.16.1.
+
+### Downstream: kybernet
+
+kybernet still pins argonaut 1.15.4 on cyrius 6.6.6; updating it is separate work. When it
+takes 1.16.x it needs cyrius ≥ 6.6.8 (1.16.0), and it should review the Breaking
+(behaviour) list above. The items that touch its paths:
+- the start refusal and the restart of a STARTING service;
+- the 90 s start timeout;
+- the restart-count window;
+- the reused `init_poll_health` result;
+- the bounded HTTP check;
+- the strict PID-file reader.
+
+C-8 matters too: kybernet builds `init_plan_shutdown` but then calls `init_stop_all`, which
+ignores the plan's order. An ordered stop is on the roadmap.
+
 ## [1.16.0] — 2026-10-14
 
 **Toolchain cyrius 6.6.20 → 6.7.9 and libro 2.10.8 → 2.11.0. `fcntl` moves onto the stdlib, and
