@@ -68,7 +68,8 @@ fn main() {
 
     # --- Emergency shell ---
     var esc = emergency_shell_default();
-    assert_eq(load64(esc + 24), 0, "no auth req");
+    # 1.16.2: auth is required by default (no credential -> fail closed).
+    assert_eq(load64(esc + 24), 1, "auth req by default");
     assert(str_contains(load64(esc + 16), str_from("Emergency")), "banner");
 
     var einit = server_init();

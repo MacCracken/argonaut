@@ -70,8 +70,12 @@ fn main() {
     assert_eq(constant_time_eq("abc", 3, "abd", 3), 0, "cte ne");
     assert_eq(constant_time_eq("ab", 2, "abc", 3), 0, "cte len");
 
-    # --- verify_emergency_auth: no auth required ---
+    # --- verify_emergency_auth: default requires auth (1.16.2) ---
     var esc = emergency_shell_default();
+    assert_eq(verify_emergency_auth(esc, str_from("anything")), 0, "auth dflt");
+
+    # --- verify_emergency_auth: no auth required ---
+    store64(esc + 24, 0);
     assert(verify_emergency_auth(esc, str_from("anything")), "auth no");
 
     # --- password_hash: SHA-256, deterministic ---

@@ -116,7 +116,22 @@ fn _unit_env_key_ok(key) {
 # Unit file generation
 # =========================================================================
 
+# Returns the unit text, or 0 when the service's binary is not an absolute
+# path (see the ExecStart note below) — no unit is better than one systemd
+# reads differently from argonaut.
 fn generate_unit(svc) {
+    # 1.16.2 (a LOW the 1.16.1 audit left open): systemd reads a leading run
+    # of '-', '@', ':', '+' and '!' in the first word of an Exec line as
+    # PREFIXES, after unquoting, so quoting does not help: `-` ignores the
+    # exit status, `@` takes the next word as argv[0], `:` turns off
+    # $-substitution, `+` runs the command with full privileges, `!` and `!!`
+    # without the User= switch. An absolute path starts with '/', which is
+    # none of them. A relative name is refused too: argonaut execs the binary
+    # as given, systemd would search for it.
+    var binary = svc_def_binary(svc);
+    if (binary == 0) { return 0; }
+    if (str_starts_with(binary, "/") == 0) { return 0; }
+
     var sb = str_builder_new();
 
     # [Unit] section
@@ -173,7 +188,7 @@ fn generate_unit(svc) {
 
     # ExecStart
     str_builder_add_cstr(sb, "ExecStart=");
-    str_builder_add(sb, escape_systemd_value(svc_def_binary(svc)));
+    str_builder_add(sb, escape_systemd_value(binary));
     var args = svc_def_args(svc);
     for (var i = 0; i < vec_len(args); i = i + 1) {
         str_builder_add_cstr(sb, " ");
@@ -262,15 +277,27 @@ fn generate_unit(svc) {
         str_builder_add_cstr(sb, "\n");
     }
 
-    # WatchdogSec from health check
-    var hc = svc_def_health_check(svc);
-    if (hc != 0) {
-        var interval = load64(hc + 24);  # interval_ms
-        var retries = load64(hc + 40);   # retries
-        var watchdog_sec = (interval * retries) / 1000;
-        if (watchdog_sec > 0) {
+    # WatchdogSec — Type=notify only, from watchdog_ms.
+    #
+    # 1.16.2 (a LOW the 1.16.1 audit left open): under systemd, WatchdogSec=
+    # is a deadline only a WATCHDOG=1 ping satisfies, and a service that
+    # misses it is killed. It was emitted for every type and derived from the
+    # health check: a probe argonaut runs, whose deadline init_check_watchdog
+    # never lets a ping satisfy. So a Type=simple service with an HTTP health
+    # check got a ping deadline it had no reason to meet. The deadline
+    # argonaut itself enforces against WATCHDOG=1 is watchdog_ms. It is
+    # written exactly, in ms when it is not a whole number of seconds (a
+    # systemd time span takes a unit suffix).
+    var wd_ms = svc_def_watchdog_ms(svc);
+    if (svc_type == SVC_NOTIFY) {
+        if (wd_ms > 0) {
             str_builder_add_cstr(sb, "WatchdogSec=");
-            str_builder_add_int(sb, watchdog_sec);
+            if ((wd_ms % 1000) == 0) {
+                str_builder_add_int(sb, wd_ms / 1000);
+            } else {
+                str_builder_add_int(sb, wd_ms);
+                str_builder_add_cstr(sb, "ms");
+            }
             str_builder_add_cstr(sb, "\n");
         }
     }

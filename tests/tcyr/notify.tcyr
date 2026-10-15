@@ -67,8 +67,12 @@ fn main() {
 
         # 1.15.6: the client side meets the server side. `send_notify` is argonaut's only
         # sendto with a destination address, and no suite reached it until now.
+        # 1.16.2: received through the authenticated path (notify_try_recv is
+        # deprecated), which also proves the kernel stamped our credentials on it.
         assert_eq(send_notify(sock_path, str_from("READY=1\nMAINPID=77\n")), 0, "send_notify ok");
-        var got = notify_try_recv(fd);
+        var me = vec_new();
+        vec_push(me, sys_getpid());
+        var got = notify_try_recv_authenticated(fd, me);
         assert(got != 0, "recv after send");
         if (got != 0) {
             assert_eq(load64(got), 1, "sent ready");

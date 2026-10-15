@@ -1,0 +1,544 @@
+# deferred_fixes.tcyr — LOW items the 1.16.1 audit left open, closed at 1.16.2
+#
+# 1. notify_try_recv / notify_drain (the unauthenticated receive) read with
+#    sys_read, which cannot see MSG_TRUNC: a datagram longer than the 1,024-byte
+#    buffer was parsed from its head. They now receive with recvmsg and drop it.
+#    Both are #deprecated, so this suite's calls of them print warnings.
+# 2. generate_unit emitted WatchdogSec= for every type, from the health check
+#    (a probe argonaut runs, not a ping the service sends), and wrote any binary
+#    after ExecStart=, where systemd reads a leading - @ : + ! as an Exec prefix
+#    even inside quotes.
+# 3. tmpfiles_apply creates directories, symlinks and device nodes with *at
+#    syscalls and follows no symlink anywhere in the path. The command path
+#    (mkdir -p, chmod, ln, mknod) resolved every parent component through
+#    whatever symlink was planted there.
+#
+# Unprivileged. Every fixture lives under /tmp/argonaut-deferred-<pid>-*, removed at the end.
+include "tests/test_header.cyr"
+
+# "/tmp/argonaut-deferred-<pid>-<suffix>"
+fn df_path(suffix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/argonaut-deferred-");
+    str_builder_add_int(sb, sys_getpid());
+    str_builder_add_cstr(sb, "-");
+    str_builder_add_cstr(sb, suffix);
+    return str_builder_build(sb);
+}
+
+# `base` + "/" + `name` (a cstr)
+fn df_sub(base, name) {
+    var sb = str_builder_new();
+    str_builder_add(sb, base);
+    str_builder_add_cstr(sb, "/");
+    str_builder_add_cstr(sb, name);
+    return str_builder_build(sb);
+}
+
+# lstat field of `p` (a Str): the full st_mode, or a negative errno.
+fn df_mode(p) {
+    var st[STAT_BUFSZ];
+    var r = sys_fstatat(AT_FDCWD, str_data(p), &st, AT_SYMLINK_NOFOLLOW);
+    if (r < 0) { return r; }
+    return load32(&st + STAT_MODE);
+}
+
+fn df_uid(p) {
+    var st[STAT_BUFSZ];
+    var r = sys_fstatat(AT_FDCWD, str_data(p), &st, AT_SYMLINK_NOFOLLOW);
+    if (r < 0) { return r; }
+    return load32(&st + STAT_UID);
+}
+
+fn df_gid(p) {
+    var st[STAT_BUFSZ];
+    var r = sys_fstatat(AT_FDCWD, str_data(p), &st, AT_SYMLINK_NOFOLLOW);
+    if (r < 0) { return r; }
+    return load32(&st + STAT_GID);
+}
+
+fn df_type(p) {
+    var m = df_mode(p);
+    if (m < 0) { return m; }
+    return m & 0xF000;
+}
+
+fn df_perm(p) {
+    var m = df_mode(p);
+    if (m < 0) { return m; }
+    return m & 4095;
+}
+
+# 1 when the symlink at `p` points at exactly `want` (a Str).
+fn df_link_is(p, want) {
+    var buf[512];
+    var n = sys_readlink(str_data(p), &buf, 511);
+    if (n != str_len(want)) { return 0; }
+    return memeq(&buf, str_data(want), n);
+}
+
+# The lowest free descriptor: what the next open returns.
+fn df_lowest_fd() {
+    var fd = sys_openat(AT_FDCWD, "/", O_RDONLY | O_CLOEXEC, 0);
+    if (fd >= 0) { sys_close(fd); }
+    return fd;
+}
+
+fn df_entry_dir(path, mode, uid, gid) {
+    var e = alloc(sizeof(TmpfileEntry));
+    memset(e, 0, sizeof(TmpfileEntry));
+    store64(e, TMP_DIRECTORY);
+    store64(e + 8, path);
+    store64(e + 24, mode);
+    store64(e + 32, uid);
+    store64(e + 40, gid);
+    return e;
+}
+
+fn df_entry_link(path, target) {
+    var e = alloc(sizeof(TmpfileEntry));
+    memset(e, 0, sizeof(TmpfileEntry));
+    store64(e, TMP_SYMLINK);
+    store64(e + 8, path);
+    store64(e + 16, target);
+    store64(e + 32, -1);
+    store64(e + 40, -1);
+    return e;
+}
+
+fn df_entry_dev(path, dt, major, minor, mode, uid, gid) {
+    var e = alloc(sizeof(TmpfileEntry));
+    memset(e, 0, sizeof(TmpfileEntry));
+    store64(e, TMP_DEVICE);
+    store64(e + 8, path);
+    store64(e + 24, mode);
+    store64(e + 32, uid);
+    store64(e + 40, gid);
+    store64(e + 48, dt);
+    store64(e + 56, major);
+    store64(e + 64, minor);
+    return e;
+}
+
+fn df_one(e) {
+    var v = vec_new();
+    vec_push(v, e);
+    return v;
+}
+
+# A regular file at `p` holding "x", mode 0o600.
+fn df_touch(p) {
+    var fd = sys_openat(AT_FDCWD, str_data(p), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 384);
+    if (fd < 0) { return fd; }
+    sys_write(fd, "x", 1);
+    sys_close(fd);
+    return 0;
+}
+
+fn df_rm_rf(p) {
+    var c = safe_cmd_new(str_from("rm"));
+    safe_cmd_add_arg(c, str_from("-rf"));
+    safe_cmd_add_arg(c, p);
+    return run_safe_cmd(c);
+}
+
+# AF_UNIX SOCK_DGRAM pair; `passcred` turns SO_PASSCRED on for the receiver, as
+# notify_bind does.
+fn df_dgram_pair(rfd_out, sfd_out, passcred) {
+    var fds[8];
+    if (sys_socketpair(1, 2, 0, &fds) != 0) { return -1; }
+    var rfd = load32(&fds);
+    # Non-blocking, as notify_bind's socket is: the receive must report an
+    # empty queue, not wait for one.
+    sys_fcntl(rfd, 4, O_NONBLOCK);   # F_SETFL
+    if (passcred == 1) {
+        var one[4];
+        store32(&one, 1);
+        sys_setsockopt(rfd, 1, 16, &one, 4);
+    }
+    store64(rfd_out, rfd);
+    store64(sfd_out, load32(&fds + 4));
+    return 0;
+}
+
+fn df_svc(binary, stype) {
+    var sd = svc_def_new(str_from("dfx"), str_from("d"), binary);
+    svc_def_set_service_type(sd, stype);
+    return sd;
+}
+
+fn df_has(unit, cstr) {
+    if (unit == 0) { return 0; }
+    return str_contains(unit, str_from(cstr));
+}
+
+fn main() {
+    alloc_init();
+    var rslot = alloc(8);
+    var sslot = alloc(8);
+
+    # =====================================================================
+    # 1. notify_try_recv / notify_drain — truncation
+    # =====================================================================
+    test_group("1 notify_try_recv truncation");
+
+    var big = alloc(1500);
+    memset(big, 120, 1500);
+    memcpy(big, "READY=1\nMAINPID=4242\nSTATUS=", 28);
+
+    assert_eq(df_dgram_pair(rslot, sslot, 1), 0, "1: socketpair with SO_PASSCRED");
+    var rfd = load64(rslot);
+    var sfd = load64(sslot);
+
+    sys_sendto(sfd, big, 1500, 0, 0, 0);
+    assert_eq(notify_try_recv(rfd), 0, "1: a 1,500-byte datagram is dropped, not parsed");
+    assert_eq(notify_try_recv(rfd), 0, "1: the dropped datagram was consumed");
+
+    # 1.16.2: descriptors passed with SCM_RIGHTS are closed, never kept. A
+    # socket without SO_PASSCRED leaves room in the 32-byte control buffer for
+    # one SCM_RIGHTS header, so the kernel installs the sender's fds in the
+    # receiver; the datagram is then refused for lacking credentials, and the
+    # fds used to stay open in PID 1 for good.
+    var rs = alloc(8);
+    var ss = alloc(8);
+    assert_eq(df_dgram_pair(rs, ss, 0), 0, "1b: socketpair WITHOUT SO_PASSCRED");
+    var r2 = load64(rs);
+    var s2 = load64(ss);
+    var pfds[8];
+    sys_pipe(&pfds);
+    var passed = load32(&pfds);
+    var payload = "READY=1\n";
+    var piov[16];
+    store64(&piov, payload);
+    store64(&piov + 8, 8);
+    var cbuf[24];
+    memset(&cbuf, 0, 24);
+    store64(&cbuf, 20);               # cmsg_len = CMSG_LEN(4)
+    store32(&cbuf + 8, 1);            # SOL_SOCKET
+    store32(&cbuf + 12, 1);           # SCM_RIGHTS
+    store32(&cbuf + 16, passed);
+    var pmh[56];
+    memset(&pmh, 0, 56);
+    store64(&pmh + 16, &piov);
+    store64(&pmh + 24, 1);
+    store64(&pmh + 32, &cbuf);
+    store64(&pmh + 40, 24);           # CMSG_SPACE(4)
+    assert_eq(sys_sendmsg(s2, &pmh, 0), 8, "1b: a datagram carrying one fd is sent");
+    var fd_lo0 = df_lowest_fd();
+    var pme = vec_new();
+    vec_push(pme, sys_getpid());
+    assert_eq(notify_try_recv_authenticated(r2, pme), 0, "1b: a datagram without credentials is refused");
+    assert_eq(df_lowest_fd(), fd_lo0, "1b: the passed fd was closed, not left open in the receiver");
+    sys_close(passed);
+    sys_close(load32(&pfds + 4));
+    sys_close(r2);
+    sys_close(s2);
+
+    var normal = "READY=1\nMAINPID=4242\n";
+    sys_sendto(sfd, normal, strlen(normal), 0, 0, 0);
+    var nm = notify_try_recv(rfd);
+    assert(nm != 0, "1: a normal datagram still parses (SO_PASSCRED on, no control buffer)");
+    if (nm != 0) {
+        assert_eq(load64(nm), 1, "1: READY=1 parsed");
+        assert_eq(load64(nm + 16), 4242, "1: MAINPID parsed");
+    }
+
+    # Exactly the buffer size is complete, not truncated.
+    sys_sendto(sfd, big, 1024, 0, 0, 0);
+    assert(notify_try_recv(rfd) != 0, "1: a 1,024-byte datagram fits and parses");
+
+    # The drain steps past a dropped datagram instead of stopping at it.
+    sys_sendto(sfd, big, 1500, 0, 0, 0);
+    sys_sendto(sfd, "WATCHDOG=1\n", 11, 0, 0, 0);
+    var dm = notify_drain(rfd, 10);
+    assert_eq(vec_len(dm), 1, "1: notify_drain returns only the complete datagram");
+    if (vec_len(dm) == 1) {
+        assert_eq(load64(vec_get(dm, 0) + 24), 1, "1: ... and it is the WATCHDOG=1 behind the truncated one");
+    }
+
+    # A zero-length datagram is consumed, and does not end the drain either.
+    sys_sendto(sfd, "", 0, 0, 0, 0);
+    sys_sendto(sfd, "STOPPING=1\n", 11, 0, 0, 0);
+    var dz = notify_drain(rfd, 10);
+    assert_eq(vec_len(dz), 1, "1: a zero-length datagram does not end notify_drain");
+    assert_eq(vec_len(notify_drain(rfd, 10)), 0, "1: the queue is empty afterwards");
+    sys_close(rfd);
+    sys_close(sfd);
+
+    # SCM_RIGHTS: the unauthenticated path passes no control buffer, so a
+    # descriptor riding on a datagram is never installed in the receiver (a
+    # socket without SO_PASSCRED would otherwise have room for four).
+    assert_eq(df_dgram_pair(rslot, sslot, 0), 0, "1: socketpair without SO_PASSCRED");
+    rfd = load64(rslot);
+    sfd = load64(sslot);
+    var siov[16];
+    store64(&siov, "READY=1\n");
+    store64(&siov + 8, 8);
+    var scm[24];
+    memset(&scm, 0, 24);
+    store64(&scm, 20);              # CMSG_LEN(sizeof(int))
+    store32(&scm + 8, 1);           # SOL_SOCKET
+    store32(&scm + 12, 1);          # SCM_RIGHTS
+    store32(&scm + 16, sfd);
+    var smh[56];
+    memset(&smh, 0, 56);
+    store64(&smh + 16, &siov);
+    store64(&smh + 24, 1);
+    store64(&smh + 32, &scm);
+    store64(&smh + 40, 24);         # CMSG_SPACE(sizeof(int))
+    assert_eq(sys_sendmsg(sfd, &smh, 0), 8, "1: datagram with SCM_RIGHTS sent");
+    var low0 = df_lowest_fd();
+    var nr = notify_try_recv(rfd);
+    assert(nr != 0, "1: a datagram carrying SCM_RIGHTS still parses");
+    assert_eq(df_lowest_fd(), low0, "1: SCM_RIGHTS descriptors are not installed in the receiver");
+    sys_close(rfd);
+    sys_close(sfd);
+
+    # =====================================================================
+    # 2. generate_unit — WatchdogSec= and the ExecStart binary
+    # =====================================================================
+    test_group("2 generate_unit watchdog / exec prefix");
+
+    var hc_s = df_svc(str_from("/usr/bin/x"), SVC_SIMPLE);
+    store64(hc_s + 72, health_check_new(HC_HTTP_GET, str_from("http://x"), 0, 5000, 2000, 3));
+    assert_eq(df_has(generate_unit(hc_s), "WatchdogSec="), 0,
+      "2a: Type=simple with a health check emits no WatchdogSec=");
+
+    var wd_s = df_svc(str_from("/usr/bin/x"), SVC_SIMPLE);
+    svc_def_set_watchdog_ms(wd_s, 30000);
+    assert_eq(df_has(generate_unit(wd_s), "WatchdogSec="), 0,
+      "2a: Type=simple with watchdog_ms emits no WatchdogSec=");
+
+    var hc_f = df_svc(str_from("/usr/bin/x"), SVC_FORKING);
+    store64(hc_f + 72, health_check_new(HC_HTTP_GET, str_from("http://x"), 0, 5000, 2000, 3));
+    svc_def_set_watchdog_ms(hc_f, 30000);
+    assert_eq(df_has(generate_unit(hc_f), "WatchdogSec="), 0, "2a: Type=forking emits no WatchdogSec=");
+
+    var hc_o = df_svc(str_from("/usr/bin/x"), SVC_ONESHOT);
+    svc_def_set_watchdog_ms(hc_o, 30000);
+    assert_eq(df_has(generate_unit(hc_o), "WatchdogSec="), 0, "2a: Type=oneshot emits no WatchdogSec=");
+
+    var wd_n = df_svc(str_from("/usr/bin/x"), SVC_NOTIFY);
+    svc_def_set_watchdog_ms(wd_n, 30000);
+    var wd_n_unit = generate_unit(wd_n);
+    assert(df_has(wd_n_unit, "Type=notify\n"), "2a: notify unit is Type=notify");
+    assert(df_has(wd_n_unit, "\nWatchdogSec=30\n"), "2a: Type=notify takes WatchdogSec= from watchdog_ms");
+
+    var wd_ms = df_svc(str_from("/usr/bin/x"), SVC_NOTIFY);
+    svc_def_set_watchdog_ms(wd_ms, 1500);
+    assert(df_has(generate_unit(wd_ms), "\nWatchdogSec=1500ms\n"),
+      "2a: a sub-second remainder is kept exactly (1500ms), not truncated to 1");
+
+    var hc_n = df_svc(str_from("/usr/bin/x"), SVC_NOTIFY);
+    store64(hc_n + 72, health_check_new(HC_HTTP_GET, str_from("http://x"), 0, 5000, 2000, 3));
+    assert_eq(df_has(generate_unit(hc_n), "WatchdogSec="), 0,
+      "2a: a health check alone is not a ping deadline, even under Type=notify");
+
+    # (b) the binary must be an absolute path; anything else is refused.
+    assert_eq(generate_unit(df_svc(str_from("-/usr/bin/x"), SVC_SIMPLE)), 0, "2b: '-' prefix refused");
+    assert_eq(generate_unit(df_svc(str_from("@/usr/bin/x"), SVC_SIMPLE)), 0, "2b: '@' prefix refused");
+    assert_eq(generate_unit(df_svc(str_from(":/usr/bin/x"), SVC_SIMPLE)), 0, "2b: ':' prefix refused");
+    assert_eq(generate_unit(df_svc(str_from("+/usr/bin/x"), SVC_SIMPLE)), 0, "2b: '+' prefix refused");
+    assert_eq(generate_unit(df_svc(str_from("!/usr/bin/x"), SVC_SIMPLE)), 0, "2b: '!' prefix refused");
+    assert_eq(generate_unit(df_svc(str_from("!!/usr/bin/x"), SVC_SIMPLE)), 0, "2b: '!!' prefix refused");
+    assert_eq(generate_unit(df_svc(str_from("-/usr/bin/my app"), SVC_SIMPLE)), 0,
+      "2b: a prefix inside a quoted word is refused too");
+    assert_eq(generate_unit(df_svc(str_from("usr/bin/x"), SVC_SIMPLE)), 0, "2b: a relative path is refused");
+    assert_eq(generate_unit(df_svc(str_from("x"), SVC_SIMPLE)), 0, "2b: a bare name is refused");
+    assert_eq(generate_unit(df_svc(str_from(""), SVC_SIMPLE)), 0, "2b: an empty binary is refused");
+
+    var ok_u = generate_unit(df_svc(str_from("/usr/bin/x"), SVC_SIMPLE));
+    assert(df_has(ok_u, "\nExecStart=/usr/bin/x\n"), "2b: an absolute binary is unchanged");
+    var sp_u = generate_unit(df_svc(str_from("/opt/my app/x"), SVC_SIMPLE));
+    assert(df_has(sp_u, "\nExecStart=\"/opt/my app/x\"\n"), "2b: an absolute binary with a space is still quoted");
+
+    # =====================================================================
+    # 3. tmpfiles_apply — native *at applier, no symlink following
+    # =====================================================================
+    test_group("3 tmpfiles_apply");
+
+    var me_uid = sys_getuid();
+    var me_gid = sys_getgid();
+    var base = df_path("tmpf");
+    var away = df_path("away");
+    df_rm_rf(base);
+    df_rm_rf(away);
+    assert_eq(sys_mkdir(str_data(base), 448), 0, "3: scratch base created");
+    assert_eq(sys_mkdir(str_data(away), 448), 0, "3: scratch target dir created");
+    var low_before = df_lowest_fd();
+
+    # --- directories: mode (past the umask) and owner ---
+    var d1 = df_sub(base, "d1");
+    assert_eq(tmpfiles_apply(df_one(df_entry_dir(d1, 488, me_uid, me_gid))), 0, "3a: directory entry applied");
+    assert_eq(df_type(d1), 0x4000, "3a: directory created");
+    assert_eq(df_perm(d1), 488, "3a: directory mode 0o750");
+    assert_eq(df_uid(d1), me_uid, "3a: directory owner uid");
+    assert_eq(df_gid(d1), me_gid, "3a: directory owner gid");
+
+    var d2 = df_sub(base, "d2");
+    tmpfiles_apply(df_one(df_entry_dir(d2, 511, -1, -1)));
+    assert_eq(df_perm(d2), 511, "3a: mode 0o777 survives the umask");
+
+    var d3 = df_sub(base, "d3");
+    sys_mkdir(str_data(d3), 448);
+    assert_eq(tmpfiles_apply(df_one(df_entry_dir(d3, 493, -1, -1))), 0, "3a: existing directory accepted");
+    assert_eq(df_perm(d3), 493, "3a: an existing directory gets the requested mode");
+
+    var d4 = df_sub(base, "p/q/r");
+    assert_eq(tmpfiles_apply(df_one(df_entry_dir(d4, 448, -1, -1))), 0, "3a: missing parents created");
+    assert_eq(df_perm(d4), 448, "3a: nested directory mode 0o700");
+    assert_eq(df_type(df_sub(base, "p/q")), 0x4000, "3a: intermediate parent is a directory");
+
+    # --- a symlink in a PARENT component ---
+    var plink = df_sub(base, "link");
+    assert_eq(sys_symlink(str_data(away), str_data(plink)), 0, "3b: parent symlink planted");
+    assert_eq(tmpfiles_apply_entry(df_entry_dir(df_sub(base, "link/sub"), 493, -1, -1)), -ENOTDIR,
+      "3b: a directory under a symlinked parent is refused (ENOTDIR from the O_NOFOLLOW walk)");
+    assert(tmpfiles_apply(df_one(df_entry_dir(df_sub(base, "link/a/b"), 493, -1, -1))) == 1,
+      "3b: a deeper directory under a symlinked parent is refused");
+    assert(tmpfiles_apply(df_one(df_entry_link(df_sub(base, "link/s"), str_from("/nonexistent")))) == 1,
+      "3b: a symlink under a symlinked parent is refused");
+    assert(tmpfiles_apply(df_one(df_entry_dev(df_sub(base, "link/n"), 99, 0, 0, 438, -1, -1))) == 1,
+      "3b: a device under a symlinked parent is refused");
+    assert_eq(vec_len(dir_list(away)), 0, "3b: nothing was created through the symlinked parent");
+    assert_eq(df_type(plink), 0xA000, "3b: the planted parent symlink is untouched");
+
+    # --- a symlink AT the final path of a directory entry ---
+    var victim = df_sub(away, "victim");
+    sys_mkdir(str_data(victim), 448);
+    var dlink = df_sub(base, "dlink");
+    sys_symlink(str_data(victim), str_data(dlink));
+    assert(tmpfiles_apply_entry(df_entry_dir(dlink, 511, me_uid, me_gid)) < 0,
+      "3c: a directory entry whose path is a symlink is refused");
+    assert_eq(df_perm(victim), 448, "3c: the symlink's target directory is not chmod'ed through it");
+    assert_eq(df_type(dlink), 0xA000, "3c: the symlink is left in place");
+    var vfile = df_sub(away, "vfile");
+    df_touch(vfile);
+    var flink = df_sub(base, "flink");
+    sys_symlink(str_data(vfile), str_data(flink));
+    assert(tmpfiles_apply_entry(df_entry_dir(flink, 511, -1, -1)) < 0,
+      "3c: a directory entry whose path is a symlink to a file is refused");
+    assert_eq(df_perm(vfile), 384, "3c: the file behind it keeps its mode");
+    var rfile = df_sub(base, "rfile");
+    df_touch(rfile);
+    assert(tmpfiles_apply_entry(df_entry_dir(rfile, 511, -1, -1)) < 0,
+      "3c: a directory entry whose path is a regular file is refused");
+    assert_eq(df_perm(rfile), 384, "3c: the regular file keeps its mode");
+
+    # --- symlink entries ---
+    var l1 = df_sub(base, "l1");
+    var ta = str_from("/nonexistent/target-a");
+    var tb = str_from("/nonexistent/target-b");
+    assert_eq(tmpfiles_apply_entry(df_entry_link(l1, ta)), 0, "3d: symlink created");
+    assert_eq(df_type(l1), 0xA000, "3d: it is a symlink");
+    assert(df_link_is(l1, ta), "3d: it points at the target");
+    assert_eq(tmpfiles_apply_entry(df_entry_link(l1, tb)), 0, "3d: an existing symlink is replaced");
+    assert(df_link_is(l1, tb), "3d: the replacement points at the new target");
+    var l2 = df_sub(base, "l2");
+    sys_symlink(str_data(away), str_data(l2));
+    assert_eq(tmpfiles_apply_entry(df_entry_link(l2, ta)), 0, "3d: a symlink to a directory is replaced itself");
+    assert(df_link_is(l2, ta), "3d: ... the link, not a new entry inside the directory");
+    # A temporary link left by an interrupted run is replaced; anything else
+    # under that name stops the entry and is left alone.
+    var stale_sb = str_builder_new();
+    str_builder_add_cstr(stale_sb, ".argonaut-tmpfiles-");
+    str_builder_add_int(stale_sb, sys_getpid());
+    var stale = df_sub(base, str_data(str_builder_build(stale_sb)));
+    sys_symlink("/nonexistent/stale", str_data(stale));
+    assert_eq(tmpfiles_apply_entry(df_entry_link(l1, ta)), 0, "3d: a stale temporary link does not block the replace");
+    assert(df_link_is(l1, ta), "3d: ... and the replacement lands");
+    assert_eq(df_mode(stale), -ENOENT, "3d: ... and the stale link is gone");
+    df_touch(stale);
+    assert_eq(tmpfiles_apply_entry(df_entry_link(l1, tb)), -EEXIST,
+      "3d: a non-link under the temporary name stops the replace");
+    assert_eq(df_type(stale), 0x8000, "3d: ... and is left alone");
+    assert(df_link_is(l1, ta), "3d: ... and the existing link is unchanged");
+    sys_unlinkat(AT_FDCWD, str_data(stale), 0);
+
+    assert_eq(tmpfiles_apply_entry(df_entry_link(rfile, ta)), -EEXIST, "3d: a regular file is not replaced");
+    assert_eq(df_type(rfile), 0x8000, "3d: the regular file is still there");
+    assert_eq(tmpfiles_apply_entry(df_entry_link(d1, ta)), -EEXIST, "3d: a directory is not replaced");
+    assert_eq(df_type(d1), 0x4000, "3d: the directory is still there");
+
+    # --- device entries ---
+    var nd = df_sub(base, "null");
+    assert_eq(tmpfiles_apply_entry(df_entry_dev(nd, 99, 1, 3, 438, -1, -1)), -EPERM,
+      "3e: an unprivileged char device fails with EPERM");
+    assert_eq(df_mode(nd), -ENOENT, "3e: ... and leaves nothing behind");
+    var bd = df_sub(base, "sda");
+    assert_eq(tmpfiles_apply_entry(df_entry_dev(bd, 98, 8, 0, 432, -1, -1)), -EPERM,
+      "3e: an unprivileged block device fails with EPERM");
+    assert_eq(df_mode(bd), -ENOENT, "3e: ... and leaves nothing behind");
+    # char 0:0 (the overlayfs whiteout) is the one node an unprivileged
+    # process may create, so it carries the success path.
+    var wd = df_sub(base, "wh");
+    assert_eq(tmpfiles_apply_entry(df_entry_dev(wd, 99, 0, 0, 438, me_uid, me_gid)), 0, "3e: char 0:0 created");
+    assert_eq(df_type(wd), 0x2000, "3e: it is a character device");
+    assert_eq(df_perm(wd), 438, "3e: mode 0o666 survives the umask");
+    assert_eq(df_uid(wd), me_uid, "3e: device owner uid");
+    assert_eq(tmpfiles_apply_entry(df_entry_dev(wd, 99, 0, 0, 384, -1, -1)), 0,
+      "3e: re-applying over the same device is accepted");
+    assert_eq(df_perm(wd), 384, "3e: ... and sets the new mode");
+    assert(tmpfiles_apply_entry(df_entry_dev(rfile, 99, 0, 0, 438, -1, -1)) < 0,
+      "3e: a device entry over a regular file is refused");
+    assert_eq(df_type(rfile), 0x8000, "3e: the regular file is untouched");
+    assert_eq(df_perm(rfile), 384, "3e: ... including its mode");
+    assert(tmpfiles_apply_entry(df_entry_dev(flink, 99, 0, 0, 438, -1, -1)) < 0,
+      "3e: a device entry over a symlink is refused");
+    assert_eq(df_perm(vfile), 384, "3e: the symlink's target is not chmod'ed through it");
+    assert(tmpfiles_apply_entry(df_entry_dev(df_sub(base, "big"), 99, 4096, 0, 438, -1, -1)) < 0,
+      "3e: a major number past 4095 is refused");
+    assert(tmpfiles_apply_entry(df_entry_dev(df_sub(base, "neg"), 99, 0, -1, 438, -1, -1)) < 0,
+      "3e: a negative minor number is refused");
+
+    # --- refusals before any syscall ---
+    assert(tmpfiles_apply_entry(df_entry_dir(str_from("tmp/rel"), 493, -1, -1)) < 0,
+      "3f: a relative path is refused");
+    assert(tmpfiles_apply_entry(df_entry_dir(df_sub(base, "d1/../esc"), 493, -1, -1)) < 0,
+      "3f: a '..' path is refused");
+    assert_eq(df_mode(df_sub(base, "esc")), -ENOENT, "3f: ... and nothing is created");
+    assert(tmpfiles_apply_entry(df_entry_dir(df_sub(base, "."), 448, -1, -1)) < 0,
+      "3f: a final '.' component is refused");
+    assert_eq(df_perm(base), 448, "3f: ... so the parent's mode is not changed through it");
+    assert(tmpfiles_apply_entry(df_entry_dir(str_from("/"), 493, -1, -1)) < 0, "3f: '/' itself is refused");
+    var nulp = df_sub(base, "nul");
+    var nulbuf = alloc(str_len(nulp) + 8);
+    memcpy(nulbuf, str_data(nulp), str_len(nulp));
+    store8(nulbuf + str_len(nulp), 0);
+    store8(nulbuf + str_len(nulp) + 1, 47);    # '/'
+    store8(nulbuf + str_len(nulp) + 2, 120);   # 'x'
+    store8(nulbuf + str_len(nulp) + 3, 0);
+    assert_eq(tmpfiles_apply_entry(df_entry_dir(str_new(nulbuf, str_len(nulp) + 3), 493, -1, -1)), -EINVAL,
+      "3f: a NUL inside the path is refused");
+    assert_eq(df_mode(nulp), -ENOENT, "3f: ... and the name before it is not created");
+    assert(tmpfiles_apply_entry(df_entry_link(df_sub(base, "rl"), str_from("rel/target"))) < 0,
+      "3f: a relative symlink target is refused");
+    assert(tmpfiles_apply_entry(df_entry_dir(df_sub(base, "m"), 4096, -1, -1)) < 0,
+      "3f: a mode past 0o7777 is refused");
+
+    # --- per-entry failures do not stop the batch ---
+    var batch = vec_new();
+    vec_push(batch, df_entry_dir(str_from("rel/x"), 493, -1, -1));
+    vec_push(batch, df_entry_dir(df_sub(base, "after"), 493, -1, -1));
+    vec_push(batch, df_entry_dev(df_sub(base, "null2"), 99, 1, 3, 438, -1, -1));
+    vec_push(batch, df_entry_link(df_sub(base, "after-link"), ta));
+    assert_eq(tmpfiles_apply(batch), 2, "3g: the count of failed entries is returned");
+    assert_eq(df_type(df_sub(base, "after")), 0x4000, "3g: an entry after a failure is still applied");
+    assert_eq(df_type(df_sub(base, "after-link")), 0xA000, "3g: ... and so is the last one");
+
+    assert_eq(df_lowest_fd(), low_before, "3: no descriptor leaked");
+    var leftovers = 0;
+    var names = dir_list(base);
+    for (var i = 0; i < vec_len(names); i = i + 1) {
+        if (str_starts_with(vec_get(names, i), ".")) { leftovers = leftovers + 1; }
+    }
+    assert_eq(leftovers, 0, "3: no temporary link left behind");
+
+    df_rm_rf(base);
+    df_rm_rf(away);
+    assert_eq(df_mode(base), -ENOENT, "3: scratch removed");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

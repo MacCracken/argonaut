@@ -89,8 +89,80 @@ fn capability_setpriv_cmd(caps_to_drop, binary, args) {
 # =========================================================================
 # Emergency shell authentication
 # =========================================================================
+#
+# THE CREDENTIAL (1.16.2)
+# -----------------------
+# `EmergencyShellConfig.auth_password_hash` (+32) holds one of two records:
+#
+#     v1$<t>$<m>$<p>$<salt-hex>$<tag-hex>    Argon2id, parameters stored
+#     <64 lowercase hex characters>         LEGACY unsalted SHA-256
+#
+#     e.g. v1$2$19456$1$6b796265726e65742d746573742d3031$2b31...7c5e
+#
+# The v1 record is agnostic's format (agnostic/src/auth/crypto.cyr), adopted
+# by kybernet 1.5.9 (src/lib/emergency_auth.cyr) with the bounds below, so the
+# AGNOS pack has ONE credential shape. The parameters travel in the record:
+# raising the default cost one day must not silently turn every deployed
+# credential into "wrong password". Anything that is neither record is denied.
+#
+# Records are produced OFFLINE (kybernet's scripts/mkcred.sh, i.e. `openssl
+# kdf ... ARGON2ID`). Nothing here draws entropy: a salt drawn in PID 1 blocks
+# until the kernel pool is seeded, and this runs when the boot has failed.
+#
+# The two shapes are provably disjoint. Legacy is exactly 64 characters of
+# [0-9a-f]; v1 begins "v1$", and neither 'v' nor '$' is a hex digit. A record
+# that begins "v1$" and does not parse is INVALID: it never falls back to the
+# legacy arm, so a damaged record cannot be downgraded to unsalted SHA-256.
+#
+# ⚠ LEGACY IS LOWERCASE ONLY HERE, where kybernet's classifier also accepts
+# A-F. The legacy compare is byte-exact against `hex_encode_str`, which is
+# lowercase, and it stays exactly as it was because kybernet's legacy arm calls
+# verify_emergency_auth verbatim. An uppercase digest therefore never verifies,
+# and classifying it LEGACY would bless at load a credential the verifier
+# always denies. kybernet lowercases the digest before it calls.
 
-# SHA-256 password hash via sigil. Returns 64-char hex Str.
+enum EmergencyCredKind {
+    ECRED_NONE = 0;       # nothing configured
+    ECRED_LEGACY = 1;     # 64 lowercase hex, unsalted SHA-256 (deprecated)
+    ECRED_ARGON2ID = 2;   # a v1 record that parses and is in bounds
+    ECRED_INVALID = 3;    # present but unusable: always denies
+}
+
+# kybernet's bounds, copied, not sigil's. sigil enforces only RFC 9106 §3.1's
+# structural floors (t >= 1, m >= 8p, salt >= 8 B, tag >= 4 B) and no ceiling.
+# Out-of-range records are REJECTED, never clamped: clamping a stored parameter
+# derives a different tag, so a right password would fail forever.
+#   - m >= 8 MiB: 8 KiB (sigil's floor) fits in one GPU SM's shared memory and
+#     buys no memory-hardness at all.
+#   - m <= 64 MiB: the arena is touched in full; above this an overcommitted
+#     mapping can OOM an unkillable PID 1. The bound is checked during digit
+#     accumulation, so m = 2^54 + 1024 (which wraps argon2_mem_bytes to 1 MiB
+#     and turns the fill into a wild write) is never constructed.
+#   - p == 1: sigil fills lanes serially, so p > 1 gives the defender nothing
+#     and cuts the attacker's sequential depth.
+#   - m * t <= 131072: the work cap bounds the stall. kybernet measured
+#     m=8192 t=1 at 54 ms and m=19456 t=2 (the default) at 232 ms on x86_64.
+#   - salt 16..64 B, tag 32..64 B: RFC 9106 §4's 128-bit salt and 256-bit tag
+#     are the floors.
+enum EmergencyCredBound {
+    ECRED_T_MIN = 1;
+    ECRED_T_MAX = 8;
+    ECRED_M_MIN = 8192;       # KiB
+    ECRED_M_MAX = 65536;      # KiB
+    ECRED_P_MIN = 1;
+    ECRED_P_MAX = 1;
+    ECRED_WORK_MAX = 131072;  # m * t
+    ECRED_SALT_MIN = 16;      # bytes
+    ECRED_SALT_MAX = 64;
+    ECRED_TAG_MIN = 32;       # bytes
+    ECRED_TAG_MAX = 64;
+}
+
+# SHA-256 password hash via sigil. Returns 64-char lowercase hex Str.
+# 1.16.2: this is the LEGACY credential's hash and nothing else. New
+# credentials are v1 Argon2id records, made offline. Not #deprecated: the
+# legacy arm below still calls it, and kybernet's suite builds its legacy
+# fixtures with it. It goes when the legacy arm does.
 fn password_hash(data, len) {
     var ctx = sha256_init();
     sha256_update(ctx, data, len);
@@ -109,7 +181,275 @@ fn constant_time_eq(a, a_len, b, b_len) {
     return diff == 0;
 }
 
+# --- v1 record parsing (1.16.2) -------------------------------------------
+#
+# Every helper reads the record IN PLACE, by offset and length, and allocates
+# nothing: PID 1's bump arena never frees, and an operator retrying a password
+# at the console must not grow it. (kybernet splits fields with str_sub, which
+# costs a 16-byte header per field per call.) A field is not NUL-terminated,
+# so every read carries an explicit length.
+
+# 1 if `c` is [0-9a-f], or also [A-F] when `upper_ok` is 1.
+fn _ecred_hexdigit(c, upper_ok) {
+    if (c >= 48 && c <= 57) { return 1; }    # 0-9
+    if (c >= 97 && c <= 102) { return 1; }   # a-f
+    if (upper_ok == 1) {
+        if (c >= 65 && c <= 70) { return 1; }   # A-F
+    }
+    return 0;
+}
+
+# 1 if `h` is exactly 64 lowercase hex characters: the legacy digest.
+fn _ecred_is_legacy(h) {
+    if (str_len(h) != 64) { return 0; }
+    var d = str_data(h);
+    for (var i = 0; i < 64; i = i + 1) {
+        if (_ecred_hexdigit(load8(d + i), 0) == 0) { return 0; }
+    }
+    return 1;
+}
+
+# 1 if `h` begins with the literal "v1$". Checked before any field split, so a
+# legacy digest never enters the parser.
+fn _ecred_has_v1_prefix(h) {
+    if (str_len(h) < 3) { return 0; }
+    var d = str_data(h);
+    if (load8(d) != 118) { return 0; }       # 'v'
+    if (load8(d + 1) != 49) { return 0; }    # '1'
+    if (load8(d + 2) != 36) { return 0; }    # '$'
+    return 1;
+}
+
+# Number of '$' separators in `h`.
+fn _ecred_seps(h) {
+    var n = str_len(h);
+    var d = str_data(h);
+    var seps = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        if (load8(d + i) == 36) { seps = seps + 1; }
+    }
+    return seps;
+}
+
+# Byte offset of field `want` (0-based, '$'-separated), or -1 if absent.
+fn _ecred_off(h, want) {
+    if (want == 0) { return 0; }
+    var n = str_len(h);
+    var d = str_data(h);
+    var seen = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        if (load8(d + i) == 36) {
+            seen = seen + 1;
+            if (seen == want) { return i + 1; }
+        }
+    }
+    return -1;
+}
+
+# Length of the field that starts at `off`: up to the next '$' or the end.
+fn _ecred_len(h, off) {
+    var n = str_len(h);
+    var d = str_data(h);
+    var i = off;
+    while (i < n) {
+        if (load8(d + i) == 36) { return i - off; }
+        i = i + 1;
+    }
+    return n - off;
+}
+
+# Field `f` as a bounded non-negative decimal, or -1 for an absent or empty
+# field, a sign or any non-digit, more than 19 characters, or a value over
+# `max`. The bound is checked INSIDE the accumulation: checked afterwards, a
+# long digit run overflows i64 first and lands on a small value that passes.
+fn _ecred_num(h, f, max) {
+    var off = _ecred_off(h, f);
+    if (off < 0) { return -1; }
+    var n = _ecred_len(h, off);
+    if (n <= 0) { return -1; }
+    if (n > 19) { return -1; }
+    var d = str_data(h) + off;
+    var acc = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        var c = load8(d + i);
+        if (c < 48 || c > 57) { return -1; }
+        acc = acc * 10 + (c - 48);
+        if (acc > max) { return -1; }
+    }
+    return acc;
+}
+
+# Byte length of hex field `f` (characters / 2), or -1 if it is absent,
+# empty, odd-length or not hex. Salt and tag hex are case-insensitive:
+# hex_decode_into decodes both cases, so either verifies.
+fn _ecred_hexlen(h, f) {
+    var off = _ecred_off(h, f);
+    if (off < 0) { return -1; }
+    var n = _ecred_len(h, off);
+    if (n <= 0) { return -1; }
+    if ((n & 1) != 0) { return -1; }
+    var d = str_data(h) + off;
+    for (var i = 0; i < n; i = i + 1) {
+        if (_ecred_hexdigit(load8(d + i), 1) == 0) { return -1; }
+    }
+    return n / 2;
+}
+
+# 1 when `h` is a complete v1 record with every field present, well-formed
+# and in bounds; 0 otherwise.
+fn _ecred_v1_valid(h) {
+    if (_ecred_has_v1_prefix(h) == 0) { return 0; }
+    # Exactly six fields. A seventh is something this version does not
+    # understand, and guessing at it is how a format grows a second meaning.
+    if (_ecred_seps(h) != 5) { return 0; }
+    var t = _ecred_num(h, 1, ECRED_T_MAX);
+    var m = _ecred_num(h, 2, ECRED_M_MAX);
+    var p = _ecred_num(h, 3, ECRED_P_MAX);
+    if (t < ECRED_T_MIN) { return 0; }
+    if (m < ECRED_M_MIN) { return 0; }
+    if (p < ECRED_P_MIN) { return 0; }
+    # RFC 9106 §3.1 (m >= 8 blocks per lane). sigil checks it too, but a
+    # record that trips it should be refused here, not denied at the prompt.
+    if (m < 8 * p) { return 0; }
+    # Both factors are bounded above, so the product cannot overflow.
+    if (m * t > ECRED_WORK_MAX) { return 0; }
+    var slen = _ecred_hexlen(h, 4);
+    var glen = _ecred_hexlen(h, 5);
+    if (slen < ECRED_SALT_MIN) { return 0; }
+    if (slen > ECRED_SALT_MAX) { return 0; }
+    if (glen < ECRED_TAG_MIN) { return 0; }
+    if (glen > ECRED_TAG_MAX) { return 0; }
+    return 1;
+}
+
+# Classify a stored credential (a Str, or 0). One answer per input:
+#   0 or empty                    -> ECRED_NONE
+#   "v1$..." that fully parses    -> ECRED_ARGON2ID
+#   "v1$..." that does not        -> ECRED_INVALID (never ECRED_LEGACY)
+#   64 lowercase hex characters   -> ECRED_LEGACY
+#   anything else                 -> ECRED_INVALID
+# For config-load validation: a consumer that loads a credential should refuse
+# ECRED_INVALID with a message then, not discover it at the prompt.
+fn emergency_cred_kind(h) {
+    if (h == 0) { return ECRED_NONE; }
+    if (str_len(h) == 0) { return ECRED_NONE; }
+    if (_ecred_has_v1_prefix(h) == 1) {
+        if (_ecred_v1_valid(h) == 1) { return ECRED_ARGON2ID; }
+        return ECRED_INVALID;
+    }
+    if (_ecred_is_legacy(h) == 1) { return ECRED_LEGACY; }
+    return ECRED_INVALID;
+}
+
+# Parse a v1 record. 1 when it is valid, else 0. When `out` is non-zero it
+# must point at 5 i64 slots, filled only on success (kybernet's layout):
+#   +0 t_cost   +8 m_cost (KiB)   +16 parallelism   +24 salt bytes   +32 tag bytes
+fn emergency_cred_parse(h, out) {
+    if (h == 0) { return 0; }
+    if (_ecred_v1_valid(h) == 0) { return 0; }
+    if (out != 0) {
+        store64(out, _ecred_num(h, 1, ECRED_T_MAX));
+        store64(out + 8, _ecred_num(h, 2, ECRED_M_MAX));
+        store64(out + 16, _ecred_num(h, 3, ECRED_P_MAX));
+        store64(out + 24, _ecred_hexlen(h, 4));
+        store64(out + 32, _ecred_hexlen(h, 5));
+    }
+    return 1;
+}
+
+# --- the Argon2 arena (1.16.2) ---------------------------------------------
+#
+# ⚠ THE ARENA IS A PRIVATE MAPPING, NEVER alloc(). Argon2 needs m KiB (8 to
+# 64 MiB here) and touches every page of it. alloc() is a bump allocator with
+# no free, so each verification would leave its arena committed in PID 1 for
+# the rest of the boot: an operator retrying a password, or anyone at the
+# console, could grow PID 1 by 64 MiB per attempt. kybernet takes the arena from
+# alloc() because it verifies once and then execs or halts; argonaut's
+# verify_emergency_auth is a library call with no such guarantee, so the
+# arena is mmapped here and unmapped before the verdict is returned. The
+# salt, the stored tag and the derived tag ride on the tail of the same
+# mapping, so a verification adds nothing to the bump arena at all.
+# Not fl_alloc either: sigil-argon2.cyr's header marks its fl_alloc path
+# UNSAFE FOR PID 1, and an explicit mapping keeps the release checkable.
+#
+# Normal overcommit accounting, not MAP_NORESERVE: these pages will all be
+# touched, so a request the kernel cannot back should fail HERE (and deny)
+# rather than OOM an unkillable PID 1 halfway through the fill.
+
+# Diagnostic counters, plain (not atomic) stores: verification runs on the
+# one thread that owns the console.
+var _ecred_live = 0;   # bytes currently mapped for Argon2 arenas
+var _ecred_peak = 0;   # largest arena mapped so far
+
+# Bytes of Argon2 arena still mapped. 0 whenever no verification is running;
+# anything else means a munmap was refused and that mapping leaked.
+fn emergency_auth_arena_live() { return _ecred_live; }
+
+# Size of the largest Argon2 arena mapped so far, in bytes.
+fn emergency_auth_arena_peak() { return _ecred_peak; }
+
+# A fresh anonymous R/W mapping of `len` bytes, or 0. SYS_MMAP is the stdlib's
+# arch-dispatched number (x86_64 9, aarch64 222), as lib/freelist.cyr uses it.
+fn _ecred_map(len) {
+    var p = syscall(SYS_MMAP, 0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p <= 0) { return 0; }    # -errno on failure
+    _ecred_live = _ecred_live + len;
+    if (len > _ecred_peak) { _ecred_peak = len; }
+    return p;
+}
+
+fn _ecred_unmap(p, len) {
+    var r = syscall(SYS_MUNMAP, p, len);
+    if (r == 0) { _ecred_live = _ecred_live - len; }
+    return r;
+}
+
+# Verify `pw` (pw_len bytes) against v1 record `h`. 1 on a match, else 0.
+# Every failure is a plain 0: the record's shape is public, the verdict is not.
+fn _ecred_verify_argon2id(h, pw, pw_len) {
+    if (_ecred_v1_valid(h) == 0) { return 0; }
+    var t = _ecred_num(h, 1, ECRED_T_MAX);
+    var m = _ecred_num(h, 2, ECRED_M_MAX);
+    var p = _ecred_num(h, 3, ECRED_P_MAX);
+    var slen = _ecred_hexlen(h, 4);
+    var glen = _ecred_hexlen(h, 5);
+    var d = str_data(h);
+    var soff = _ecred_off(h, 4);
+    var goff = _ecred_off(h, 5);
+
+    # argon2_mem_bytes, never m * 1024: it includes sigil's 5,504-byte
+    # working lane on the arena's tail. It is a multiple of 8, so the byte
+    # buffers after it stay aligned.
+    var need = argon2_mem_bytes(m, p);
+    if (need <= 0) { return 0; }
+    var total = need + slen + glen + glen;
+    var mem = _ecred_map(total);
+    if (mem == 0) { return 0; }
+    var salt = mem + need;
+    var want = salt + slen;
+    var got = want + glen;
+
+    var ok = 0;
+    if (hex_decode_into(d + soff, slen * 2, salt) == 1) {
+        if (hex_decode_into(d + goff, glen * 2, want) == 1) {
+            # argon2id_into, never argon2id: the wrapper allocates through
+            # fl_alloc (sigil-argon2.cyr marks it UNSAFE FOR PID 1).
+            var rc = argon2id_into(mem, pw, pw_len, salt, slen, t, m, p, got, glen);
+            # Constant-time on the tag compare. Lengths and parameters are
+            # public; branching on them leaks nothing.
+            if (rc == SIGIL_ERR_NONE) { ok = constant_time_eq(got, glen, want, glen); }
+        }
+    }
+    # argon2id_into wipes the blocks; unmapping drops the rest (salt, both
+    # tags), and the kernel zeroes the pages before anyone else gets them.
+    _ecred_unmap(mem, total);
+    return ok;
+}
+
+# 1 = granted, 0 = denied. The contract kybernet's legacy arm calls verbatim:
+# EmergencyShellConfig with require_auth at +24 and the credential at +32.
 fn verify_emergency_auth(config, password_input) {
+    if (config == 0) { return 0; }   # 1.16.2: deny, never load64(0 + 24)
     var require_auth = load64(config + 24);  # EmergencyShellConfig.require_auth
     if (require_auth == 0) { return 1; }
 
@@ -120,7 +460,20 @@ fn verify_emergency_auth(config, password_input) {
     # means the check cannot be satisfied, not that it should be skipped.
     var stored_hash = load64(config + 32);   # auth_password_hash
     if (stored_hash == 0) { return 0; }
+    if (password_input == 0) { return 0; }   # 1.16.2: str_data(0) is load64(0)
 
+    # 1.16.2: classify first. A v1 record is verified with Argon2id; only a
+    # 64-lowercase-hex digest reaches the legacy arm; everything else,
+    # including a malformed v1 record, is denied.
+    var kind = emergency_cred_kind(stored_hash);
+    if (kind == ECRED_ARGON2ID) {
+        return _ecred_verify_argon2id(stored_hash, str_data(password_input),
+          str_len(password_input));
+    }
+    if (kind != ECRED_LEGACY) { return 0; }
+
+    # LEGACY: byte for byte the pre-1.16.2 path. kybernet's legacy arm
+    # depends on exactly this compare.
     var input_data = str_data(password_input);
     var input_len = str_len(password_input);
     var hash_str = password_hash(input_data, input_len);

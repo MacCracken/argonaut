@@ -6,6 +6,23 @@
 
 ## Version
 
+**1.16.2** (the 2026-10-14 audit's deferred findings, repaired.
+- **Shutdown:** `init_execute_shutdown` stops services in reverse dependency waves inside
+  one shared budget; `init_stop_all` now runs it, and every service ends STOPPED and audited.
+- **Emergency shell:** verifies a v1 Argon2id credential (kybernet's format), with the
+  arena in a private `mmap`; `emergency_shell_default()` requires authentication.
+- **Health audit:** transitions plus an hourly pass heartbeat.
+- **tmpfiles:** native and symlink-safe (`tmpfiles_apply`, `ag_sys_symlinkat`).
+- **Notify:** `notify_try_recv` / `notify_drain` are deprecated; descriptors passed over
+  the notify socket are closed.
+- **Unit generation:** `WatchdogSec=` only for `SVC_NOTIFY`; a non-absolute binary is
+  refused.
+- **Restart limit:** a refused restart is audited.
+- **TPM:** the key policy is documented in architecture note 005.
+
+41 suites / 1,662 assertions on x86_64 and under qemu-aarch64. Bench gate: neutral.
+Several behaviour changes; see CHANGELOG [1.16.2].)
+
 **1.16.1** (the 2026-10-14 hardening and optimization pass: 13 MEDIUM and 18 LOW
 fixed, each MEDIUM behind a test that failed first. The fixes include a bounded
 HTTP check, process-group kills, an allocation-free hosts lookup, a strict PID-file
@@ -522,9 +539,15 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 - **`streq(str_data(..), ..)` warns** (6.6.20+). `streq` reads to a NUL, and a
   Str's bytes are not NUL-terminated at its length. Compare a Str with
   `str_eq_cstr(s, "lit")` or `str_eq(a, b)`.
-- **Every call to a redefined fn binds its last definition** (6.6.20+). The main
-  build defines no fn twice. The test and bench builds redefine eight `sakshi_*`
-  fns as stubs, which prints eight `duplicate fn` warnings per build, as on 6.6.6.
+- **Every call to a redefined fn binds its last definition** (6.6.20+).
+  - **Main build:** 14 fns are defined twice. `lib/sigil-argon2.cyr` repeats sigil's
+    bank / TLS / once scaffolding (`_sigil_ensure_slot` … `_sigil_wipe64`), which
+    `lib/sigil-mldsa.cyr` also defines. At sigil 3.13.12 all 14 bodies are identical, so
+    the binding changes nothing. **Re-diff them at every sigil bump**; kybernet's build
+    prints the same 14.
+  - **Test and bench builds:** they also redefine eight `sakshi_*` fns as stubs (eight
+    more warnings). The test builds add two deliberate `#deprecated` warnings, for
+    `notify_try_recv` / `notify_drain`.
 - **`lib/bench.cyr`** (6.6.5+) takes min/max only from windows the clock
   resolves to 1 %, and otherwise reports the mean. On the dev host (HPET
   clocksource, ~2.3 µs clock error) that is every row, so compare `avg_us` only.
@@ -552,16 +575,19 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Binary
 
-- **x86_64: 443,848 B**, a statically linked ELF, at 1.16.1
+- **x86_64: 448,448 B**, a statically linked ELF, at 1.16.2
   (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`).
-  2,544 fns are unreachable and 845,564 B of dead code is eliminated. That is
-  +9,248 over 1.16.0's 434,600 B, for the hardening code (guards, the start-timeout
-  loop, notify promotion, octal formatting, the strict parsers). 1.16.0 was
-  +3,568 over 1.15.6, all toolchain.
-- **aarch64: 1,569,992 B** at 1.16.1 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`).
-  2,546 fns are unreachable and 1,002,288 B is NOPed. That is +66,568 over
-  1.16.0's 1,503,424 B. aarch64 DCE fills dead code with NOPs instead of
-  compacting, so new code shows in full. 1.15.5's −193,872 came from 6.6.18's
+  2,620 fns are unreachable and 887,483 B of dead code is eliminated.
+  - **1.16.2 was +4,600 over 1.16.1's 443,848 B.** Adding the argon2 bundle alone was
+    +4,296: the scaffolding that reaches `main` before any argonaut code calls it.
+  - **1.16.1 was +9,248 over 1.16.0's 434,600 B**, for the hardening code (guards, the
+    start-timeout loop, notify promotion, octal formatting, the strict parsers).
+  - **1.16.0 was +3,568 over 1.15.6**, all toolchain.
+- **aarch64: 1,570,488 B** at 1.16.2 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`).
+  2,621 fns are unreachable and 1,051,668 B is NOPed. That is +496 over 1.16.1's
+  1,569,992 B, which was +66,568 over 1.16.0's 1,503,424 B. aarch64 DCE fills dead
+  code with NOPs instead of compacting, so new code usually shows in full. The 1.16.2
+  step is small although 49,380 B more is NOPed; the offset was not investigated. 1.15.5's −193,872 came from 6.6.18's
   ESYSXLAT compile-time fold.
 - **L3 helper: 15,080 B**, a static ELF (`qemu/helpers/l3-helper`), re-cut under
   6.7.9 at 1.16.0 (15,064 B under 6.6.20). It is bundled into the qemu harness
@@ -569,23 +595,45 @@ yukti 5.7-era pattern; patra `json_build/6` collision fix in
 
 ## Suites
 
-- **x86_64: 38 `.tcyr` suites / 1,336 assertions**, 0 failures (cyrius 6.7.9).
-  +319 at 1.16.1: `harden_net` (98), `harden_proc` (106), `harden_core` (99),
-  `poll_ms` (15) and one `health_exec` case.
-- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 38 / 38, 1,336 assertions**,
-  identical to x86_64. Run on the dev host at 1.16.1. CI still runs only the
+- **x86_64: 41 `.tcyr` suites / 1,662 assertions**, 0 failures (cyrius 6.7.9).
+  - **+326 at 1.16.2:** `emergency_kdf` (125), `deferred_fixes` (116) and
+    `shutdown_audit` (82), plus 3 in existing suites.
+  - **+319 at 1.16.1:** `harden_net` (98), `harden_proc` (106), `harden_core` (99),
+    `poll_ms` (15) and one `health_exec` case.
+- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 41 / 41, 1,662 assertions**,
+  identical to x86_64. Run on the dev host at 1.16.2. CI still runs only the
   aarch64 smoke.
 - **PID 1 in a pid namespace** (`unshare -Urpf --mount-proc ./build/argonaut`, no
-  root needed): the quick check for the supervisor loop. At 1.16.1 it shows 0 idle
+  root needed): the quick check for the supervisor loop. At 1.16.2 it shows 0 idle
   wakeups in 3 s, reaps 300 simultaneous orphans with 0 zombies left, and shuts down
   cleanly on SIGTERM.
 - **qemu PID-1 harness** (`qemu/pid1-harness-test.sh`, `qemu/boot-test.sh`,
-  KVM + `+invtsc`): at 1.16.1, M3 + L3 end-to-end and the supervisor-loop smoke
+  KVM + `+invtsc`): at 1.16.2, M3 + L3 end-to-end and the supervisor-loop smoke
   pass at the scripts' committed `-m 256M`. They have passed there since 1.15.5;
   the 1.15.4 binary, built on 6.6.6, panics under the same harness.
 - **Benches**: `src/bench_main.cyr` — 29 micros, the release gate
   (`scripts/bench-history.sh`); `tests/bcyr/argonaut.bcyr` carries the same 29,
   `tests/bcyr/api.bcyr` 8 more. History in `bench-history.csv`.
+
+### Bench snapshot (1.16.2-deferred-fixes, 2026-10-14)
+
+**Verdict: neutral, no regression** against `1.16.1-audit-bench-streaming`, plus a
+24-round interleaved A/B of the 1.16.1 tag and 1.16.2, pinned to one core:
+
+| Bench | 1.16.1 gate | 1.16.2 gate | A/B Δ |
+|---|---:|---:|---:|
+| generate_unit | 4.315 | 3.908 | −10.8 % |
+| resolve_order_chain_100 ⚠ | 230.597 | 222.046 | +1.5 % (ranges overlap) |
+| resolve_waves_chain_20 | 29.180 | 40.584 | −1.6 % |
+| resolve_order_chain_10 | 11.591 | 14.472 | +0.4 µs |
+| resolve_waves_wide_20 | 12.758 | 15.508 | +0.3 µs |
+| mark_all_steps_complete | 47.904 | 48.791 | +0.4 % |
+| audit_log_record | 4.098 | 4.191 | +0.6 % |
+
+- The three gate-row reads beyond ±2 µs (`resolve_waves_chain_20`, `resolve_order_chain_10`
+  and `resolve_waves_wide_20`) are cleared by the A/B. None of their paths changed.
+- Every other micro is within the ±2 µs band in both measurements.
+- `1.16.2-deferred-fixes` is the next gate's baseline.
 
 ### Bench snapshot (1.16.1-hardening, 2026-10-14)
 
@@ -725,9 +773,8 @@ are single runs.
   process hashmap tagged args bayan fnptr freelist chrono ct keccak thread
   thread_local random assert bench sakshi patra`, resolved by `cyrius deps` into
   the gitignored `lib/`.
-- **libro 2.11.0 — the sole git dep** (`modules = ["dist/libro.cyr"]`). It pins
-  sigil **3.13.12** and patra **1.16.0**; with libro these are the three commit
-  pins in `cyrius.lock`. No digest, proof or signature changed from 2.9.0 on.
+- **libro 2.11.0** (`modules = ["dist/libro.cyr"]`). It pins sigil **3.13.12** and
+  patra **1.16.0**; with libro these are the three commit pins in `cyrius.lock`. No digest, proof or signature changed from 2.9.0 on.
   2.10.0 made a streaming append allocation-free, which is what takes
   `audit_log_record` to 16 B / ~4.4 µs.
   ⚠ On a streaming chain the head hash `chain_append_nokeep` returns — and
@@ -745,11 +792,17 @@ are single runs.
   correct after a crashed writer, and libro measured +5–7 % on appends. patra
   1.14.3's aarch64 `O_NOFOLLOW` fix still covers that path on aarch64
   (CHANGELOG [1.15.2] Security).
-- **sigil 3.13.12 — thin sub-bundles only, transitive via libro**:
-  `lib/sigil-mldsa.cyr` (ed25519 + ML-DSA + hybrid + sha512),
-  `lib/sigil_sha256.cyr`, `lib/sigil_sha_ni.cyr` and `lib/sigil_hex.cyr` — 6,361
-  lines / 264,388 B of source. 6.7.9 folds sigil 3.13.11, and libro's notes record
-  that this thin set differs from 3.13.11 only in the version header.
+- **sigil 3.13.12 — thin sub-bundles only.**
+  - **Declared at the root** (`[deps.sigil]`, 1.16.2) at libro's tag, so it resolves as
+    one package. The block repeats libro's four modules and adds `dist/sigil-argon2.cyr`,
+    for the emergency-shell credential.
+  - **The bundles:** `lib/sigil-mldsa.cyr` (ed25519 + ML-DSA + hybrid + sha512),
+    `lib/sigil_sha256.cyr`, `lib/sigil_sha_ni.cyr`, `lib/sigil_hex.cyr` and
+    `lib/sigil-argon2.cyr`, 7,769 lines / 326,826 B of source. Argon2 is 1,408 lines /
+    62,438 B of that.
+  - **Keep the tag equal to libro's sigil pin at every libro bump.**
+  - 6.7.9 folds sigil 3.13.11. libro's notes record that the thin set differs from 3.13.11
+    only in the version header.
   ⚠ **Never name `"sigil"` in the stdlib array.**
   At 6.6.6 that pulls the 28,084-line / 1,106,698 B monolith (x509, RSA,
   authenticode), and the x86_64 binary grows 403,672 → 900,472 B with a
@@ -762,7 +815,7 @@ are single runs.
   context (3.13.11) matter for hashing secrets, and argonaut hashes audit
   entries. The thread-safe first-use init (3.13.6) matters only with threads,
   and argonaut starts none. Nothing on argonaut's path.
-- **`cyrius.lock`** — `cyrius deps --verify` → **60 verified, 0 failed**,
+- **`cyrius.lock`** — `cyrius deps --verify` → **61 verified, 0 failed**,
   3 commit-pinned (libro, sigil, patra), sorted, ending with `cyrius 6.7.9`.
   It equals the lock a fresh copy of the tree resolves from nothing.
 
@@ -777,20 +830,13 @@ are single runs.
 - **cgroup or pidfd-based PID identity.** The 2026-10-14 audit's B-1 closed the
   PID-file hole (symlinks, FIFOs, loose parsing); the reuse window between
   reading a PID and signalling it remains open by design.
-- **Emergency shell:** `password_hash` is unsalted single-round SHA-256, and the
-  default config has `require_auth = 0` (2026-10-14 audit, deferred).
-- **Ordered shutdown (2026-10-14 audit C-8).** `init_stop_all` SIGTERMs
-  everything at once and leaves services RUNNING with stale pids; kybernet
-  builds `init_plan_shutdown` and then calls only this.
-- **The unauthenticated `notify_try_recv` / `notify_drain` path** skips the
-  SO_PEERCRED check and cannot detect a truncated datagram. No production
-  caller; remove or rename it.
-- **Other deferred LOWs from 2026-10-14:**
-  - `WatchdogSec=` is emitted under `Type=simple`.
-  - An ExecStart binary starting with `-@:+!` is read as a systemd prefix.
-  - tmpfiles still runs external commands rather than a native `*at` path.
-  - The CVE-2026-32606 class (TPM PCR policy) depends on kybernet's enrolment.
-  - Every passing probe writes an audit record (PERF).
+- **Emergency shell, the legacy credential:** a v1 Argon2id record is verified
+  from 1.16.2, but the unsalted single-round SHA-256 digest is still accepted. Its
+  retirement is kybernet's migration to drive first.
+- **Remove the deprecated APIs at 1.17.0:** `notify_try_recv`, `notify_drain`
+  and `spawn_service`.
+- **TPM key-release policy (CVE-2026-32606 class):** documented in architecture
+  note 005. The enrolment is kybernet's to change.
 - **RE-AUDIT TRIGGER — wiring the supervisor loop.** Several severities stay
   bounded only because the shipped PID-1 loop never calls the lifecycle
   machinery. Re-rate them the day it does.
@@ -799,6 +845,9 @@ are single runs.
 
 ### Closed recently
 
+- **1.16.2:** every item the 2026-10-14 audit deferred, plus two LOWs found while
+  fixing them: SCM_RIGHTS fds left open in PID 1, and an unaudited restart-limit
+  refusal (`docs/audit/2026-10-14-audit.md`, "Fixed at 1.16.2").
 - **1.16.1:** the 2026-10-14 audit's 13 MEDIUM and 18 LOW
   (`docs/audit/2026-10-14-audit.md`). Also `bench-history.csv` recording every
   bench twice (open since 1.8.3) and the quickstart's raw x86 syscall number.
@@ -812,15 +861,14 @@ are single runs.
 
 ## Pending release (unreleased)
 
-- **1.16.1** (cut in the working tree, not yet tagged): the 2026-10-14
-  hardening and optimization pass, `ag_sys_poll` on `sys_ppoll`, and the
-  idle-free PID-1 loop. See Version and CHANGELOG [1.16.1].
+- **1.16.2** (cut in the working tree, not yet tagged): the 2026-10-14 audit's
+  deferred findings, repaired. See Version and CHANGELOG [1.16.2].
 
 ## Recent shipped
 
 - **1.16.0 – 1.16.1** (2026-10-14) — toolchain 6.6.20 → 6.7.9 and libro 2.11.0;
   `fcntl` / `sendto` on the stdlib; the 2026-10-14 hardening and optimization
-  pass (13 MEDIUM, 18 LOW). See CHANGELOG.
+  pass (13 MEDIUM, 18 LOW). See CHANGELOG. (1.16.2 is pending, above.)
 - **1.15.2 – 1.15.6** (2026-09-22 – 2026-10-14) — toolchain 6.6.6 → 6.6.20,
   libro 2.10.3 → 2.10.8, the agnostik enum lockstep, `agnos-init` before the
   compositor, PID 1 bootable at 256 MB, and a deterministic startup order. See
@@ -854,7 +902,16 @@ are single runs.
 ## Consumers
 
 - **AGNOS boot** — PID 1 / systemd-delegate role
-- **kybernet** — uses argonaut as a library for service orchestration in the kybernet shell. Vendors argonaut's `src/` modules directly; pins argonaut **1.15.4** on cyrius 6.6.6 with libro 2.10.3. Against 1.16.0 a scratch kybernet fails on its 6.6.6 pin (`undefined function 'sys_fcntl'`). On 6.6.20 it builds at 746,680 B and on 6.7.9 at 746,136 B, passing 882 / 882 both times. So it takes 1.16.0 by raising its own cyrius pin to ≥ 6.6.8 in the same change. On 6.7.9 its own code warns: four `streq(str_data(..))` calls and 21 deprecated `json_v_obj_get` calls (CHANGELOG [1.16.0] Downstream). 1.16.1 changes behaviour on several paths kybernet drives: the start refusal, the 90 s start timeout, the restart window, the reused `init_poll_health` result, the bounded HTTP check and the strict PID-file reader (CHANGELOG [1.16.1] Breaking (behaviour) and Downstream). Not yet rebuilt against kybernet; that is kybernet's own update.
+- **kybernet** — uses argonaut as a library for service orchestration in the kybernet shell. Vendors argonaut's `src/` modules directly; pins argonaut **1.15.4** on cyrius 6.6.6 with libro 2.10.3. Against 1.16.0 a scratch kybernet fails on its 6.6.6 pin (`undefined function 'sys_fcntl'`). On 6.6.20 it builds at 746,680 B and on 6.7.9 at 746,136 B, passing 882 / 882 both times. So it takes 1.16.0 by raising its own cyrius pin to ≥ 6.6.8 in the same change. On 6.7.9 its own code warns: four `streq(str_data(..))` calls and 21 deprecated `json_v_obj_get` calls (CHANGELOG [1.16.0] Downstream). 1.16.1 changes behaviour on several paths kybernet drives: the start refusal, the 90 s start timeout, the restart window, the reused `init_poll_health` result, the bounded HTTP check and the strict PID-file reader (CHANGELOG [1.16.1] Breaking (behaviour) and Downstream).
+  1.16.2 changes three more things for it:
+  - its `init_stop_all` shutdown is ordered, and services end STOPPED;
+  - its health tick writes far fewer audit records;
+  - two assertions in its `test_emergency_auth` (`src/test.cyr:1391-1393`) pin the old open
+    `emergency_shell_default()`. Its runtime overwrites both fields, so only the test
+    changes.
+
+  Neither 1.16.1 nor 1.16.2 has been built against kybernet yet; that is kybernet's own
+  update.
 - **stiva, sutra, daimon** — service definitions and lifecycle hooks consume the audit chain
 
 (Track downstream build status against this version when bumping minors.)
@@ -862,14 +919,14 @@ are single runs.
 ## Verification
 
 - Linux x86_64 (Arch, kernel 7.2, AMD Ryzen 7 5800H, HPET clocksource) — primary dev host; CI on `ubuntu-latest`
-- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **38 / 38, 1,336 assertions at 1.16.1** (cyrius 6.7.9), identical to x86_64. CI runs the aarch64 smoke only. Real-hardware validation (RPi4, Apple Silicon, Graviton / Ampere) is still the native-aarch64-CI item, gated on runner allocation. See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
-- qemu PID-1 harness under KVM — passes at 1.16.1 at the scripts' committed `-m 256M`; at 1.16.0 the boot test also booted at `-m 128M`.
-- PID 1 of an unprivileged pid namespace (`unshare -Urpf`) — idle wakeups, orphan reaping and SIGTERM shutdown, at 1.16.1.
+- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **41 / 41, 1,662 assertions at 1.16.2** (cyrius 6.7.9), identical to x86_64. CI runs the aarch64 smoke only. Real-hardware validation (RPi4, Apple Silicon, Graviton / Ampere) is still the native-aarch64-CI item, gated on runner allocation. See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
+- qemu PID-1 harness under KVM — passes at 1.16.2 at the scripts' committed `-m 256M`; at 1.16.0 the boot test also booted at `-m 128M`.
+- PID 1 of an unprivileged pid namespace (`unshare -Urpf`) — idle wakeups, orphan reaping and SIGTERM shutdown, at 1.16.2.
 
 ## Audit cadence
 
 - `docs/audit/` — security audit reports, dated `YYYY-MM-DD-audit.md`
-- Most recent: **`2026-10-14-audit.md` (hardening and optimization pass for 1.16.1)** — 0 CRITICAL / 0 HIGH / 13 MEDIUM / 18 LOW fixed; 6 LOW and 1 PERF deferred to the roadmap. Prior: `2026-08-24` (P(-1) for 1.8.6; 9 MEDIUM / 6 LOW / 1 DOC, all closed), `2026-05-11` (1.6.3 closeout), `2026-05-10` (1.5.5 closeout), `2026-04-26` (1.4.0).
+- Most recent: **`2026-10-14-audit.md` (hardening and optimization pass for 1.16.1)** — 0 CRITICAL / 0 HIGH / 13 MEDIUM / 18 LOW fixed at 1.16.1. Its 6 deferred LOWs and 1 PERF were fixed at 1.16.2, with 2 more LOWs found on the way. The TPM item is documented in architecture note 005. Nothing from the pass is open. Prior: `2026-08-24` (P(-1) for 1.8.6; 9 MEDIUM / 6 LOW / 1 DOC, all closed), `2026-05-11` (1.6.3 closeout), `2026-05-10` (1.5.5 closeout), `2026-04-26` (1.4.0).
 - The 2026-10-14 pass rated reachability three ways (shipped binary, kybernet config, library-only), since kybernet drives most of the lifecycle machinery from PID 1.
 - **Re-audit trigger:** several severities (1.8.6 and 2026-10-14) are bounded by the fact that the shipped PID-1 loop does not call the service-lifecycle machinery (it is library surface for kybernet). **Re-rate them the day the supervisor loop is wired to `init_start_service` / `init_poll_health` / `init_notify_bind`.**
 - Prior audit references retained in `CHANGELOG.md` Security sections

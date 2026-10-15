@@ -1,0 +1,475 @@
+# shutdown_audit.tcyr — 1.16.2: ordered shutdown (2026-10-14 audit C-8) and the
+# health audit policy (transitions plus an hourly heartbeat).
+#
+# Written first and run against the unmodified 1.16.1 tree, with the new API
+# stubbed (init_execute_shutdown forwarding to the old init_stop_all, the
+# health-record accessors as no-ops), where 40 of its 77 assertions failed —
+# 4 of them only because the health-record field did not exist yet:
+#
+#   C-8      init_stop_all SIGTERMed every tracked process at once, left every
+#            ManagedService RUNNING with a stale pid, wrote no audit record,
+#            SIGKILLed a straggler without its process group and never reaped
+#            it, and had no notion of dependency order
+#   health   every probe wrote a HealthCheckPassed / HealthCheckFailed record
+#
+# Children are real (fork_exec_service through init_start_service). The order
+# test has each service's SIGTERM trap append to one file, so the order in the
+# file is the order the shutdown reached them.
+
+include "tests/test_header.cyr"
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+# /tmp/argonaut-sa-<pid>-<suffix>, as a Str.
+fn _tmp_path(suffix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/argonaut-sa-");
+    str_builder_add_int(sb, sys_getpid());
+    str_builder_add_cstr(sb, "-");
+    str_builder_add_cstr(sb, suffix);
+    return str_builder_build(sb);
+}
+
+# An init with no default services (BOOT_RECOVERY registers none).
+fn _bare_init(retain) {
+    var cfg = config_set_boot_mode(argonaut_config_default(), BOOT_RECOVERY);
+    if (retain == 1) { config_set_audit_retain(cfg, 1); }
+    return argonaut_init_new(cfg);
+}
+
+# Register a SVC_SIMPLE service under its own name. `arg` is a cstr or 0.
+fn _add_svc(init, name, binary, arg) {
+    var sd = svc_def_new(str_from(name), str_from("sa"), str_from(binary));
+    if (arg != 0) { vec_push(svc_def_args(sd), str_from(arg)); }
+    svc_def_set_service_type(sd, SVC_SIMPLE);
+    map_set(load64(init + 16), str_data(svc_def_name(sd)), managed_svc_new(sd));
+    return sd;
+}
+
+# Register a `/bin/sh -c <script>` service; `script` is a Str.
+fn _add_sh(init, name, script) {
+    var sd = _add_svc(init, name, "/bin/sh", "-c");
+    vec_push(svc_def_args(sd), script);
+    return sd;
+}
+
+fn _count_action(log, action) {
+    var q = query_new();
+    query_action(q, str_from(action));
+    return vec_len(chain_query(log, q));
+}
+
+fn _kill_reap(pid) {
+    if (pid <= 0) { return 0; }
+    sys_kill(pid, SIGKILL);
+    var st[8];
+    sys_waitpid(pid, &st, 0);
+    return 0;
+}
+
+# The pid exists at all (a zombie counts — it has not been reaped).
+fn _exists(pid) {
+    if (pid <= 0) { return 0; }
+    if (sys_kill(pid, 0) == 0) { return 1; }
+    return 0;
+}
+
+# A small file's contents as a Str (heap buffer, so it survives the next call),
+# or an empty Str.
+fn _read_small(path) {
+    var buf = alloc(512);
+    var fd = sys_open(str_data(path), 0, 0);
+    if (fd < 0) { return str_from(""); }
+    var n = sys_read(fd, buf, 511);
+    sys_close(fd);
+    if (n <= 0) { return str_from(""); }
+    return str_new(buf, n);
+}
+
+fn _read_int_file(path) {
+    var s = _read_small(path);
+    if (str_len(s) == 0) { return 0 - 1; }
+    return str_to_int(s);
+}
+
+# Wait for a grandchild (reparented to us — argonaut_init_new enrols this
+# process as a child subreaper) to die, collecting it as an orphan. 1 = gone.
+fn _orphan_gone(pid, budget_ms) {
+    if (pid <= 0) { return 0; }
+    var gone = 0;
+    var dl = monotonic_ms() + budget_ms;
+    while (gone == 0 && monotonic_ms() < dl) {
+        proc_table_reap_orphans();
+        if (sys_kill(pid, 0) < 0) { gone = 1; }
+        if (gone == 0) { sleep_ms(10); }
+    }
+    return gone;
+}
+
+# =========================================================================
+# C-8 — shutdown walks the dependency waves in reverse
+# =========================================================================
+
+fn test_order() {
+    test_group("c8-order");
+    var init = _bare_init(1);
+    var log = init_audit_log(init);
+    var logf = _tmp_path("order.log");
+    var apidf = _tmp_path("app.pid");
+    sys_unlink(str_data(logf));
+    sys_unlink(str_data(apidf));
+
+    # The dependency: on SIGTERM it records whether the dependent's process
+    # still exists. It cannot until the dependent has been reaped.
+    var db = str_builder_new();
+    str_builder_add_cstr(db, "trap 'if kill -0 $(cat ");
+    str_builder_add(db, apidf);
+    str_builder_add_cstr(db, ") 2>/dev/null; then r=alive; else r=gone; fi; echo db-term:app-$r >> ");
+    str_builder_add(db, logf);
+    str_builder_add_cstr(db, "; exit 0' TERM; while :; do sleep 0.05; done");
+    _add_sh(init, "sa-db", str_builder_build(db));
+
+    # The dependent: takes 300 ms to stop, and records when it is done.
+    var app = str_builder_new();
+    str_builder_add_cstr(app, "echo $$ > ");
+    str_builder_add(app, apidf);
+    str_builder_add_cstr(app, "; trap 'sleep 0.3; echo app-exit >> ");
+    str_builder_add(app, logf);
+    str_builder_add_cstr(app, "; exit 0' TERM; while :; do sleep 0.05; done");
+    var asd = _add_sh(init, "sa-app", str_builder_build(app));
+    vec_push(svc_def_deps(asd), str_from("sa-db"));
+
+    # A registered service that never ran is not stopped, counted or recorded.
+    _add_svc(init, "sa-idle", "/bin/sleep", "60");
+
+    var dms = init_get_service(init, "sa-db");
+    var ams = init_get_service(init, "sa-app");
+    var ims = init_get_service(init, "sa-idle");
+    var dpid = init_start_service(init, "sa-db");
+    var apid = init_start_service(init, "sa-app");
+    assert(dpid > 0, "c8: dependency started");
+    assert(apid > 0, "c8: dependent started");
+    sleep_ms(200);                           # both traps installed
+
+    var before = audit_log_len(log);
+    var res = init_stop_all(init, 4000);
+    var order = _read_small(logf);
+    assert(str_eq(order, str_from("app-exit\ndb-term:app-gone\n")),
+      "c8: the dependent was reaped before its dependency was signalled");
+    assert_eq(str_eq(order, str_from("db-term:app-alive\napp-exit\n")), 0,
+      "c8: the dependency was not signalled while the dependent ran");
+
+    assert_eq(managed_svc_state(ams), STATE_STOPPED, "c8: dependent STOPPED");
+    assert_eq(managed_svc_state(dms), STATE_STOPPED, "c8: dependency STOPPED");
+    assert_eq(managed_svc_pid(ams), 0, "c8: dependent holds no pid");
+    assert_eq(managed_svc_pid(dms), 0, "c8: dependency holds no pid");
+    assert_eq(managed_svc_state(ims), STATE_STOPPED, "c8: a never-started service is left as it was");
+    assert_eq(proc_table_count(), 0, "c8: the proc table is empty");
+    assert_eq(_exists(apid), 0, "c8: dependent process gone and reaped");
+    assert_eq(_exists(dpid), 0, "c8: dependency process gone and reaped");
+
+    assert_eq(_count_action(log, "Stopping"), 2, "c8: one Stopping record per running service");
+    assert_eq(_count_action(log, "Stopped(0)"), 2, "c8: a trap that exits 0 is a clean stop");
+    assert_eq(audit_log_len(log) - before, 4, "c8: exactly the 4 stop records - none for the never-started service");
+    assert_eq(vec_len(res), 2, "c8: init_stop_all still returns one (name, code) pair per stop");
+    if (vec_len(res) == 2) {
+        assert(str_eq(load64(vec_get(res, 0)), str_from("sa-app")),
+          "c8: init_stop_all's results come in stop order");
+    }
+
+    if (_exists(apid) == 1) { _kill_reap(apid); }
+    if (_exists(dpid) == 1) { _kill_reap(dpid); }
+    sys_unlink(str_data(logf));
+    sys_unlink(str_data(apidf));
+    return 0;
+}
+
+# A service ignoring SIGTERM is SIGKILLed — with its process group — at its
+# wave's deadline, and reaped.
+fn test_straggler() {
+    test_group("c8-straggler");
+    var init = _bare_init(1);
+    var log = init_audit_log(init);
+    var gpf = _tmp_path("stubborn.gpid");
+    sys_unlink(str_data(gpf));
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "trap '' TERM; /bin/sleep 30 & echo $! > ");
+    str_builder_add(sb, gpf);
+    str_builder_add_cstr(sb, "; while :; do sleep 0.05; done");
+    _add_sh(init, "sa-stubborn", str_builder_build(sb));
+    var ms = init_get_service(init, "sa-stubborn");
+    var p = init_start_service(init, "sa-stubborn");
+    assert(p > 0, "c8k: stubborn service started");
+    sleep_ms(200);
+    var gpid = _read_int_file(gpf);
+    assert(gpid > 0, "c8k: the service's grandchild reported its pid");
+
+    var t0 = monotonic_ms();
+    var n = init_execute_shutdown(init, 600);
+    var spent = monotonic_ms() - t0;
+    assert_eq(n, 1, "c8k: init_execute_shutdown reports one service stopped");
+    assert(spent >= 550, "c8k: the straggler had its wave's whole deadline before SIGKILL");
+    assert(spent < 1500, "c8k: the call stays within timeout + the kill window");
+    assert_eq(managed_svc_state(ms), STATE_STOPPED, "c8k: the killed service is STOPPED");
+    assert_eq(managed_svc_pid(ms), 0, "c8k: and holds no pid");
+    assert_eq(_count_action(log, "TimeoutKilled"), 1, "c8k: the SIGKILL is audited as TimeoutKilled");
+    assert_eq(_exists(p), 0, "c8k: the killed process was reaped (no zombie left)");
+    var gone = _orphan_gone(gpid, 2000);
+    assert_eq(gone, 1, "c8k: its process group was killed with it");
+    if (gone == 0) { _kill_reap(gpid); }
+    if (_exists(p) == 1) { _kill_reap(p); }
+    sys_unlink(str_data(gpf));
+    return 0;
+}
+
+# Two waves of stragglers share one budget: the total is bounded by the
+# timeout, not the timeout times the number of waves.
+fn test_bound() {
+    test_group("c8-bound");
+    var init = _bare_init(1);
+    var log = init_audit_log(init);
+    var script = str_from("trap '' TERM; while :; do sleep 0.05; done");
+    _add_sh(init, "sa-lower", script);
+    var usd = _add_sh(init, "sa-upper", script);
+    vec_push(svc_def_deps(usd), str_from("sa-lower"));
+    var lp = init_start_service(init, "sa-lower");
+    var up = init_start_service(init, "sa-upper");
+    assert(lp > 0, "c8b: lower started");
+    assert(up > 0, "c8b: upper started");
+    sleep_ms(200);
+
+    var t0 = monotonic_ms();
+    var n = init_execute_shutdown(init, 1000);
+    var spent = monotonic_ms() - t0;
+    assert_eq(n, 2, "c8b: both waves stopped");
+    assert(spent >= 900, "c8b: the waves used the budget before SIGKILL");
+    assert(spent < 1600, "c8b: two straggler waves stay within ONE timeout (+ kill windows)");
+    assert_eq(_count_action(log, "TimeoutKilled"), 2, "c8b: both stragglers audited as killed");
+    assert_eq(_exists(lp), 0, "c8b: lower reaped");
+    assert_eq(_exists(up), 0, "c8b: upper reaped");
+    if (_exists(lp) == 1) { _kill_reap(lp); }
+    if (_exists(up) == 1) { _kill_reap(up); }
+    return 0;
+}
+
+# A dependency cycle cannot be ordered; everything is still stopped, as one
+# parallel wave. So is a tracked process no ManagedService owns.
+fn test_cycle() {
+    test_group("c8-cycle");
+    var init = _bare_init(1);
+    var log = init_audit_log(init);
+    var asd = _add_svc(init, "sa-cyc-a", "/bin/sleep", "60");
+    var bsd = _add_svc(init, "sa-cyc-b", "/bin/sleep", "60");
+    _add_svc(init, "sa-free", "/bin/sleep", "60");
+    var ap = init_start_service(init, "sa-cyc-a");
+    var bp = init_start_service(init, "sa-cyc-b");
+    var fp = init_start_service(init, "sa-free");
+    assert(ap > 0, "c8c: a started");
+    assert(bp > 0, "c8c: b started");
+    assert(fp > 0, "c8c: free started");
+    # Close the cycle after the starts (a cycle could never have started).
+    vec_push(svc_def_deps(asd), str_from("sa-cyc-b"));
+    vec_push(svc_def_deps(bsd), str_from("sa-cyc-a"));
+    assert_eq(resolve_service_waves(init_service_defs(init)), 0, "c8c: precondition - the waves do not resolve");
+
+    # A stray: tracked in the proc table, managed by nothing.
+    var ssd = svc_def_new(str_from("sa-stray"), str_from("sa"), str_from("/bin/sleep"));
+    vec_push(svc_def_args(ssd), str_from("60"));
+    var sp = fork_exec_service(ssd);
+    assert(sp > 0, "c8c: stray spawned");
+    proc_table_insert(svc_def_name(ssd), sp);
+
+    var n = init_execute_shutdown(init, 2000);
+    assert_eq(n, 3, "c8c: every managed service was stopped despite the cycle");
+    assert_eq(managed_svc_state(init_get_service(init, "sa-cyc-a")), STATE_STOPPED, "c8c: a STOPPED");
+    assert_eq(managed_svc_state(init_get_service(init, "sa-cyc-b")), STATE_STOPPED, "c8c: b STOPPED");
+    assert_eq(managed_svc_state(init_get_service(init, "sa-free")), STATE_STOPPED, "c8c: free STOPPED");
+    assert_eq(_exists(ap), 0, "c8c: a gone");
+    assert_eq(_exists(bp), 0, "c8c: b gone");
+    assert_eq(_exists(fp), 0, "c8c: free gone");
+    assert_eq(proc_table_count(), 0, "c8c: the sweep emptied the proc table");
+    assert_eq(process_alive(sp), 0, "c8c: the unmanaged stray was stopped by the sweep");
+    # A plain process dying of the SIGTERM it was sent stopped as asked.
+    assert_eq(_count_action(log, "Stopped(0)"), 3, "c8c: death by the shutdown's SIGTERM is a clean stop");
+    if (_exists(ap) == 1) { _kill_reap(ap); }
+    if (_exists(bp) == 1) { _kill_reap(bp); }
+    if (_exists(fp) == 1) { _kill_reap(fp); }
+    if (_exists(sp) == 1) { _kill_reap(sp); }
+    return 0;
+}
+
+# =========================================================================
+# Health audit — transitions plus an hourly heartbeat
+# =========================================================================
+
+# A service with a COMMAND check whose verdict the test flips by swapping the
+# target between /bin/true and /bin/false. Interval 0: due on every tick.
+fn _hc_svc(init, name) {
+    var sd = _add_svc(init, name, "/bin/sleep", "60");
+    svc_def_set_health_check(sd, health_check_new(HC_COMMAND, str_from("/bin/true"), 0, 0, 2000, 3));
+    return sd;
+}
+
+fn _hc_set(sd, pass) {
+    var hc = svc_def_health_check(sd);
+    if (pass == 1) {
+        store64(hc + 8, str_from("/bin/true"));
+    } else {
+        store64(hc + 8, str_from("/bin/false"));
+    }
+    return 0;
+}
+
+fn test_health_policy() {
+    test_group("health-audit-policy");
+    assert_eq(HEALTH_AUDIT_HEARTBEAT_MS, 3600000, "hc: the heartbeat is one hour");
+
+    # N consecutive passes: one record.
+    var init = _bare_init(1);
+    var log = init_audit_log(init);
+    var tracker = health_tracker_new();
+    var sd = _hc_svc(init, "sa-hc");
+    var ms = init_get_service(init, "sa-hc");
+    var p = init_start_service(init, "sa-hc");
+    assert(p > 0, "hc: service started");
+    var b0 = audit_log_len(log);
+    for (var i = 0; i < 5; i = i + 1) { init_poll_health(init, tracker); }
+    assert_eq(_count_action(log, "HealthCheckPassed"), 1, "hc: 5 consecutive passes write 1 record");
+    assert_eq(audit_log_len(log) - b0, 1, "hc: and nothing else");
+
+    # The heartbeat: a pass an hour after the last record is recorded again.
+    managed_svc_set_health_rec_at(ms, managed_svc_health_rec_at(ms) - HEALTH_AUDIT_HEARTBEAT_MS + 60000);
+    init_poll_health(init, tracker);
+    assert_eq(_count_action(log, "HealthCheckPassed"), 1, "hc: a pass 59 min after the last record is not");
+    managed_svc_set_health_rec_at(ms, managed_svc_health_rec_at(ms) - 60000);
+    init_poll_health(init, tracker);
+    assert_eq(_count_action(log, "HealthCheckPassed"), 2, "hc: a pass an hour after the last record is (heartbeat)");
+    init_poll_health(init, tracker);
+    assert_eq(_count_action(log, "HealthCheckPassed"), 2, "hc: the heartbeat re-arms from its own record");
+
+    # A restart re-arms the first-result record.
+    var p2 = init_restart_service(init, "sa-hc", 2000);
+    assert(p2 > 0, "hc: restarted");
+    assert_eq(managed_svc_health_rec(ms), HEALTH_REC_NONE, "hc: a (re)start clears the recorded result");
+    assert_eq(managed_svc_health_rec_at(ms), 0, "hc: and its time");
+    init_poll_health(init, tracker);
+    assert_eq(_count_action(log, "HealthCheckPassed"), 3, "hc: the first probe after a restart is recorded");
+    init_poll_health(init, tracker);
+    assert_eq(_count_action(log, "HealthCheckPassed"), 3, "hc: the second is not");
+    init_stop_service(init, "sa-hc", 2000);
+    if (_exists(p) == 1) { _kill_reap(p); }
+    if (_exists(p2) == 1) { _kill_reap(p2); }
+
+    # pass, fail, fail, pass: 3 records (pass, fail, pass).
+    var init2 = _bare_init(1);
+    var log2 = init_audit_log(init2);
+    var tracker2 = health_tracker_new();
+    var sd2 = _hc_svc(init2, "sa-hc2");
+    var ms2 = init_get_service(init2, "sa-hc2");
+    var q = init_start_service(init2, "sa-hc2");
+    assert(q > 0, "hc: second service started");
+    var c0 = audit_log_len(log2);
+    init_poll_health(init2, tracker2);
+    assert_eq(managed_svc_health_rec(ms2), HEALTH_REC_PASS, "hc: the recorded result is PASS");
+    _hc_set(sd2, 0);
+    init_poll_health(init2, tracker2);
+    assert_eq(managed_svc_health_rec(ms2), HEALTH_REC_FAIL, "hc: then FAIL");
+    init_poll_health(init2, tracker2);
+    _hc_set(sd2, 1);
+    init_poll_health(init2, tracker2);
+    assert_eq(audit_log_len(log2) - c0, 3, "hc: pass, fail, fail, pass writes 3 records");
+    assert_eq(_count_action(log2, "HealthCheckPassed"), 2, "hc: two passes recorded");
+    assert_eq(_count_action(log2, "HealthCheckFailed"), 1, "hc: one failure recorded (the repeat is not)");
+
+    # A repeated failure is never re-recorded, however long ago the last record.
+    _hc_set(sd2, 0);
+    init_poll_health(init2, tracker2);
+    assert_eq(_count_action(log2, "HealthCheckFailed"), 2, "hc: a new pass->fail transition is recorded");
+    managed_svc_set_health_rec_at(ms2, managed_svc_health_rec_at(ms2) - HEALTH_AUDIT_HEARTBEAT_MS - 1);
+    init_poll_health(init2, tracker2);
+    assert_eq(_count_action(log2, "HealthCheckFailed"), 2, "hc: a failure has no heartbeat");
+
+    # What a run of failures leads to is audited on its own: the watchdog kill
+    # (no pass for interval x retries + timeout) and the restart after it.
+    managed_svc_set_last_hc(ms2, monotonic_ms() - 10000);
+    init_enforce_watchdog(init2);
+    assert_eq(_count_action(log2, "TimeoutKilled"), 1, "hc: the watchdog kill of a failing service is recorded");
+    if (_exists(q) == 1) { _kill_reap(q); }
+    _hc_set(sd2, 1);
+    var q2 = init_restart_service(init2, "sa-hc2", 2000);
+    assert(q2 > 0, "hc: the failing service was restarted");
+    assert_eq(_count_action(log2, "Restarting"), 1, "hc: and the restart is recorded");
+    init_poll_health(init2, tracker2);
+    assert_eq(_count_action(log2, "HealthCheckPassed"), 3, "hc: its first probe after the restart is recorded");
+    init_stop_service(init2, "sa-hc2", 2000);
+    if (_exists(q2) == 1) { _kill_reap(q2); }
+    return 0;
+}
+
+# The policy adds no allocation to a health tick, recorded or not (C-6 class).
+fn test_health_alloc() {
+    test_group("health-audit-alloc");
+    var init = _bare_init(0);
+    var sd = _add_svc(init, "sa-hca", "/bin/sleep", "60");
+    var hc = health_check_new(HC_PROCESS_ALIVE, 0, 0, 0, 1000, 3);
+    svc_def_set_health_check(sd, hc);
+    var ms = init_get_service(init, "sa-hca");
+    var p = init_start_service(init, "sa-hca");
+    assert(p > 0, "hca: service started");
+    var tracker = health_tracker_new();
+    init_poll_health(init, tracker);
+    init_poll_health(init, tracker);
+
+    var b0 = alloc_used();
+    execute_health_check(svc_def_name(sd), hc, p);
+    var probe_cost = alloc_used() - b0;
+
+    var b1 = alloc_used();
+    init_poll_health(init, tracker);
+    assert_eq(alloc_used() - b1 - probe_cost, 0, "hca: an unrecorded passing tick allocates nothing extra");
+
+    managed_svc_set_health_rec_at(ms, managed_svc_health_rec_at(ms) - HEALTH_AUDIT_HEARTBEAT_MS);
+    var b2 = alloc_used();
+    init_poll_health(init, tracker);
+    assert_eq(alloc_used() - b2 - probe_cost, 0, "hca: a heartbeat-recorded tick allocates nothing extra");
+    init_stop_service(init, "sa-hca", 2000);
+    if (_exists(p) == 1) { _kill_reap(p); }
+    return 0;
+}
+
+# 1.16.2: a restart refused at the restart limit is the one point where argonaut
+# itself gives up on a service. It used to leave only a sakshi warning, so the
+# audit chain showed a crash and then nothing.
+fn test_restart_limit_audit() {
+    test_group("restart limit is audited");
+    var init = _bare_init(1);
+    var log = init_audit_log(init);
+    var sd = _add_svc(init, "rl-svc", "/bin/true", 0);
+    var ms = map_get(load64(init + 16), str_data(svc_def_name(sd)));
+    var max = load64(svc_def_restart_config(sd));
+    managed_svc_set_restarts(ms, max);
+    var before = audit_log_len(log);
+    assert_eq(init_restart_service(init, "rl-svc", 200), 0 - 1, "rl: a restart at the limit is refused");
+    assert_eq(managed_svc_pid(ms), 0, "rl: and nothing was forked");
+    assert_eq(_count_action(log, "RestartLimitReached"), 1, "rl: the refusal is audited as RestartLimitReached");
+    assert_eq(audit_log_len(log) - before, 1, "rl: one record, no Restarting record");
+    assert_eq(audit_event_severity(EVT_RESTART_LIMIT), SEV_ERROR, "rl: RestartLimitReached is an error");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_restart_limit_audit();
+    test_straggler();
+    test_order();
+    test_bound();
+    test_cycle();
+    test_health_policy();
+    test_health_alloc();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

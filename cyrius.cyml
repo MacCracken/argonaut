@@ -45,3 +45,14 @@ stdlib = [
 git = "https://github.com/MacCracken/libro.git"
 tag = "2.11.0"
 modules = ["dist/libro.cyr"]
+
+[deps.sigil]
+git = "https://github.com/MacCracken/sigil.git"
+tag = "3.13.12"
+modules = [
+    "dist/sigil-mldsa.cyr",
+    "src/sha_ni.cyr",
+    "src/sha256.cyr",
+    "src/hex.cyr",
+    "dist/sigil-argon2.cyr",
+]

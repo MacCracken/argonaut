@@ -34,3 +34,9 @@ Edge boot enforces a layered security model:
 - **fs-verity**: Per-file verification rather than whole-partition. More granular but doesn't protect against missing files or directory structure tampering.
 - **IMA/EVM**: Linux Integrity Measurement Architecture. More complex, requires kernel support and policy management. Better for audit than prevention.
 - **No encryption**: Simpler but unacceptable for edge devices in physically untrusted locations.
+
+## Related
+
+- [`docs/architecture/005-edge-boot-tpm-key-policy.md`](../architecture/005-edge-boot-tpm-key-policy.md)
+  (1.16.2) states what the TPM2 policy must bind for this model to hold against the
+  CVE-2026-32606 class. That policy is set at enrolment, which kybernet owns.

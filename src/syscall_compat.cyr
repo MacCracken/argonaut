@@ -103,6 +103,19 @@ fn ag_sys_setpgid(pid, pgid): i64 {
     #endif
 }
 
+# symlinkat(target, newdirfd, linkpath) — the native tmpfiles applier creates a
+# link relative to a directory fd it reached without following any symlink
+# (1.16.2). The stdlib has `sys_symlink`, which is AT_FDCWD only.
+# x86_64 266 (native) / aarch64 36 (native, ladder-safe).
+fn ag_sys_symlinkat(target, newdirfd, linkpath): i64 {
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(266, target, newdirfd, linkpath);
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(36, target, newdirfd, linkpath);
+    #endif
+}
+
 # getsid(pid) — test-harness assertion that fork_exec_service called setsid.
 # x86_64 124 (native) / aarch64 156 (native, ladder-safe).
 fn ag_sys_getsid(pid): i64 {

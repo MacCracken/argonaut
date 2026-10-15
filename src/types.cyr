@@ -1008,13 +1008,14 @@ fn svc_def_set_cgroup_limits(sd, cl)  { store64(sd + 168, cl); return sd; }
 # Managed service — runtime state of a service
 # =========================================================================
 
-# ⚠ THE THREE TIMESTAMPS ARE CLOCK_MONOTONIC MS (1.16.1 audit C-3), not epoch.
+# ⚠ THE TIMESTAMPS ARE CLOCK_MONOTONIC MS (1.16.1 audit C-3), not epoch.
 # Each one feeds a deadline or a duration — the health due-time, the watchdog,
-# the restart window — and on CLOCK_REALTIME an NTP step forward SIGKILLed every
-# watchdog- or health-checked service on the next tick while a step back
-# silenced the watchdog. None of them is exported: init_list_services and
-# init_stats do not print them, and kybernet never reads them. 0 still means
-# "never" (argonaut stamps them with a value >= 1).
+# the restart window, the health audit heartbeat (1.16.2) — and on
+# CLOCK_REALTIME an NTP step forward SIGKILLed every watchdog- or health-checked
+# service on the next tick while a step back silenced the watchdog. None of them
+# is exported: init_list_services and init_stats do not print them, and kybernet
+# never reads them. 0 still means "never" (argonaut stamps them with a value
+# >= 1).
 struct ManagedService {
     definition;          # ptr to ServiceDefinition
     state;               # ServiceState enum
@@ -1023,6 +1024,8 @@ struct ManagedService {
     restart_count;       # i64 — restarts inside the current window (C-2)
     last_health_check;   # monotonic ms (0 = never)
     last_notify;         # monotonic ms of the last authenticated WATCHDOG= ping
+    health_rec;          # HealthAudit: last health result AUDITED (1.16.2)
+    health_rec_at;       # monotonic ms of that record (meaningful once health_rec != NONE)
 }
 
 # ⚠ `last_notify` IS DELIBERATELY SEPARATE FROM `last_health_check`, AND
@@ -1038,6 +1041,30 @@ struct ManagedService {
 # So the watchdog consults whichever deadline the operator configured, and never
 # lets one satisfy the other.
 
+# 1.16.2 — THE HEALTH AUDIT RECORDS CHANGES, NOT PROBES.
+#
+# init_poll_health used to write a HealthCheckPassed / HealthCheckFailed record
+# for every probe: a chain append (~4 µs) per probe — an entry kept forever on a
+# retaining or persistent log — and an audit log that was almost entirely
+# "still fine". A result is now recorded only when
+#   (a) it is the service's first since it was (re)started — health_rec NONE;
+#   (b) it differs from the last RECORDED result (pass <-> fail); or
+#   (c) it is a pass and HEALTH_AUDIT_HEARTBEAT_MS (monotonic) has passed since
+#       the service's last health record — an hourly "still passing", so a quiet
+#       log is distinguishable from a dead health checker.
+# A failure that repeats is never re-recorded; what it leads to is audited on
+# its own — the watchdog's TimeoutKilled, a crash's CrashDetected, a restart's
+# Restarting. (A restart init_restart_service refuses at the restart limit
+# writes no record; that predates this policy.) init_start_service resets both
+# fields, so a restarted service's first probe is recorded again. NONE is 0,
+# the value managed_svc_new zero-fills.
+enum HealthAudit {
+    HEALTH_REC_NONE = 0;
+    HEALTH_REC_PASS = 1;
+    HEALTH_REC_FAIL = 2;
+    HEALTH_AUDIT_HEARTBEAT_MS = 3600000;
+}
+
 fn managed_svc_new(definition) {
     var ms = alloc(sizeof(ManagedService));
     store64(ms, definition);
@@ -1047,6 +1074,8 @@ fn managed_svc_new(definition) {
     store64(ms + 32, 0);
     store64(ms + 40, 0);
     store64(ms + 48, 0);       # last_notify
+    store64(ms + 56, HEALTH_REC_NONE);
+    store64(ms + 64, 0);       # health_rec_at
     return ms;
 }
 
@@ -1064,6 +1093,12 @@ fn managed_svc_set_started(ms, ts)      { store64(ms + 24, ts); }
 fn managed_svc_set_restarts(ms, n)      { store64(ms + 32, n); }
 fn managed_svc_set_last_hc(ms, ts)      { store64(ms + 40, ts); }
 fn managed_svc_set_last_notify(ms, ts)  { store64(ms + 48, ts); }
+
+# The health audit state (1.16.2; see HealthAudit).
+fn managed_svc_health_rec(ms)              { return load64(ms + 56); }
+fn managed_svc_health_rec_at(ms)           { return load64(ms + 64); }
+fn managed_svc_set_health_rec(ms, r)       { store64(ms + 56, r); }
+fn managed_svc_set_health_rec_at(ms, ts)   { store64(ms + 64, ts); }
 
 # Close a run for the restart window (C-2): if the service has been up for at
 # least RESTART_STABLE_MS since its last start, its restart count goes back to
@@ -1402,8 +1437,13 @@ fn emergency_shell_default() {
     str_builder_add_cstr(sb, "Use 'argonaut start <service>' to start services.\n");
     str_builder_add_cstr(sb, "Use 'exit' to continue boot or 'reboot' to restart.\n");
     store64(esc + 16, str_builder_build(sb));
-    store64(esc + 24, 0);   # require_auth = false
-    store64(esc + 32, 0);   # no password hash
+    # 1.16.2 (2026-10-14 audit LOW, now decided): authentication is REQUIRED by
+    # default. With no credential configured verify_emergency_auth fails
+    # closed (1.8.6 MEDIUM-3), so this default denies every password: a
+    # consumer stores a credential (a v1 Argon2id record, see security.cyr)
+    # to get a working shell, or sets require_auth = 0 to open it on purpose.
+    store64(esc + 24, 1);   # require_auth = true
+    store64(esc + 32, 0);   # no credential
     return esc;
 }
 

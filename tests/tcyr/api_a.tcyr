@@ -23,10 +23,13 @@ fn main() {
     assert(str_contains(u2, str_from("Environment=")), "u env");
     assert(str_contains(u2, str_from("PORT")), "u port");
 
-    # --- Systemd unit: health check watchdog ---
+    # --- Systemd unit: watchdog ---
+    # 1.16.2: WatchdogSec= is a ping deadline, so it is emitted for Type=notify
+    # only and taken from watchdog_ms, no longer from the health check.
     var sd3 = svc_def_new(str_from("h"), str_from("H"), str_from("/usr/bin/h"));
     vec_push(svc_def_modes(sd3), BOOT_SERVER);
-    store64(sd3 + 72, health_check_new(HC_HTTP_GET, str_from("http://x"), 0, 5000, 2000, 3));
+    svc_def_set_service_type(sd3, SVC_NOTIFY);
+    svc_def_set_watchdog_ms(sd3, 10000);
     var u3 = generate_unit(sd3);
     assert(str_contains(u3, str_from("WatchdogSec=")), "u wd");
 

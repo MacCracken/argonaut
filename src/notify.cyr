@@ -25,8 +25,8 @@ fn notify_msg_new() {
     store64(msg + 32, 0);     # reloading
     store64(msg + 40, 0);     # stopping
     # 2026-08-24 audit MEDIUM-1: Str-keyed, NOT cstr-keyed. A cstr map
-    # hashes by walking to the next NUL, and notify datagrams arrive from
-    # sys_read() with no terminator — so the walk ran off the end of the
+    # hashes by walking to the next NUL, and notify datagrams arrive off
+    # the socket with no terminator — so the walk ran off the end of the
     # receive buffer. map_new_str hashes over the Str's length instead.
     store64(msg + 48, map_new_str());  # fields
     return msg;
@@ -213,7 +213,14 @@ var _notify_last = 0;
 var _notify_sender_pid = 0;
 var _notify_sender_uid = 0;
 
-fn notify_try_recv_authenticated(fd, expected_pids) {
+# 1.16.2: the one recvmsg both receive paths share. Reads one datagram into
+# _notify_recv_buf without blocking (MSG_DONTWAIT). `ctrl` / `ctrllen` is the
+# ancillary buffer, or 0 / 0 for none. Returns recvmsg's result and leaves the
+# received msg_flags in _notify_rflags and msg_controllen in _notify_rctrllen.
+var _notify_rflags = 0;
+var _notify_rctrllen = 0;
+
+fn _notify_recvmsg(fd, ctrl, ctrllen) {
     if (_notify_recv_buf == 0) {
         _notify_recv_buf = alloc(1024);
     }
@@ -221,31 +228,78 @@ fn notify_try_recv_authenticated(fd, expected_pids) {
     var iov[16];
     store64(&iov, _notify_recv_buf);
     store64(&iov + 8, 1024);
-    # control buffer for one SCM_CREDENTIALS (cmsghdr 16 + ucred 12, aligned to 32)
-    var ctrl[32];
-    memset(&ctrl, 0, 32);
     # msghdr { name, namelen, iov, iovlen, control, controllen, flags }
     var mh[56];
     memset(&mh, 0, 56);
     store64(&mh + 16, &iov);     # msg_iov
     store64(&mh + 24, 1);        # msg_iovlen
-    store64(&mh + 32, &ctrl);    # msg_control
-    store64(&mh + 40, 32);       # msg_controllen
+    store64(&mh + 32, ctrl);     # msg_control
+    store64(&mh + 40, ctrllen);  # msg_controllen
     # recvmsg(fd, &mh, MSG_DONTWAIT=64)
-    _notify_last = NOTIFY_RECV_EMPTY;
     var n = sys_recvmsg(fd, &mh, 64);
+    _notify_rflags = load32(&mh + 48);
+    _notify_rctrllen = load64(&mh + 40);
+    return n;
+}
+
+# Close every descriptor a sender passed with SCM_RIGHTS in the received
+# control data (`ctrllen` bytes at `ctrl`). 1.16.2: on a socket without
+# SO_PASSCRED the control buffer has room for one SCM_RIGHTS header, so the
+# kernel INSTALLED the sender's fds in this process; the datagram was then
+# refused for lacking credentials and the fds stayed open in PID 1 for good,
+# one leak per datagram from anyone who can reach the socket. Walks each
+# cmsghdr {len u64, level u32, type u32, data} at its 8-byte-aligned stride.
+fn _notify_close_passed_fds(ctrl, ctrllen) {
+    var off = 0;
+    var walking = 1;
+    while (walking == 1) {
+        if (off + 16 > ctrllen) {
+            walking = 0;
+        } else {
+            var clen = load64(ctrl + off);
+            if (clen < 16) {
+                walking = 0;
+            } else {
+                var avail = ctrllen - off;
+                if (clen < avail) { avail = clen; }
+                if (load32(ctrl + off + 8) == 1) {          # SOL_SOCKET
+                    if (load32(ctrl + off + 12) == 1) {     # SCM_RIGHTS
+                        var nfd = (avail - 16) / 4;
+                        for (var k = 0; k < nfd; k = k + 1) {
+                            var pfd = load32(ctrl + off + 16 + k * 4);
+                            if (pfd >= 0) { sys_close(pfd); }
+                        }
+                    }
+                }
+                off = off + ((clen + 7) & (0 - 8));
+            }
+        }
+    }
+    return 0;
+}
+
+fn notify_try_recv_authenticated(fd, expected_pids) {
+    # control buffer for one SCM_CREDENTIALS (cmsghdr 16 + ucred 12, aligned to 32)
+    var ctrl[32];
+    memset(&ctrl, 0, 32);
+    _notify_last = NOTIFY_RECV_EMPTY;
+    var n = _notify_recvmsg(fd, &ctrl, 32);
     if (n < 0) { return 0; }
+    # 1.16.2: before any verdict, close whatever descriptors came with it.
+    var rcv_ctrl = _notify_rctrllen;
+    if (rcv_ctrl > 32) { rcv_ctrl = 32; }
+    _notify_close_passed_fds(&ctrl, rcv_ctrl);
     # A zero-length datagram is legal on AF_UNIX SOCK_DGRAM and recvmsg
     # returns 0 having CONSUMED it — reporting that as "queue empty" ends the
     # drain early, which is the same starvation this change exists to fix.
     if (n == 0) { _notify_last = NOTIFY_RECV_NOCRED; return 0; }
     # Require an SCM_CREDENTIALS cmsg. Drop on missing/wrong type so a
     # caller that forgets SO_PASSCRED can't slip messages through.
-    var ctrllen = load64(&mh + 40);
+    var ctrllen = _notify_rctrllen;
     # Stricter than `< 16`: a cmsghdr(16) plus a struct ucred(12) is 28 bytes,
     # and MSG_CTRUNC means the ancillary data was cut short so the credentials
     # cannot be trusted even if the header looks plausible.
-    var mflags = load32(&mh + 48);
+    var mflags = _notify_rflags;
     if ((mflags & 8) != 0) { _notify_last = NOTIFY_RECV_TRUNCATED; return 0; }   # MSG_CTRUNC
     # 1.16.1 audit A-9: MSG_TRUNC — the datagram was longer than the receive
     # buffer and its tail is gone. Parsing the head acted on a message the
@@ -297,27 +351,54 @@ fn notify_recv_outcome()   { return _notify_last; }
 fn notify_recv_sender_pid() { return _notify_sender_pid; }
 fn notify_recv_sender_uid() { return _notify_sender_uid; }
 
-# Try to receive a notification without blocking.
-# Returns a NotifyMessage ptr, or 0 if no message available.
-fn notify_try_recv(fd) {
-    if (_notify_recv_buf == 0) {
-        _notify_recv_buf = alloc(1024);
-    }
-    var n = sys_read(fd, _notify_recv_buf, 1024);
-    if (n <= 0) { return 0; }
+# The unauthenticated receive behind notify_try_recv / notify_drain.
+# Returns a NotifyMessage ptr, or 0. _notify_unauth_consumed is 1 when a
+# datagram was taken off the queue (parsed or dropped), 0 when none was queued.
+#
+# 1.16.2 (a LOW the 1.16.1 audit left open; A-9's unauthenticated half):
+# recvmsg, not sys_read. read(2) cannot see MSG_TRUNC, so a datagram longer
+# than the buffer was parsed from its head — a cut inside `MAINPID=12345`
+# delivered `MAINPID=12`. A truncated datagram is now dropped. No control
+# buffer is passed: credentials are not checked on this path, and a
+# descriptor sent with SCM_RIGHTS must not be installed in PID 1 (with no
+# room for it the kernel discards it and sets MSG_CTRUNC, ignored here).
+var _notify_unauth_consumed = 0;
+
+fn _notify_recv_unauth(fd) {
+    _notify_unauth_consumed = 0;
+    var n = _notify_recvmsg(fd, 0, 0);
+    if (n < 0) { return 0; }
+    _notify_unauth_consumed = 1;
+    if (n == 0) { return 0; }
+    if ((_notify_rflags & 0x20) != 0) { return 0; }   # MSG_TRUNC
     return notify_parse(_notify_recv_buf, n);
 }
 
+# Try to receive a notification without blocking.
+# Returns a NotifyMessage ptr, or 0 if no message available — or if the one
+# taken was empty or truncated (dropped, never half-parsed).
+# Deprecated at 1.16.2: no sender check, so any local process that can reach
+# the socket can claim READY=1 / WATCHDOG=1 / MAINPID= for a service.
+#deprecated("use notify_try_recv_authenticated: this skips sender authentication; removal planned for 1.17.0")
+fn notify_try_recv(fd) {
+    return _notify_recv_unauth(fd);
+}
+
 # Drain pending notifications, up to limit.
-# Returns vec of NotifyMessage ptrs.
+# Returns vec of NotifyMessage ptrs. A dropped (empty or truncated) datagram
+# counts toward `limit` but does not end the drain; only an empty queue does.
+#deprecated("use notify_try_recv_authenticated in a loop: this skips sender authentication; removal planned for 1.17.0")
 fn notify_drain(fd, limit) {
     var messages = vec_new();
     var draining = 1;
     var i = 0;
     while (draining == 1 && i < limit) {
-        var msg = notify_try_recv(fd);
-        if (msg == 0) { draining = 0; }
-        else { vec_push(messages, msg); }
+        var msg = _notify_recv_unauth(fd);
+        if (msg != 0) {
+            vec_push(messages, msg);
+        } elif (_notify_unauth_consumed == 0) {
+            draining = 0;
+        }
         i = i + 1;
     }
     return messages;

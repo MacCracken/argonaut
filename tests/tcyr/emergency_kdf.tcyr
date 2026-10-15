@@ -1,0 +1,346 @@
+# emergency_kdf.tcyr — the emergency-shell credential (1.16.2)
+#
+# Two emergency-shell items the 2026-10-14 audit left open, now decided:
+#   1. `auth_password_hash` may hold kybernet's v1 Argon2id record,
+#      v1$<t>$<m>$<p>$<salt-hex>$<tag-hex> (agnostic's format), verified with
+#      kybernet's bounds. The 64-hex SHA-256 digest stays on the legacy path,
+#      unchanged, because kybernet's legacy arm calls verify_emergency_auth
+#      verbatim.
+#   2. emergency_shell_default() requires authentication, and with no
+#      credential configured it fails closed (1.8.6 MEDIUM-3).
+#
+# Every verification that runs Argon2 here is at m = 8192 KiB, t = 1: the
+# cheapest record the bounds admit (nine of them, ~0.5 s on x86_64, ~3.5 s
+# under qemu-aarch64). Out-of-bounds records are refused before any Argon2
+# work, so they cost nothing.
+include "tests/test_header.cyr"
+
+# =========================================================================
+# Known-answer vectors
+# =========================================================================
+#
+# These are not self-generated. The salt, the m=8192 tag, the 32-byte salt and
+# the 64-byte tag are kybernet's (src/test.cyr TV_SALT_HEX, TV_TAG_8192,
+# TV_SALT_32B, TV_TAG_64B), produced with OpenSSL's independent Argon2id:
+#
+#   openssl kdf -keylen 32 -kdfopt pass:hunter2 -kdfopt hexsalt:<salt> \
+#       -kdfopt iter:1 -kdfopt memcost:8192 -kdfopt lanes:1 ARGON2ID
+#
+# They were re-derived with OpenSSL 3.6.5 for this suite. The *_OOB tags are
+# CORRECT Argon2id outputs for "hunter2" under parameters outside the accepted
+# bounds, made with the same command. Argon2 alone would accept each of them;
+# only the bound can deny it, so a denial here proves the bound is enforced at
+# verification time and not just at classification.
+var KV_SALT = "6b796265726e65742d746573742d3031";   # "kybernet-test-01"
+var KV_TAG_8192 = "ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a310640";
+var KV_SALT_32B = "abababababababababababababababababababababababababababababababab";
+# m = 64 KiB: legal for RFC 9106 and sigil, below the 8 MiB floor here.
+var KV_TAG_M64_OOB = "182bc4a43ebb6d009ccafa43450d0bf934f584ab185e714d3d506538fb35399d";
+# p = 2 (lanes:2): sigil fills lanes serially, so p > 1 is refused.
+var KV_TAG_P2_OOB = "ebf59a9d811ec1840e4358bb05a295f197dedf4bb7988838a2e44d23f2c5fdf9";
+# -keylen 16: a 128-bit tag, below RFC 9106 §4's 256 bits.
+var KV_TAG_16B_OOB = "51be55916979e931d027207858709733";
+# An 8-byte salt (hexsalt:6b796265726e6574), below RFC 9106 §4's 128 bits.
+var KV_SALT_8B = "6b796265726e6574";
+var KV_TAG_SALT8_OOB = "fb12c70ca1882ded49ff8f56fd8848121ff6c72a8e410a2dc590f65f58500032";
+# t = 9, one above the time ceiling.
+var KV_TAG_T9_OOB = "c61a2dac4108e45a434aed4674329a0b72c2d801b7876e58088752cff00e3a80";
+
+# sha256("hunter2") — the digest audit_findings.tcyr builds with password_hash
+# and kybernet's qemu fixture has written since its 1.5.8.
+var KV_LEGACY = "f52fbd32b2b3b86ff88ef6c490628285f482af15ddcb29541f94bcf526a3f6c7";
+
+# kybernet TV_TAG_64B: -keylen 64 over KV_SALT_32B. Assembled from pieces so no
+# line runs past the lint width.
+fn _kdf_tag64() {
+    var b = str_builder_new();
+    str_builder_add_cstr(b, "8f01f7179b97bc3ed0b46c3f0da2c1810685d31f86bcc69463de89c1e");
+    str_builder_add_cstr(b, "2b9281ef2ba2d57355ae00099c14617fa71b7251ecedf62d45f5c9d2");
+    str_builder_add_cstr(b, "4201cdccdae1527");
+    return str_data(str_builder_build(b));
+}
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+# Two cstrs joined into a NUL-terminated cstr. Not str_cat: its buffer has no
+# NUL, so str_data() of it read as a cstr runs on into the next allocation.
+fn _kdf_join(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+
+# Build a v1 record from cstr parts.
+fn _kdf_rec(t, m, p, salt, tag) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "v1$");
+    str_builder_add_cstr(sb, t);
+    str_builder_add_cstr(sb, "$");
+    str_builder_add_cstr(sb, m);
+    str_builder_add_cstr(sb, "$");
+    str_builder_add_cstr(sb, p);
+    str_builder_add_cstr(sb, "$");
+    str_builder_add_cstr(sb, salt);
+    str_builder_add_cstr(sb, "$");
+    str_builder_add_cstr(sb, tag);
+    return str_builder_build(sb);
+}
+
+# The cheap known-answer record: t=1 m=8192 p=1, "hunter2".
+fn _kdf_cheap() { return _kdf_rec("1", "8192", "1", KV_SALT, KV_TAG_8192); }
+
+# A config that requires auth and holds `cred` (a Str, or 0 for none).
+fn _kdf_esc(cred) {
+    var esc = emergency_shell_default();
+    store64(esc + 24, 1);      # require_auth
+    store64(esc + 32, cred);   # auth_password_hash
+    return esc;
+}
+
+fn _kdf_verify(cred, pw) {
+    return verify_emergency_auth(_kdf_esc(cred), str_from(pw));
+}
+
+fn _kdf_kind(cs) { return emergency_cred_kind(str_from(cs)); }
+
+# A malformed record: classified INVALID (never LEGACY), and denied even for
+# the password every vector in this file was made from.
+fn _kdf_refused(rec, name) {
+    assert_eq(emergency_cred_kind(rec), ECRED_INVALID, name);
+    assert_eq(verify_emergency_auth(_kdf_esc(rec), str_from("hunter2")), 0, name);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # =====================================================================
+    test_group("emergency-default-requires-auth");
+    # =====================================================================
+    var esc = emergency_shell_default();
+    assert_eq(load64(esc + 24), 1, "default: require_auth is 1");
+    assert_eq(load64(esc + 32), 0, "default: no credential is configured");
+    assert_eq(verify_emergency_auth(esc, str_from("")), 0,
+      "default: empty password DENIED (fail closed, no credential)");
+    assert_eq(verify_emergency_auth(esc, str_from("anything")), 0,
+      "default: any password DENIED (fail closed, no credential)");
+    # Only the auth default moved; the rest of the struct is as before.
+    assert(str_eq_cstr(load64(esc), "/usr/bin/agnoshi"), "default: shell path unchanged");
+    assert(str_contains(load64(esc + 16), str_from("Emergency")), "default: banner unchanged");
+
+    # An explicit opt-out still opens the shell, without hashing anything.
+    store64(esc + 24, 0);
+    assert_eq(verify_emergency_auth(esc, str_from("anything")), 1,
+      "require_auth=0: granted with no credential");
+    store64(esc + 32, _kdf_cheap());
+    assert_eq(verify_emergency_auth(esc, str_from("wrong")), 1,
+      "require_auth=0: granted even with a v1 credential present");
+    store64(esc + 32, str_from(KV_LEGACY));
+    assert_eq(verify_emergency_auth(esc, str_from("wrong")), 1,
+      "require_auth=0: granted even with a legacy credential present");
+
+    # require_auth=1 with no credential is the 1.8.6 MEDIUM-3 fail-closed arm.
+    assert_eq(_kdf_verify(0, "hunter2"), 0, "require_auth=1: no credential DENIED");
+    assert_eq(_kdf_verify(str_from(""), "hunter2"), 0,
+      "require_auth=1: empty credential DENIED");
+
+    # =====================================================================
+    test_group("emergency-kdf-known-answer");
+    # =====================================================================
+    # The first v1 verification in the process also pays sigil's one-time
+    # lazy setup, measured at 4,320 bytes: the main thread's 4,096-byte
+    # thread-local block (shared by all of sigil, so a PID 1 that has already
+    # hashed an audit record has paid it) and BLAKE2b's 64-byte IV and
+    # 160-byte SIGMA tables. Never the 8 MiB Argon2 arena.
+    var cheap = _kdf_cheap();
+    var esc_v1 = _kdf_esc(cheap);
+    var pw_ok = str_from("hunter2");
+    var pw_bad = str_from("hunter3");
+    var first0 = alloc_used();
+    var first = verify_emergency_auth(esc_v1, pw_ok);
+    var first_grew = alloc_used() - first0;
+    assert_eq(first, 1, "v1: correct password GRANTED (OpenSSL-generated t=1 m=8192 record)");
+    assert_lte(first_grew, 4320, "arena: first v1 verification grows the bump arena <= 4,320 B (one-time)");
+    assert_eq(verify_emergency_auth(esc_v1, pw_bad), 0, "v1: wrong password DENIED");
+    assert_eq(_kdf_verify(cheap, ""), 0, "v1: empty password DENIED");
+    assert_eq(_kdf_verify(cheap, "hunter"), 0, "v1: prefix of the password DENIED");
+    assert_eq(_kdf_verify(cheap, "hunter22"), 0, "v1: password plus a byte DENIED");
+
+    # The top of both length ranges: a 32-byte salt and a 64-byte tag. Buffer
+    # sizes come from the record's own field lengths, not from a constant.
+    var big = _kdf_rec("1", "8192", "1", KV_SALT_32B, _kdf_tag64());
+    assert_eq(emergency_cred_kind(big), ECRED_ARGON2ID, "v1: 32-byte salt + 64-byte tag is ARGON2ID");
+    assert_eq(_kdf_verify(big, "hunter2"), 1, "v1: 32-byte salt + 64-byte tag GRANTED");
+
+    # =====================================================================
+    test_group("emergency-kdf-arena");
+    # =====================================================================
+    # PID 1's bump arena never frees. The Argon2 working set (8 MiB here,
+    # up to 64 MiB at the ceiling) must therefore not come from it: it is a
+    # private mapping, unmapped before the verdict is returned. After the
+    # first call a verification allocates nothing at all.
+    var used0 = alloc_used();
+    var g_ok = verify_emergency_auth(esc_v1, pw_ok);
+    var g_bad = verify_emergency_auth(esc_v1, pw_bad);
+    var grew = alloc_used() - used0;
+    assert_eq(g_ok, 1, "arena: measured verification GRANTED");
+    assert_eq(g_bad, 0, "arena: measured verification DENIED");
+    assert_eq(grew, 0, "arena: two v1 verifications grow the bump arena by 0 bytes");
+    assert_eq(emergency_auth_arena_live(), 0, "arena: no Argon2 mapping left live afterwards");
+    assert_gte(emergency_auth_arena_peak(), argon2_mem_bytes(8192, 1),
+      "arena: the Argon2 working set was a separate mapping of >= 8 MiB");
+
+    # Classification and malformed-record refusal allocate nothing either.
+    var bad_t = _kdf_rec("9", "8192", "1", KV_SALT, KV_TAG_T9_OOB);
+    var esc_bad = _kdf_esc(bad_t);
+    var used1 = alloc_used();
+    var k1 = emergency_cred_kind(cheap);
+    var k2 = emergency_cred_kind(bad_t);
+    var v3 = verify_emergency_auth(esc_bad, pw_ok);
+    assert_eq(alloc_used() - used1, 0, "arena: classifying and refusing allocate 0 bytes");
+    assert_eq(k1, ECRED_ARGON2ID, "arena: the measured valid record classified ARGON2ID");
+    assert_eq(k2, ECRED_INVALID, "arena: the measured t=9 record classified INVALID");
+    assert_eq(v3, 0, "arena: the measured t=9 record DENIED");
+
+    # =====================================================================
+    test_group("emergency-kdf-classify");
+    # =====================================================================
+    assert_eq(emergency_cred_kind(0), ECRED_NONE, "kind: null is NONE");
+    assert_eq(_kdf_kind(""), ECRED_NONE, "kind: empty is NONE");
+    assert_eq(emergency_cred_kind(cheap), ECRED_ARGON2ID, "kind: v1 record is ARGON2ID");
+    assert_eq(_kdf_kind(KV_LEGACY), ECRED_LEGACY, "kind: 64 lowercase hex is LEGACY");
+    # The two shapes are disjoint: 'v' and '$' are not hex digits.
+    assert_eq(is_hex64(cheap), 0, "kind: a v1 record is never hex64");
+    assert_eq(emergency_cred_parse(str_from(KV_LEGACY), 0), 0, "kind: a legacy digest never parses as v1");
+
+    # Parameters are read from the record, not assumed.
+    var prm = alloc(40);
+    var real = _kdf_rec("2", "19456", "1", KV_SALT, KV_TAG_8192);
+    assert_eq(emergency_cred_parse(real, prm), 1, "parse: t=2 m=19456 record parses");
+    assert_eq(load64(prm), 2, "parse: t_cost from the record");
+    assert_eq(load64(prm + 8), 19456, "parse: m_cost from the record");
+    assert_eq(load64(prm + 16), 1, "parse: parallelism from the record");
+    assert_eq(load64(prm + 24), 16, "parse: 16-byte salt");
+    assert_eq(load64(prm + 32), 32, "parse: 32-byte tag");
+    store64(prm, -7);
+    assert_eq(emergency_cred_parse(bad_t, prm), 0, "parse: out-of-range record fails");
+    assert_eq(load64(prm), -7, "parse: a failed parse leaves out untouched");
+
+    # =====================================================================
+    test_group("emergency-kdf-malformed-denied");
+    # =====================================================================
+    # Field count.
+    _kdf_refused(str_from("v1"), "malformed: bare v1");
+    _kdf_refused(str_from("v1$"), "malformed: v1$ alone");
+    _kdf_refused(str_from("v1$1$8192$1"), "malformed: truncated before the salt");
+    _kdf_refused(_kdf_rec("1", "8192", "1", KV_SALT, ""), "malformed: empty tag field");
+    _kdf_refused(str_cat(cheap, str_from("$extra")), "malformed: a seventh field");
+    _kdf_refused(str_cat(cheap, str_from("$")), "malformed: a trailing separator");
+    # Hex.
+    _kdf_refused(_kdf_rec("1", "8192", "1", "zz796265726e65742d746573742d3031", KV_TAG_8192),
+      "malformed: non-hex salt");
+    _kdf_refused(_kdf_rec("1", "8192", "1", "6b796265726e65742d746573742d303", KV_TAG_8192),
+      "malformed: odd-length salt hex");
+    # KV_TAG_8192 with its last nibble dropped, then replaced by a 'g'.
+    var tag63 = "ec828a05303abe80988a455c9ed2e4b07a0d5f089b1a375c105e96aa9a31064";
+    _kdf_refused(_kdf_rec("1", "8192", "1", KV_SALT, tag63), "malformed: odd-length tag hex");
+    _kdf_refused(_kdf_rec("1", "8192", "1", KV_SALT, _kdf_join(tag63, "g")), "malformed: non-hex tag");
+    # t / m / p bounds. The *_OOB tags are correct, so only the bound denies.
+    _kdf_refused(_kdf_rec("0", "8192", "1", KV_SALT, KV_TAG_8192), "bounds: t=0 refused");
+    _kdf_refused(bad_t, "bounds: t=9 refused (correct tag)");
+    _kdf_refused(_kdf_rec("1", "64", "1", KV_SALT, KV_TAG_M64_OOB), "bounds: m=64 KiB refused (correct tag)");
+    _kdf_refused(_kdf_rec("1", "8191", "1", KV_SALT, KV_TAG_8192), "bounds: m one below the 8 MiB floor");
+    _kdf_refused(_kdf_rec("1", "65537", "1", KV_SALT, KV_TAG_8192), "bounds: m one above the 64 MiB ceiling");
+    _kdf_refused(_kdf_rec("1", "8192", "2", KV_SALT, KV_TAG_P2_OOB), "bounds: p=2 refused (correct tag)");
+    _kdf_refused(_kdf_rec("1", "8192", "0", KV_SALT, KV_TAG_8192), "bounds: p=0 refused");
+    _kdf_refused(_kdf_rec("8", "65536", "1", KV_SALT, KV_TAG_8192), "bounds: m*t over the work cap");
+    assert_eq(emergency_cred_kind(_kdf_rec("2", "65536", "1", KV_SALT, KV_TAG_8192)), ECRED_ARGON2ID,
+      "bounds: m*t exactly at the work cap is ARGON2ID");
+    # Numbers: no sign, no overflow, no padding past 19 digits.
+    _kdf_refused(_kdf_rec("1", "-8192", "1", KV_SALT, KV_TAG_8192), "numbers: negative m refused");
+    _kdf_refused(_kdf_rec("+1", "8192", "1", KV_SALT, KV_TAG_8192), "numbers: signed t refused");
+    _kdf_refused(_kdf_rec("", "8192", "1", KV_SALT, KV_TAG_8192), "numbers: empty t refused");
+    _kdf_refused(_kdf_rec("1", "18014398509482928", "1", KV_SALT, KV_TAG_8192),
+      "numbers: m = 2^54 + 1024 refused (the wrap-to-1MiB wild write)");
+    _kdf_refused(_kdf_rec("1", "99999999999999999999", "1", KV_SALT, KV_TAG_8192),
+      "numbers: 20-digit m refused before it can overflow");
+    _kdf_refused(_kdf_rec("1", "00000000000000000008192", "1", KV_SALT, KV_TAG_8192),
+      "numbers: zero-padded m over 19 digits refused");
+    # Salt and tag length bounds (RFC 9106 §4 floors, kybernet's ceilings).
+    _kdf_refused(_kdf_rec("1", "8192", "1", KV_SALT, KV_TAG_16B_OOB), "lengths: 16-byte tag refused (correct tag)");
+    _kdf_refused(_kdf_rec("1", "8192", "1", KV_SALT_8B, KV_TAG_SALT8_OOB),
+      "lengths: 8-byte salt refused (correct tag)");
+    # The ceilings: 64 bytes of salt or tag is accepted, 65 is not.
+    var s64 = _kdf_join(KV_SALT_32B, KV_SALT_32B);
+    var s65 = _kdf_join(s64, "ab");
+    assert_eq(emergency_cred_kind(_kdf_rec("1", "8192", "1", s64, KV_TAG_8192)), ECRED_ARGON2ID,
+      "lengths: 64-byte salt is accepted");
+    _kdf_refused(_kdf_rec("1", "8192", "1", s65, KV_TAG_8192), "lengths: 65-byte salt refused");
+    _kdf_refused(_kdf_rec("1", "8192", "1", KV_SALT, s65), "lengths: 65-byte tag refused");
+    # Versions and prefixes.
+    var v2 = _kdf_cheap();
+    store8(str_data(v2) + 1, 50);   # "v1$..." -> "v2$..."
+    _kdf_refused(v2, "version: v2 is INVALID");
+    var vup = _kdf_cheap();
+    store8(str_data(vup), 86);      # "v1$..." -> "V1$..."
+    _kdf_refused(vup, "version: V1 (uppercase) is INVALID");
+    _kdf_refused(str_from("nonsense"), "garbage: INVALID");
+
+    # A malformed v1 record never falls back to the legacy path. This one
+    # carries the legacy digest of the right password after the prefix: a
+    # parser that stripped "v1$" or fell through to SHA-256 would grant it.
+    _kdf_refused(str_cat(str_from("v1$"), str_from(KV_LEGACY)), "no-fallback: v1$<legacy digest> DENIED");
+    # A WELL-FORMED record whose tag field is that same digest is verified
+    # with Argon2id, never compared as a SHA-256 digest.
+    var v1_sha = _kdf_rec("1", "8192", "1", KV_SALT, KV_LEGACY);
+    assert_eq(emergency_cred_kind(v1_sha), ECRED_ARGON2ID, "no-fallback: v1 record carrying a sha256 tag is ARGON2ID");
+    assert_eq(_kdf_verify(v1_sha, "hunter2"), 0, "no-fallback: ...and is DENIED (Argon2id, not SHA-256)");
+
+    # =====================================================================
+    test_group("emergency-kdf-legacy-unchanged");
+    # =====================================================================
+    # kybernet's legacy arm calls verify_emergency_auth verbatim with this
+    # shape: require_auth at +24, a 64-hex digest at +32, 1 = granted.
+    assert(str_eq(password_hash("hunter2", 7), str_from(KV_LEGACY)), "legacy: password_hash is sha256 hex");
+    assert_eq(_kdf_kind(KV_LEGACY), ECRED_LEGACY, "legacy: classifies LEGACY");
+    assert_eq(_kdf_verify(str_from(KV_LEGACY), "hunter2"), 1, "legacy: correct password GRANTED");
+    assert_eq(_kdf_verify(str_from(KV_LEGACY), "hunter3"), 0, "legacy: wrong password DENIED");
+    assert_eq(_kdf_verify(str_from(KV_LEGACY), ""), 0, "legacy: empty password DENIED");
+    assert_eq(_kdf_verify(password_hash("hunter2", 7), "hunter2"), 1,
+      "legacy: a password_hash()-built credential GRANTED");
+    # The compare is byte-exact against a lowercase digest, as it always was.
+    # kybernet lowercases before it calls; argonaut's classifier says INVALID
+    # rather than blessing a credential its verifier can never match.
+    var upper = "F52FBD32B2B3B86FF88EF6C490628285F482AF15DDCB29541F94BCF526A3F6C7";
+    assert_eq(_kdf_kind(upper), ECRED_INVALID, "legacy: uppercase digest is INVALID, not LEGACY");
+    assert_eq(_kdf_verify(str_from(upper), "hunter2"), 0, "legacy: uppercase digest DENIED (byte-exact, unchanged)");
+    assert_eq(_kdf_kind("f52fbd32b2b3b86ff88ef6c490628285f482af15ddcb29541f94bcf526a3f6c"), ECRED_INVALID,
+      "legacy: 63 hex chars is INVALID");
+    assert_eq(_kdf_verify(str_cat(str_from(KV_LEGACY), str_from("0")), "hunter2"), 0,
+      "legacy: 65 hex chars DENIED");
+
+    # =====================================================================
+    test_group("emergency-kdf-null-safety");
+    # =====================================================================
+    assert_eq(verify_emergency_auth(0, str_from("hunter2")), 0, "null: config DENIED, not dereferenced");
+    assert_eq(verify_emergency_auth(_kdf_esc(cheap), 0), 0, "null: password DENIED on the v1 arm");
+    assert_eq(verify_emergency_auth(_kdf_esc(str_from(KV_LEGACY)), 0), 0, "null: password DENIED on the legacy arm");
+
+    # The m=64 vector is genuine: sigil's own Argon2id derives it. So the
+    # "bounds: m=64 KiB refused" denial above was the floor, not a bad tag.
+    var mem = alloc(argon2_mem_bytes(64, 1));
+    var salt = alloc(16);
+    var want = alloc(32);
+    var got = alloc(32);
+    hex_decode_into(KV_SALT, 32, salt);
+    hex_decode_into(KV_TAG_M64_OOB, 64, want);
+    assert_eq(argon2id_into(mem, "hunter2", 7, salt, 16, 1, 64, 1, got, 32), 0, "oob-vector: sigil runs m=64");
+    assert_eq(ct_eq_bytes(got, want, 32), 1, "oob-vector: the m=64 tag is the real Argon2id output");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

@@ -1,5 +1,6 @@
 # tmpfiles.cyr — Boot-time filesystem setup
-# Generates SafeCommands for directories, symlinks, and device nodes.
+# Creates directories, symlinks, and device nodes: natively with *at syscalls
+# (tmpfiles_apply, 1.16.2), or as SafeCommands (generate_tmpfile_commands).
 # Ported from rust-old/src/tmpfiles.rs
 
 # =========================================================================
@@ -36,9 +37,11 @@ fn tmpfile_mode_octal(mode) {
 # B-4 LOW (1.16.1 audit): these commands run as root against paths that may
 # already exist, so none of them may act THROUGH a symlink planted there:
 # `chown -h` changes the link itself, `ln -sfnT` replaces a link rather than
-# creating a new one inside the directory it points at. `mkdir -p` / `mknod`
-# / `chmod` keep a check-then-use window between commands; closing it needs a
-# native openat/fchownat/fchmodat rewrite, which is out of scope here.
+# creating a new one inside the directory it points at. Every command still
+# resolves the PARENT components of its path through any symlink there, and
+# `mkdir -p` / `mknod` / `chmod` keep a check-then-use window between
+# commands. tmpfiles_apply below closes both; this is kept unchanged for
+# consumers that run the commands themselves.
 fn generate_tmpfile_commands(entries) {
     var cmds = vec_new();
 
@@ -124,49 +127,380 @@ fn generate_tmpfile_commands(entries) {
 # Validate tmpfile entries
 # =========================================================================
 
+# 0 when every entry is well-formed, -1 at the first one that is not.
 fn validate_tmpfile_entries(entries) {
     for (var i = 0; i < vec_len(entries); i = i + 1) {
-        var entry = vec_get(entries, i);
-        var etype = load64(entry);
-        var path = load64(entry + 8);
-
-        # Check absolute path
-        if (str_starts_with(path, "/") == 0) {
+        if (_tmpfile_entry_check(vec_get(entries, i)) != 0) {
             return 0 - 1;
-        }
-
-        # Check no path traversal
-        if (str_contains(path, str_from(".."))) {
-            return 0 - 1;
-        }
-
-        if (etype == TMP_DIRECTORY || etype == TMP_DEVICE) {
-            var vmode = load64(entry + 24);
-            if (vmode > 4095) {  # 0o7777
-                return 0 - 1;
-            }
-            if (vmode < 0) {     # 1.16.1 audit B-3: a mode is never negative
-                return 0 - 1;
-            }
-        }
-
-        if (etype == TMP_DEVICE) {
-            var vdt = load64(entry + 48);
-            if (vdt != 98 && vdt != 99) {  # 'b' or 'c'
-                return 0 - 1;
-            }
-        }
-
-        if (etype == TMP_SYMLINK) {
-            var vtarget = load64(entry + 16);
-            if (str_starts_with(vtarget, "/") == 0) {
-                return 0 - 1;
-            }
-            if (str_contains(vtarget, str_from(".."))) {
-                return 0 - 1;
-            }
         }
     }
 
     return 0;  # valid
+}
+
+# One entry of validate_tmpfile_entries; tmpfiles_apply checks each entry
+# with it before touching the filesystem (1.16.2).
+fn _tmpfile_entry_check(entry) {
+    var etype = load64(entry);
+    var path = load64(entry + 8);
+    if (path == 0) { return -1; }
+
+    # Check absolute path
+    if (str_starts_with(path, "/") == 0) {
+        return -1;
+    }
+
+    # Check no path traversal
+    if (str_contains(path, str_from(".."))) {
+        return -1;
+    }
+
+    if (etype == TMP_DIRECTORY || etype == TMP_DEVICE) {
+        var vmode = load64(entry + 24);
+        if (vmode > 4095) {  # 0o7777
+            return -1;
+        }
+        if (vmode < 0) {     # 1.16.1 audit B-3: a mode is never negative
+            return -1;
+        }
+    }
+
+    if (etype == TMP_DEVICE) {
+        var vdt = load64(entry + 48);
+        if (vdt != 98 && vdt != 99) {  # 'b' or 'c'
+            return -1;
+        }
+    }
+
+    if (etype == TMP_SYMLINK) {
+        var vtarget = load64(entry + 16);
+        if (vtarget == 0) { return -1; }
+        if (str_starts_with(vtarget, "/") == 0) {
+            return -1;
+        }
+        if (str_contains(vtarget, str_from(".."))) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+# =========================================================================
+# Native applier (1.16.2)
+# =========================================================================
+#
+# ⚠ WHY NOT THE COMMANDS ABOVE. They run as root and name each path from "/",
+# so the kernel resolves every PARENT component through whatever symlink sits
+# there: with /run/app -> /etc planted, an entry for /run/app/x became /etc/x
+# for `mkdir -p`, `ln` and `mknod` alike, and `chmod` acted on whatever stood
+# at the final name when it ran, through a link swapped in after `mknod`
+# (B-4; the 1.16.1 audit left this open).
+# tmpfiles_apply walks each path from "/" one component at a time with
+# openat(O_NOFOLLOW), so a symlink in any component is refused, never
+# followed, and finishes the entry with *at calls on the parent it holds open.
+#
+#   directory  Missing parents are created (0o755 before the umask, as
+#              `mkdir -p`). mkdirat at 0o700; an existing entry must be a real
+#              directory. Opened O_DIRECTORY|O_NOFOLLOW, then fchown and
+#              fchmod on that fd, so the requested owner and mode hold for an
+#              existing directory as for a new one, and a new one is closed to
+#              others until both are set.
+#   symlink    Parents are not created (as `ln`). symlinkat; an existing
+#              SYMLINK is replaced atomically (a temporary link renamed over
+#              it); a directory, file or node there is refused with EEXIST.
+#              Owner and mode do not apply to a link.
+#   device     Parents are not created (as `mknod`). mknodat; an existing node
+#              is accepted only if it is the same device. The node is then
+#              held by an O_PATH|O_NOFOLLOW fd and checked by fstat: owner by
+#              fchownat(fd, "", AT_EMPTY_PATH), on that inode; the exact mode
+#              (mknodat's is cut by the umask) by fchmodat on the name, which
+#              has no NOFOLLOW before Linux 6.6, so only after fstatat
+#              (AT_SYMLINK_NOFOLLOW) shows the name still holds that inode.
+#
+# Every entry passes _tmpfile_entry_check first (absolute, no "..", mode at
+# most 0o7777). The applier also refuses a "." component, the path "/", a NUL
+# inside a path or target, and a device number the kernel cannot encode
+# (major > 4095, minor > 0xFFFFF).
+#
+# tmpfiles_apply returns the number of entries that failed and carries on past
+# each failure, so one bad entry does not leave every later boot directory
+# missing (run_safe_cmd_sequence stops at the first failing command).
+# tmpfiles_apply_entry returns one entry's result: 0 or a negative errno.
+#
+# There is no regular-file entry type (TmpfileType has none), so no file path.
+
+# O_PATH is 0o10000000 on x86_64 and aarch64 alike: arm64 overrides only
+# O_DIRECTORY / O_NOFOLLOW / O_DIRECT / O_LARGEFILE, which the stdlib's
+# per-arch OpenFlag supplies. st_ino is +8 in both struct stat layouts; st_rdev
+# is +40 on x86_64 and +32 in the asm-generic layout aarch64 uses. The stdlib
+# defines neither O_PATH nor an rdev offset.
+enum TmpfConst {
+    TMPF_O_PATH = 2097152;
+    TMPF_STAT_INO = 8;
+    TMPF_PARENT_MODE = 493;     # 0o755
+    TMPF_NEW_DIR_MODE = 448;    # 0o700
+}
+#ifdef CYRIUS_ARCH_X86
+enum TmpfRdev { TMPF_STAT_RDEV = 40; }
+#endif
+#ifdef CYRIUS_ARCH_AARCH64
+enum TmpfRdev { TMPF_STAT_RDEV = 32; }
+#endif
+
+# Apply every entry. Returns the number that failed (0 = all applied).
+fn tmpfiles_apply(entries) {
+    var failed = 0;
+    for (var i = 0; i < vec_len(entries); i = i + 1) {
+        if (tmpfiles_apply_entry(vec_get(entries, i)) != 0) {
+            failed = failed + 1;
+        }
+    }
+    return failed;
+}
+
+# Apply one entry. Returns 0, or a negative errno (-EINVAL when the entry is
+# refused before any syscall).
+fn tmpfiles_apply_entry(entry) {
+    if (_tmpfile_entry_check(entry) != 0) { return -EINVAL; }
+    var etype = load64(entry);
+    var known = 0;
+    if (etype == TMP_DIRECTORY) { known = 1; }
+    if (etype == TMP_SYMLINK) { known = 1; }
+    if (etype == TMP_DEVICE) { known = 1; }
+    if (known == 0) { return -EINVAL; }
+
+    var path = load64(entry + 8);
+    var plen = str_len(path);
+    var tlen = 0;
+    if (etype == TMP_SYMLINK) { tlen = str_len(load64(entry + 16)); }
+    # One scratch block: the path (split in place by the walk), the link
+    # target, and the temporary link name, each NUL-terminated.
+    var scratch = fl_alloc(plen + tlen + 48);
+    if (scratch == 0) { return -12; }   # ENOMEM
+    var target = scratch + plen + 1;
+    var tmpname = target + tlen + 1;
+
+    var r = _tmpf_copy(scratch, str_data(path), plen);
+    if (r == 0) {
+        if (etype == TMP_SYMLINK) {
+            r = _tmpf_copy(target, str_data(load64(entry + 16)), tlen);
+        }
+    }
+    if (r == 0) {
+        var create = 0;
+        if (etype == TMP_DIRECTORY) { create = 1; }
+        var leaf[8];
+        var pfd = _tmpf_open_parent(scratch, plen, create, &leaf);
+        if (pfd < 0) {
+            r = pfd;
+        } else {
+            var name = scratch + load64(&leaf);
+            if (etype == TMP_DIRECTORY) {
+                r = _tmpf_apply_dir(pfd, name, entry);
+            } elif (etype == TMP_SYMLINK) {
+                r = _tmpf_apply_link(pfd, name, target, tmpname);
+            } else {
+                r = _tmpf_apply_dev(pfd, name, entry);
+            }
+            sys_close(pfd);
+        }
+    }
+    fl_free(scratch);
+    return r;
+}
+
+# Copy `len` bytes from `src` to `dst` and NUL-terminate. Returns 0, or
+# -EINVAL when the bytes hold a NUL: the kernel would stop there and name a
+# different file than the one validated.
+fn _tmpf_copy(dst, src, len) {
+    for (var i = 0; i < len; i = i + 1) {
+        var c = load8(src + i);
+        if (c == 0) { return -EINVAL; }
+        store8(dst + i, c);
+    }
+    store8(dst + len, 0);
+    return 0;
+}
+
+# 1 when the cstr at `p` is "." or "..".
+fn _tmpf_is_dot(p) {
+    if (load8(p) != 46) { return 0; }
+    var c = load8(p + 1);
+    if (c == 0) { return 1; }
+    if (c != 46) { return 0; }
+    if (load8(p + 2) == 0) { return 1; }
+    return 0;
+}
+
+# 1 when an entry asks for an owner change (-1 leaves a field as it is).
+fn _tmpf_owner_set(uid, gid) {
+    if (uid >= 0) { return 1; }
+    if (gid >= 0) { return 1; }
+    return 0;
+}
+
+# Open the directory holding the last component of the absolute path in `buf`
+# (NUL-terminated at `len`, split in place). Walks from "/" with one
+# openat(O_PATH|O_DIRECTORY|O_NOFOLLOW) per component, so a symlink in any
+# parent component fails the walk (ENOTDIR) instead of being followed; with
+# `create` 1 a missing component is made by mkdirat first. Returns the
+# parent's fd, which the caller closes, or a negative errno. The offset of the
+# last component in `buf` is stored at `leaf_out`.
+fn _tmpf_open_parent(buf, len, create, leaf_out) {
+    # Trailing slashes name the same entry.
+    while (len > 1 && load8(buf + len - 1) == 47) {
+        len = len - 1;
+        store8(buf + len, 0);
+    }
+    var last = len - 1;
+    while (last > 0 && load8(buf + last) != 47) { last = last - 1; }
+    var leaf = last + 1;
+    if (leaf >= len) { return -EINVAL; }                    # "/" itself
+    if (_tmpf_is_dot(buf + leaf) == 1) { return -EINVAL; }
+    store8(buf + last, 0);
+
+    var wflags = TMPF_O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
+    var dfd = sys_openat(AT_FDCWD, "/", TMPF_O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+    if (dfd < 0) { return dfd; }
+    var err = 0;
+    var i = 1;
+    while (err == 0 && i < last) {
+        if (load8(buf + i) == 47) {
+            i = i + 1;                                      # "//"
+        } else {
+            var comp = buf + i;
+            while (i < last && load8(buf + i) != 47) { i = i + 1; }
+            store8(buf + i, 0);
+            i = i + 1;
+            if (_tmpf_is_dot(comp) == 1) {
+                err = -EINVAL;
+            } else {
+                var fd = sys_openat(dfd, comp, wflags, 0);
+                if (fd == -ENOENT) {
+                    if (create == 1) {
+                        var mk = sys_mkdirat(dfd, comp, TMPF_PARENT_MODE);
+                        if (mk == -EEXIST) { mk = 0; }      # raced; the open decides
+                        if (mk < 0) {
+                            fd = mk;
+                        } else {
+                            fd = sys_openat(dfd, comp, wflags, 0);
+                        }
+                    }
+                }
+                if (fd < 0) {
+                    err = fd;
+                } else {
+                    sys_close(dfd);
+                    dfd = fd;
+                }
+            }
+        }
+    }
+    if (err != 0) {
+        sys_close(dfd);
+        return err;
+    }
+    store64(leaf_out, leaf);
+    return dfd;
+}
+
+fn _tmpf_apply_dir(pfd, name, entry) {
+    var mode = load64(entry + 24);
+    var uid = load64(entry + 32);
+    var gid = load64(entry + 40);
+    var r = sys_mkdirat(pfd, name, TMPF_NEW_DIR_MODE);
+    if (r < 0) {
+        if (r != -EEXIST) { return r; }
+    }
+    # A symlink here is ELOOP / ENOTDIR, any other non-directory ENOTDIR.
+    var fd = sys_openat(pfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
+    if (fd < 0) { return fd; }
+    r = 0;
+    # Owner first: chown may clear the set-id bits the mode asks for.
+    if (_tmpf_owner_set(uid, gid) == 1) { r = sys_fchown(fd, uid, gid); }
+    if (r == 0) { r = sys_fchmod(fd, mode); }
+    sys_close(fd);
+    return r;
+}
+
+fn _tmpf_apply_link(pfd, name, target, tmp) {
+    var st[STAT_BUFSZ];
+    var r = sys_fstatat(pfd, name, &st, AT_SYMLINK_NOFOLLOW);
+    if (r == -ENOENT) { return ag_sys_symlinkat(target, pfd, name); }
+    if (r < 0) { return r; }
+    if ((load32(&st + STAT_MODE) & 0xF000) != 0xA000) { return -EEXIST; }   # S_IFLNK
+
+    # ".argonaut-tmpfiles-<pid>" in the same directory, renamed over the link.
+    memcpy(tmp, ".argonaut-tmpfiles-", 19);
+    fmt_int_buf(sys_getpid(), tmp + 19);
+    r = ag_sys_symlinkat(target, pfd, tmp);
+    if (r == -EEXIST) {
+        # Left by an interrupted run; removed only if it is a symlink.
+        r = sys_fstatat(pfd, tmp, &st, AT_SYMLINK_NOFOLLOW);
+        if (r == 0) {
+            if ((load32(&st + STAT_MODE) & 0xF000) != 0xA000) {
+                r = -EEXIST;
+            } else {
+                r = sys_unlinkat(pfd, tmp, 0);
+            }
+        }
+        if (r == 0) { r = ag_sys_symlinkat(target, pfd, tmp); }
+    }
+    if (r < 0) { return r; }
+    r = sys_renameat(pfd, tmp, pfd, name);
+    if (r < 0) { sys_unlinkat(pfd, tmp, 0); }
+    return r;
+}
+
+fn _tmpf_apply_dev(pfd, name, entry) {
+    var mode = load64(entry + 24);
+    var major = load64(entry + 56);
+    var minor = load64(entry + 64);
+    if (major < 0) { return -EINVAL; }
+    if (major > 4095) { return -EINVAL; }
+    if (minor < 0) { return -EINVAL; }
+    if (minor > 1048575) { return -EINVAL; }
+    var ftype = 0x2000;                                     # S_IFCHR
+    if (load64(entry + 48) == 98) { ftype = 0x6000; }       # 'b': S_IFBLK
+    # The kernel's new_encode_dev: what mknodat takes and stat reports.
+    var dev = (minor & 255) | (major << 8) | ((minor >> 8) << 20);
+
+    var r = sys_mknodat(pfd, name, ftype | mode, dev);
+    if (r < 0) {
+        if (r != -EEXIST) { return r; }
+    }
+    # O_PATH: holds the node itself and never opens the device.
+    var fd = sys_openat(pfd, name, TMPF_O_PATH | O_NOFOLLOW | O_CLOEXEC, 0);
+    if (fd < 0) { return fd; }
+    r = _tmpf_dev_finish(pfd, name, fd, ftype, dev, entry);
+    sys_close(fd);
+    return r;
+}
+
+# Owner and mode for the node `fd` holds, once fstat shows it is the device
+# asked for. Anything else there (a symlink, file, directory, another device)
+# is EEXIST and left as it is.
+fn _tmpf_dev_finish(pfd, name, fd, ftype, dev, entry) {
+    var mode = load64(entry + 24);
+    var uid = load64(entry + 32);
+    var gid = load64(entry + 40);
+    var st[STAT_BUFSZ];
+    var r = sys_fstat(fd, &st);
+    if (r < 0) { return r; }
+    if ((load32(&st + STAT_MODE) & 0xF000) != ftype) { return -EEXIST; }
+    if (load64(&st + TMPF_STAT_RDEV) != dev) { return -EEXIST; }
+    if (_tmpf_owner_set(uid, gid) == 1) {
+        r = sys_fchownat(fd, "", uid, gid, AT_EMPTY_PATH);
+        if (r < 0) { return r; }
+        r = sys_fstat(fd, &st);                             # chown clears set-id bits
+        if (r < 0) { return r; }
+    }
+    if ((load32(&st + STAT_MODE) & 4095) == mode) { return 0; }
+    var cur[STAT_BUFSZ];
+    r = sys_fstatat(pfd, name, &cur, AT_SYMLINK_NOFOLLOW);
+    if (r < 0) { return r; }
+    if (load64(&cur) != load64(&st)) { return -EEXIST; }   # st_dev
+    if (load64(&cur + TMPF_STAT_INO) != load64(&st + TMPF_STAT_INO)) { return -EEXIST; }
+    return sys_fchmodat(pfd, name, mode, 0);
 }

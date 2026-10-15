@@ -531,7 +531,10 @@ fn main() {
     if (lfd107 >= 0) {
         assert_eq(send_notify(p120, str_from("READY=1\n")), 0 - 1,
           "notify: send_notify refuses a 120-byte path");
-        assert_eq(notify_try_recv(lfd107), 0, "notify: nothing reached the 107-byte socket");
+        # 1.16.2: through the authenticated receive (notify_try_recv is deprecated);
+        # NOTIFY_RECV_EMPTY says the queue was empty, not that a datagram was dropped.
+        assert_eq(notify_try_recv_authenticated(lfd107, 0), 0, "notify: nothing reached the 107-byte socket");
+        assert_eq(notify_recv_outcome(), NOTIFY_RECV_EMPTY, "notify: the 107-byte socket's queue is empty");
         sys_close(lfd107);
     }
     sys_unlink(str_data(p107));

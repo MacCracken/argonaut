@@ -7,6 +7,192 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.16.2] — 2026-10-14
+
+**The 2026-10-14 audit's deferred findings, repaired.** The fixes:
+- an ordered, wave-by-wave shutdown;
+- an Argon2id emergency-shell credential, with authentication required by default;
+- health results audited on transitions plus an hourly heartbeat;
+- native, symlink-safe tmpfiles;
+- the unauthenticated notify receive deprecated;
+- two unit-generation holes closed;
+- an architecture note on the TPM key-release policy.
+
+Repairing them turned up two more defects, both fixed: descriptors passed over the notify
+socket leaked into PID 1, and a restart refused at the limit left no audit record. 41
+suites and 1,662 assertions pass, 0 failures, on x86_64 and under qemu-aarch64. The bench
+gate is neutral. The user chose the four policy questions on 2026-10-14: the KDF format,
+the emergency-shell default, the health-audit policy, and the TPM handling.
+
+### Security
+
+| Finding (2026-10-14 audit unless noted) | Severity | Fix |
+|---|---|---|
+| Emergency-shell credential (roadmap KDF item) | LOW | It was an unsalted single-round SHA-256 digest; a v1 **Argon2id** record is now verified (below) |
+| Emergency shell open by default | LOW | `emergency_shell_default()` sets `require_auth = 1` and has no credential, so it **denies until one is set** |
+| C-8 shutdown order | LOW | `init_stop_all` stopped everything at once; it now stops dependents first, wave by wave (below) |
+| `notify_try_recv` / `notify_drain` | LOW | These parsed truncated datagrams and skip sender authentication. They now use `recvmsg`, drop truncated datagrams, pass no control buffer (so no descriptor can be installed), and are `#deprecated`, with removal planned for 1.17.0 |
+| Unit generation | LOW | `WatchdogSec=` was emitted under `Type=simple`; an ExecStart binary starting `-@:+!` was read as a systemd prefix |
+| tmpfiles via external commands | LOW | Parent-path symlinks were followed as root; the new `tmpfiles_apply` never follows one |
+| **New:** fds passed to PID 1 | LOW | On a notify socket without `SO_PASSCRED` (a consumer's own socket; `notify_bind` always sets it), a sender's `SCM_RIGHTS` descriptors were installed in PID 1 and never closed, one leak per datagram. Every passed descriptor is now closed before the verdict |
+| **New:** restart limit unaudited | LOW | A restart refused at `max_restarts` left only a sakshi warning. It is now an `EVT_RESTART_LIMIT` ("RestartLimitReached", error) record |
+| CVE-2026-32606 class (TPM key release) | — | Documented in `docs/architecture/005-edge-boot-tpm-key-policy.md`, with no code change (the user's decision). argonaut has no TPM code; the policy is kybernet's enrolment |
+
+### Added
+
+- **`init_execute_shutdown(init, timeout_ms)`** stops managed services in reverse dependency
+  waves.
+  - Each wave's live members (RUNNING / STARTING) are SIGTERMed together, then reaped against
+    one wave deadline.
+  - Stragglers get SIGKILL to the process group (KillMode=mixed) and up to 500 ms to be
+    reaped.
+  - Every member then ends STOPPED with pid 0, with its proc-table entry removed. Its
+    record goes through the persist-aware audit path: TimeoutKilled after a SIGKILL,
+    otherwise Stopped. A process that died of the SIGTERM it was sent counts as a clean
+    stop, as in systemd's default `SuccessExitStatus`.
+  - **One budget is shared:** each wave gets the remaining time divided by the number of live
+    waves left, so the lowest waves (databases) get the most. The worst case is `timeout_ms`
+    plus 500 ms for each wave that needed a SIGKILL.
+  - A dependency cycle stops everything as one wave.
+  - It ends with a `proc_table_stop_all` sweep for tracked-but-unmanaged pids and an audit
+    flush.
+  - The 1.16.1 B-7 rule holds: a pid that is not our child, or any pid ≤ 1, is never
+    signalled.
+- **The v1 Argon2id emergency credential**, in kybernet's and agnostic's format:
+  `v1$<t>$<m>$<p>$<salt-hex>$<tag-hex>`.
+  - **New API:** `emergency_cred_kind(h)` (`ECRED_NONE` / `LEGACY` / `ARGON2ID` /
+    `INVALID`), `emergency_cred_parse(h, out)`, and `emergency_auth_arena_live()` /
+    `_peak()`.
+  - **kybernet's bounds**, rejected rather than clamped: t 1..8, m 8,192..65,536 KiB, p = 1,
+    m·t ≤ 131,072, salt 16..64 B, tag 32..64 B.
+  - **No fallback:** a malformed `v1$` record is INVALID and never falls back to legacy.
+  - **The Argon2 arena is a private `mmap`, unmapped before the verdict.** After sigil's
+    one-time setup (≤ 4,320 B on the first call in the process), a verification grows PID 1's
+    arena by 0 bytes.
+  - A verification costs 54 ms at the floor (m = 8 MiB, t = 1; kybernet's x86_64
+    measurement) and 232 ms at kybernet's default. At the m·t cap it takes roughly 800 ms
+    (extrapolated) and maps up to 64 MiB temporarily. If the mapping fails, access is
+    denied.
+- **`tmpfiles_apply(entries)` / `tmpfiles_apply_entry(entry)`:** native tmpfiles that never
+  follow a symlink anywhere in the path.
+  - **Walk:** from `/`, one `openat(O_PATH|O_DIRECTORY|O_NOFOLLOW)` per component.
+  - **Directories:** `mkdirat`, then `fchown` / `fchmod` on an `O_NOFOLLOW` fd.
+  - **Symlinks:** created with `symlinkat`. An existing symlink is replaced atomically through
+    a temporary link and `renameat`; a file or directory at the path is never replaced.
+  - **Devices:** `mknodat`. The node's dev/ino is checked by fd before its owner and mode are
+    set.
+  - **Missing parents** are created for directory entries only.
+  - It keeps going after a failed entry and returns the number of failures.
+  - `generate_tmpfile_commands` is unchanged.
+- **`ag_sys_symlinkat`** (x86_64 266 / aarch64 36). It runs as `symlinkat(...) = 0` under
+  `qemu-x86_64 -strace` and `qemu-aarch64 -strace`.
+- **`EVT_RESTART_LIMIT`**, appended to `ServiceEventType`; no existing value shifts.
+- **Health-audit policy:** `HEALTH_AUDIT_HEARTBEAT_MS = 3600000`, plus two ManagedService
+  fields, `health_rec` and `health_rec_at` (the struct grows from 56 to 72 bytes; only
+  `managed_svc_new` allocates it).
+- **`docs/architecture/005-edge-boot-tpm-key-policy.md`**, cross-linked from ADR-004. The numbers 003 and 004 were
+  retired at 1.8.5 and are not reused.
+- **Dependency:** a `[deps.sigil]` block, tag 3.13.12 (libro's pin). It lists libro's four
+  thin files plus `dist/sigil-argon2.cyr`. The argon2 bundle repeats 14 scaffolding functions
+  that `sigil-mldsa` also defines. Compared body by body at 3.13.12, all 14 are identical, so
+  binding to the last definition changes nothing. Each build prints 14 `duplicate fn`
+  warnings, as kybernet's does.
+
+### Changed
+
+- **`init_stop_all`** keeps its signature and now runs the ordered shutdown, so kybernet
+  gets dependency order without a code change. Its result vec comes back in stop order, and
+  a signalled exit reads 128+signal instead of -1.
+- **Health checks are audited only on change.** A result is recorded when it is the first
+  since a (re)start, when it differs from the last recorded result (pass↔fail), or when it is
+  a pass at least one hour after that service's last health record. Repeated failures are not
+  re-recorded; the restart and give-up actions they trigger are.
+- **`emergency_shell_default()`** has `require_auth = 1`. kybernet's runtime is
+  unaffected: `drop_to_emergency` starts from this default but overwrites both
+  `require_auth` (+24) and the credential (+32) from its own config. Two assertions in
+  kybernet's `test_emergency_auth` do pin the old open default (below).
+- **`verify_emergency_auth`:**
+  - It classifies the credential first.
+  - A null config or null password is denied; before, either crashed PID 1.
+  - The legacy path (exactly 64 **lowercase** hex digits) is byte-for-byte the old code,
+    because kybernet's legacy arm calls it. An uppercase digest was always denied and now
+    classifies INVALID.
+- **`generate_unit`:**
+  - `WatchdogSec=` is emitted only for `SVC_NOTIFY`, from `watchdog_ms`; a health check
+    alone no longer produces it.
+  - It returns **0** when the binary is not an absolute path.
+- **`notify_drain`** carries on past an empty or truncated datagram.
+
+### Tests
+
+**Three new suites.** Each was run against the unmodified code before its fixes; the
+counts that failed then are:
+
+| Suite | Assertions | Failed before the fix |
+|---|---:|---|
+| `emergency_kdf` | 125 | 63, then a SIGSEGV on the null config |
+| `shutdown_audit` | 82 | 40, plus the 2 restart-limit assertions |
+| `deferred_fixes` | 116 | 37, plus the SCM_RIGHTS leak |
+
+**Existing tests changed on purpose:**
+- `lifecycle`, `modules_a` and `security`: the closed emergency-shell default.
+- `api_a`: WatchdogSec now on an `SVC_NOTIFY` service.
+- `notify` and `harden_net`: round trips through the authenticated receive.
+
+### Performance
+
+The gate ran `./scripts/bench-history.sh "1.16.2-deferred-fixes"` against
+`1.16.1-audit-bench-streaming`. A 24-round interleaved A/B of the 1.16.1 tag and 1.16.2,
+pinned to one core, ran alongside it.
+
+**Verdict: neutral, no regression.**
+- `generate_unit` is faster: 4.381 → 3.910 µs (−10.8 %).
+- `resolve_order_chain_100` reads +3.4 µs (+1.5 %), with fully overlapping ranges: it is
+  noise-bound, as at every release.
+- In the single gate row, three micros read beyond the ±2 µs band, and the A/B clears all
+  three. No code on any of their paths changed in 1.16.2:
+
+  | Micro | Gate row | A/B |
+  |---|---:|---:|
+  | `resolve_waves_chain_20` | +11.4 µs | −0.5 µs (−1.6 %), near-identical ranges |
+  | `resolve_order_chain_10` | +2.9 µs | +0.4 µs |
+  | `resolve_waves_wide_20` | +2.8 µs | +0.3 µs |
+- Every other micro moves by less than 1.2 µs (the largest is `resolve_order_chain_50`,
+  +1.18 µs, with overlapping ranges), inside the ±2 µs noise band.
+
+**Binary size:** x86_64 443,848 → **448,448 B** (+4,600, of which +4,296 is the argon2
+bundle's scaffolding before any argonaut code changes); aarch64 1,569,992 → **1,570,488 B**.
+
+### Verification
+
+- **Tests:** 41 suites, **1,662 assertions, 0 failures**, on x86_64 and under qemu-aarch64.
+  Test builds add two deliberate deprecation warnings (`notify_try_recv` / `notify_drain`)
+  and the 14 sigil duplicates.
+- **Gates:** lint, `fmt --check` and `cyrius vet` are clean. `cyrius deps --verify` passes
+  61 / 61 (`lib/sigil-argon2.cyr` is the new leaf). The `--check-lib-sync` DCE build gives
+  448,448 B.
+- **Syscall traces:** every `sendto`, `fcntl` and `poll` line recorded under `qemu -strace`
+  is identical to 1.16.1, on both architectures.
+- **PID 1:** the qemu harness and boot test at `-m 256M` pass. As PID 1 of a pid namespace,
+  argonaut has 0 idle wakeups, reaps 300 orphans with 0 zombies, and shuts down cleanly on
+  SIGTERM.
+
+### Downstream: kybernet
+
+Not rebuilt here; kybernet's update is separate work. What it would notice:
+- Its `init_stop_all` call now stops dependents first and leaves every service STOPPED.
+- Its health tick writes far fewer audit records.
+- Its own emergency credential code is unaffected, and its legacy arm still calls the
+  unchanged legacy path.
+- **Its unit suite will fail two assertions until updated.** `src/test.cyr:1391-1393`
+  (`test_emergency_auth`) asserts that `emergency_shell_default()` has `require_auth` 0
+  and grants "anything". Both now read the closed default. Its production path, which
+  overwrites both fields, is unaffected.
+
+Two open items are on its side: enrolling TPM keys by architecture note 005, and moving off
+`notify_try_recv` / `notify_drain` before 1.17.0 if it uses them. It does not; it has its
+own receiver.
+
 ## [1.16.1] — 2026-10-14
 
 **A hardening and optimization pass. 13 MEDIUM and 18 LOW findings are fixed, each MEDIUM

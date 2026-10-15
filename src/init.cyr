@@ -497,6 +497,11 @@ fn init_start_service(init, name) {
         return 0 - 1;
     }
 
+    # 1.16.2: a new run's first health result is recorded again, whatever the
+    # last run's was (HealthAudit, types.cyr).
+    managed_svc_set_health_rec(ms, HEALTH_REC_NONE);
+    managed_svc_set_health_rec_at(ms, 0);
+
     var svc_type = svc_def_service_type(sd);
 
     var result = 0 - 1;
@@ -833,7 +838,11 @@ fn init_restart_service(init, name, stop_timeout_ms) {
     var restarts = managed_svc_restarts(ms);
 
     if (restart_limit_exceeded(rc, restarts)) {
+        # 1.16.2: the refusal is where argonaut gives up on the service, so it
+        # is audited. It used to leave only this sakshi warning, and the chain
+        # showed a crash followed by nothing.
         sakshi_warn(name, strlen(name));
+        _init_audit_s(init, sd, EVT_RESTART_LIMIT);
         return 0 - 1;
     }
 
@@ -975,11 +984,283 @@ fn init_reap_services(init) {
 }
 
 # =========================================================================
-# Stop all services
+# Stop all services — ordered shutdown (1.16.2, 2026-10-14 audit C-8)
 # =========================================================================
 
+# ⚠ SHUTDOWN STOPS DEPENDENTS BEFORE WHAT THEY DEPEND ON. Until 1.16.2
+# init_stop_all was `proc_table_stop_all`: every tracked process was SIGTERMed
+# at the same instant, so postgres went down while the services using it were
+# still flushing to it, and afterwards every ManagedService was still RUNNING
+# with a stale pid and the audit chain held no record that anything stopped.
+# kybernet builds init_plan_shutdown's ordered plan and then calls only this.
+#
+# Now the managed services are stopped wave by wave, walking
+# resolve_service_waves in REVERSE: every member of a wave is SIGTERMed at once
+# and reaped before the next wave is signalled. A wave's stragglers are
+# SIGKILLed with their process group (fork_exec_service children lead one) at
+# the wave's deadline and reaped — SIGTERM to the main process, SIGKILL to the
+# group: systemd's KillMode=mixed. Each stopped service is left STOPPED, pid 0,
+# out of the proc table, with its restart window settled, and its stop audited.
+#
+# ⚠ THE BUDGET IS SHARED, SO THE TOTAL IS BOUNDED BY ONE timeout_ms. A wave's
+# deadline is an even share of what is left: (time remaining) / (waves with a
+# running member still to stop). Time a wave does not use passes on to the
+# waves after it, so the last wave — the services everything else depends on —
+# gets the most. Giving every wave the full timeout would make a 20-deep chain
+# of hung services take 20 timeouts. The SIGKILL reap window,
+# SHUTDOWN_KILL_REAP_MS, is the one addition: the worst case is
+# timeout_ms + SHUTDOWN_KILL_REAP_MS x (waves that needed a SIGKILL), and a
+# killed process normally takes milliseconds of it. timeout_ms <= 0 sends
+# SIGTERM and SIGKILL back to back.
+enum ShutdownKill {
+    SHUTDOWN_KILL_REAP_MS = 500;
+}
+
+# One service being stopped by a wave. Fields: ms, pid, done (1 = reaped or
+# nothing to wait for), code (_wait_status_code, -1 unknown), killed (1 =
+# SIGKILLed at the deadline).
+fn _sd_member(ms, pid) {
+    var m = alloc(40);
+    store64(m, ms);
+    store64(m + 8, pid);
+    store64(m + 16, 0);
+    store64(m + 24, 0);
+    store64(m + 32, 0);
+    return m;
+}
+
+# RUNNING or STARTING — something a shutdown has to stop.
+fn _sd_live(ms) {
+    var st = managed_svc_state(ms);
+    if (st == STATE_RUNNING) { return 1; }
+    if (st == STATE_STARTING) { return 1; }
+    return 0;
+}
+
+# Does `wave` (a vec of name Strs) hold a live managed service? Names with no
+# ManagedService are external dependencies.
+fn _sd_wave_live(svc_map, wave) {
+    var live = 0;
+    for (var i = 0; i < vec_len(wave); i = i + 1) {
+        var ms = map_get(svc_map, str_data(vec_get(wave, i)));
+        if (ms != 0) {
+            if (_sd_live(ms) == 1) { live = 1; }
+        }
+    }
+    return live;
+}
+
+# One WNOHANG pass over the members still pending. Returns how many remain.
+fn _sd_reap_pass(members) {
+    var pending = 0;
+    var st[8];
+    for (var i = 0; i < vec_len(members); i = i + 1) {
+        var m = vec_get(members, i);
+        if (load64(m + 16) == 0) {
+            store64(&st, 0);
+            var r = sys_waitpid(load64(m + 8), &st, WNOHANG);
+            if (r > 0) {
+                store64(m + 24, _wait_status_code(load32(&st)));
+                store64(m + 16, 1);
+            } elif (r < 0 && r != 0 - 4) {
+                store64(m + 24, 0 - 1);      # ECHILD: reaped elsewhere, status lost
+                store64(m + 16, 1);
+            } else {
+                pending = pending + 1;       # still running (or EINTR)
+            }
+        }
+    }
+    return pending;
+}
+
+# Reap pending members until none is left or `deadline` (monotonic ms) passes.
+# One pass always runs, so a passed deadline still collects what has exited.
+# Polls with a short, growing nap (1..16 ms), as _init_wait_start does.
+fn _sd_reap_until(members, deadline) {
+    var nap = 1;
+    var pending = _sd_reap_pass(members);
+    while (pending > 0 && monotonic_ms() < deadline) {
+        sleep_ms(nap);
+        if (nap < 16) { nap = nap * 2; }
+        pending = _sd_reap_pass(members);
+    }
+    return pending;
+}
+
+# Stop the live members of one wave in parallel; see the block comment above.
+# `results` is 0 or a vec that gets one (name Str, code) pair per stopped
+# service — init_stop_all's return shape. Returns how many were stopped.
+fn _sd_stop_wave(init, svc_map, wave, deadline, results) {
+    var members = vec_new();
+    var st[8];
+    for (var i = 0; i < vec_len(wave); i = i + 1) {
+        var ms = map_get(svc_map, str_data(vec_get(wave, i)));
+        if (ms == 0) { continue; }
+        if (_sd_live(ms) == 0) { continue; }
+        var sd = managed_svc_def(ms);
+        var sname = svc_def_name(sd);
+        sakshi_info(str_data(sname), str_len(sname));
+        _init_audit_s(init, sd, EVT_STOPPING);
+        managed_svc_set_state(ms, STATE_STOPPING);
+        # The proc table holds the pid argonaut forked; a forking service's
+        # entry is its pid-file pid. The ManagedService pid is the fallback.
+        var pid = proc_table_pid(sname);
+        if (pid <= 0) { pid = managed_svc_pid(ms); }
+        var m = _sd_member(ms, pid);
+        vec_push(members, m);
+        if (pid <= 1) {
+            store64(m + 16, 1);              # nothing to signal; never kill(-1) / init
+        } else {
+            # 1.16.1 audit B-7, as process_stop: probe before the first signal.
+            # A pid whose waitpid fails is not our child and is never signalled.
+            store64(&st, 0);
+            var probe = sys_waitpid(pid, &st, WNOHANG);
+            if (probe > 0) {
+                store64(m + 24, _wait_status_code(load32(&st)));
+                store64(m + 16, 1);
+            } elif (probe < 0) {
+                store64(m + 24, 0 - 1);
+                store64(m + 16, 1);
+            } else {
+                sys_kill(pid, SIGTERM);
+            }
+        }
+    }
+    var n = vec_len(members);
+    if (n == 0) { return 0; }
+
+    if (_sd_reap_until(members, deadline) > 0) {
+        # Stragglers. The group id cannot belong to anyone else while `pid` is
+        # unreaped (see _init_kill_start_child).
+        for (var k = 0; k < n; k = k + 1) {
+            var km = vec_get(members, k);
+            if (load64(km + 16) == 0) {
+                var kp = load64(km + 8);
+                sys_kill(0 - kp, SIGKILL);
+                sys_kill(kp, SIGKILL);
+                store64(km + 24, 0 - 1);     # until the reap below says otherwise
+                store64(km + 32, 1);
+            }
+        }
+        # A child in uninterruptible sleep can outlive this window; the orphan
+        # sweep in init_reap_services collects it later.
+        _sd_reap_until(members, monotonic_ms() + SHUTDOWN_KILL_REAP_MS);
+    }
+
+    var now = _init_mono_ms();
+    for (var j = 0; j < n; j = j + 1) {
+        var jm = vec_get(members, j);
+        var jms = load64(jm);
+        var jsd = managed_svc_def(jms);
+        var code = load64(jm + 24);
+        proc_table_remove(svc_def_name(jsd));
+        managed_svc_settle_restarts(jms, now);         # C-2: a run ended
+        managed_svc_set_pid(jms, 0);
+        managed_svc_set_state(jms, STATE_STOPPED);
+        # Dying of the SIGTERM it was sent is stopping as asked — the clean
+        # signals in systemd's default SuccessExitStatus include SIGTERM — so
+        # a plain daemon's shutdown is not audited as a failure.
+        if (load64(jm + 32) == 1) {
+            _init_audit_s(init, jsd, EVT_TIMEOUT_KILLED);
+        } elif (code == 0) {
+            _init_audit_s(init, jsd, EVT_STOPPED_OK);
+        } elif (code == 128 + SIGTERM) {
+            _init_audit_s(init, jsd, EVT_STOPPED_OK);
+        } else {
+            _init_audit_s(init, jsd, EVT_STOPPED_FAIL);
+        }
+        if (results != 0) {
+            vec_push(results, _stop_result(str_data(svc_def_name(jsd)), code));
+        }
+    }
+    return n;
+}
+
+# The ordered shutdown behind init_execute_shutdown and init_stop_all.
+fn _init_shutdown(init, timeout_ms, results) {
+    sakshi_span_enter("shutdown_exec", 13);
+    var budget = timeout_ms;
+    if (budget < 0) { budget = 0; }
+    var end = monotonic_ms() + budget;
+    var svc_map = 0;
+    if (init != 0) { svc_map = load64(init + 16); }
+    var stopped = 0;
+
+    if (svc_map != 0) {
+        var defs = _init_svc_defs_into(svc_map, vec_new(), 0);
+        var waves = resolve_service_waves(defs);
+        if (waves == 0) {
+            # A dependency cycle has no order. Stopping nothing would leave the
+            # whole set to the final SIGKILL-without-reaping sweep below, so
+            # stop everything as one parallel wave instead.
+            var all = vec_new();
+            for (var i = 0; i < vec_len(defs); i = i + 1) {
+                vec_push(all, svc_def_name(vec_get(defs, i)));
+            }
+            waves = vec_new();
+            vec_push(waves, all);
+        }
+
+        var live_left = 0;
+        for (var c = 0; c < vec_len(waves); c = c + 1) {
+            live_left = live_left + _sd_wave_live(svc_map, vec_get(waves, c));
+        }
+
+        for (var w = vec_len(waves) - 1; w >= 0; w = w - 1) {
+            var wave = vec_get(waves, w);
+            if (_sd_wave_live(svc_map, wave) == 1) {
+                var now = monotonic_ms();
+                var left = end - now;
+                if (left < 0) { left = 0; }
+                if (live_left < 1) { live_left = 1; }
+                var deadline = now + left / live_left;
+                stopped = stopped + _sd_stop_wave(init, svc_map, wave, deadline, results);
+                live_left = live_left - 1;
+            }
+        }
+    }
+
+    # Anything still tracked belongs to no live ManagedService (a consumer can
+    # insert into the proc table directly): the old parallel sweep, inside
+    # what is left of the budget.
+    if (g_proc_table != 0) {
+        if (proc_table_count() > 0) {
+            var rest = end - monotonic_ms();
+            if (rest < 0) { rest = 0; }
+            var swept = proc_table_stop_all(rest);
+            if (results != 0) {
+                for (var s = 0; s < vec_len(swept); s = s + 1) {
+                    vec_push(results, vec_get(swept, s));
+                }
+            }
+        }
+    }
+
+    if (init != 0) { init_audit_flush(init); }
+    sakshi_span_exit();
+    if (svc_map == 0) { return 0 - 1; }
+    return stopped;
+}
+
+# Stop every running managed service in reverse dependency order, then sweep
+# the proc table; see the block comment above. `timeout_ms` bounds the whole
+# call (plus SHUTDOWN_KILL_REAP_MS per wave that needed a SIGKILL). Flushes the
+# persistent audit log before returning.
+#
+# Returns how many managed services were stopped, or -1 if `init` is 0 or has
+# no service map (only the proc-table sweep ran).
+fn init_execute_shutdown(init, timeout_ms) {
+    return _init_shutdown(init, timeout_ms, 0);
+}
+
+# The pre-1.16.2 entry point, now ordered. Returns what it always returned: a
+# vec of (name Str, exit code) pairs, one per process stopped — now in stop
+# order, with the codes of _wait_status_code (128 + signal for a signalled
+# exit, -1 when unknown).
 fn init_stop_all(init, timeout_ms) {
-    return proc_table_stop_all(timeout_ms);
+    var results = vec_new();
+    _init_shutdown(init, timeout_ms, results);
+    return results;
 }
 
 # =========================================================================
@@ -1278,6 +1559,32 @@ fn _init_notify_apply(init, pid, nm) {
     return 1;
 }
 
+# Audit one health result under the HealthAudit policy (1.16.2; the policy is
+# documented at the enum in types.cyr): the first result since a (re)start, a
+# change from the last RECORDED result, or a pass HEALTH_AUDIT_HEARTBEAT_MS
+# after the service's last health record. Before 1.16.2 every probe was
+# recorded. `now` is monotonic ms. Allocates nothing (C-6). Returns 1 if a
+# record was written.
+fn _init_health_audit(init, ms, sd, passed, now) {
+    var r = HEALTH_REC_FAIL;
+    if (passed != 0) { r = HEALTH_REC_PASS; }
+    var due = 0;
+    if (managed_svc_health_rec(ms) != r) {
+        due = 1;                             # the first result, or a transition
+    } elif (r == HEALTH_REC_PASS) {
+        if (now - managed_svc_health_rec_at(ms) >= HEALTH_AUDIT_HEARTBEAT_MS) { due = 1; }
+    }
+    if (due == 0) { return 0; }
+    if (r == HEALTH_REC_PASS) {
+        _init_audit_s(init, sd, EVT_HEALTH_PASSED);
+    } else {
+        _init_audit_s(init, sd, EVT_HEALTH_FAILED);
+    }
+    managed_svc_set_health_rec(ms, r);
+    managed_svc_set_health_rec_at(ms, now);
+    return 1;
+}
+
 fn init_poll_health(init, tracker) {
     if (_ph_results == 0) { _ph_results = vec_new(); }
     vec_truncate(_ph_results, 0);
@@ -1306,11 +1613,12 @@ fn init_poll_health(init, tracker) {
                     # Stamped when the pass was OBSERVED, not at the tick's
                     # start: a probe may take up to its own timeout, and the
                     # watchdog measures its deadline from this value.
-                    managed_svc_set_last_hc(ms, _init_mono_ms());
-                    _init_audit_s(init, sd, EVT_HEALTH_PASSED);
+                    var seen = _init_mono_ms();
+                    managed_svc_set_last_hc(ms, seen);
+                    _init_health_audit(init, ms, sd, 1, seen);
                 } else {
                     sakshi_warn(name, strlen(name));
-                    _init_audit_s(init, sd, EVT_HEALTH_FAILED);
+                    _init_health_audit(init, ms, sd, 0, now);
                 }
                 vec_push(_ph_results, result);
             }

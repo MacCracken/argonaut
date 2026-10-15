@@ -107,7 +107,11 @@ fn main() {
     assert(1 - constant_time_eq("hello", 5, "world", 5), "ct ne");
     assert(1 - constant_time_eq("short", 5, "longer", 6), "ct ln");
 
+    # 1.16.2: the default requires auth and has no credential, so it denies;
+    # an explicit require_auth = 0 still skips the check.
     var esc = emergency_shell_default();
+    assert_eq(verify_emergency_auth(esc, str_from("any")), 0, "auth dflt");
+    store64(esc + 24, 0);
     assert(verify_emergency_auth(esc, str_from("any")), "auth sk");
 
     return assert_summary();
