@@ -1,0 +1,68 @@
+# register_names.tcyr — argonaut_init_new refuses a service whose name
+# validate_service_name refuses, and audits the refusal (1.17.0).
+#
+# validate_service_name existed and nothing called it, so any name reached the
+# unit generator, the audit chain and (in kybernet) a cgroup path. Now a name
+# outside [A-Za-z0-9._-], empty, ".", or holding ".." is not registered, and
+# each refusal is an EVT_REGISTRATION_REFUSED ("RegistrationRefused") record.
+include "tests/test_header.cyr"
+
+fn _svc(name) {
+    return svc_def_new(str_from(name), str_from("rn"), str_from("/bin/true"));
+}
+
+fn _count_action(log, action) {
+    var q = query_new();
+    query_action(q, str_from(action));
+    return vec_len(chain_query(log, q));
+}
+
+fn main() {
+    alloc_init();
+    test_group("register-names");
+
+    # --- the predicate ---
+    assert_eq(validate_service_name(str_from("daimon")), 1, "name: daimon");
+    assert_eq(validate_service_name(str_from("llm-gateway")), 1, "name: hyphen");
+    assert_eq(validate_service_name(str_from("svc_1.v2")), 1, "name: underscore, digit, dot");
+    assert_eq(validate_service_name(str_from("")), 0, "name: empty refused");
+    assert_eq(validate_service_name(str_from(".")), 0, "name: '.' refused");
+    assert_eq(validate_service_name(str_from("..")), 0, "name: '..' refused");
+    assert_eq(validate_service_name(str_from("a..b")), 0, "name: '..' inside refused");
+    assert_eq(validate_service_name(str_from("../evil")), 0, "name: traversal refused");
+    assert_eq(validate_service_name(str_from("a/b")), 0, "name: '/' refused");
+    assert_eq(validate_service_name(str_from("a b")), 0, "name: space refused");
+    assert_eq(validate_service_name(str_from("a@b")), 0, "name: '@' refused");
+    assert_eq(validate_service_name(0), 0, "name: null refused");
+
+    # --- registration: good names in, bad names out, each refusal audited ---
+    # BOOT_RECOVERY registers no defaults, so every service here is from config.
+    var cfg = config_set_boot_mode(argonaut_config_default(), BOOT_RECOVERY);
+    config_set_audit_retain(cfg, 1);
+    var svcs = config_services(cfg);
+    vec_push(svcs, _svc("good-svc"));
+    vec_push(svcs, _svc("../evil"));
+    vec_push(svcs, _svc("a/b"));
+    vec_push(svcs, _svc("."));
+    vec_push(svcs, _svc("also.good"));
+    var init = argonaut_init_new(cfg);
+
+    assert(init_get_service(init, "good-svc") != 0, "registered: good-svc");
+    assert(init_get_service(init, "also.good") != 0, "registered: also.good");
+    assert_eq(init_get_service(init, "../evil"), 0, "refused: ../evil");
+    assert_eq(init_get_service(init, "a/b"), 0, "refused: a/b");
+    assert_eq(init_get_service(init, "."), 0, "refused: .");
+    assert_eq(vec_len(map_keys(load64(init + 16))), 2, "exactly the two good services registered");
+    assert_eq(_count_action(init_audit_log(init), "RegistrationRefused"), 3, "three refusals audited");
+    assert_eq(audit_event_severity(EVT_REGISTRATION_REFUSED), SEV_ERROR, "a refusal is an error");
+
+    # --- the default services all pass (none is refused) ---
+    var dcfg = config_set_audit_retain(argonaut_config_default(), 1);
+    var dinit = argonaut_init_new(dcfg);
+    assert_eq(_count_action(init_audit_log(dinit), "RegistrationRefused"), 0, "defaults: no refusals");
+    assert(vec_len(map_keys(load64(dinit + 16))) > 0, "defaults: registered");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

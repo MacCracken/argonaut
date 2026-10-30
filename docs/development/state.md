@@ -6,18 +6,20 @@
 
 ## Version
 
-**1.16.3** (cyrius 6.7.18, libro 2.11.3, sigil 3.13.15; every dependency at its latest
-tag.
-- **The bump needed no `src/` change.** `tests/tcyr/serde.tcyr` moves off the two JSON getters
-  bayan 1.11 deprecated.
-- **One fix (MEDIUM):** `fork_exec_service` no longer closes a std fd that `open("/dev/null")`
-  returned as 0, 1 or 2. A service now gets all three, even when PID 1 starts without them.
-- **Binary:** the x86_64 binary grows 448,448 → 761,960 B. The cause is bayan's Unicode
-  tables, which reach every build through `sigil-mldsa` (see Binary).
-- **Docs:** the documentation sweep that followed 1.16.2 ships here too.
+**1.17.0** (the roadmap's 1.17.0.
+- **Removed:** the deprecated `notify_try_recv`, `notify_drain` and `spawn_service`.
+- **Wired, not removed (ADR-014):**
+  - `fork_exec_service` applies a service's resource limits in the child, before the hook;
+  - it loads the service's env files into its environment;
+  - `argonaut_init_new` refuses and audits names `validate_service_name` refuses.
+- **Kept as they are:** `LogConfig`, socket activation, `capability_setpriv_cmd` and
+  `is_localhost_target` (roadmap Gated).
+- **Fixed (MEDIUM):** an env file that is a FIFO could hang PID 1 (kybernet's
+  `load_env_file` call too).
+- **Consumer floor corrected to cyrius 6.7.9** (`sys_ppoll`, since 1.16.1).
 
-42 suites / 1,670 assertions on x86_64 and under qemu-aarch64. Bench gate: neutral. See
-CHANGELOG [1.16.3].)
+45 suites / 1,760 assertions on x86_64 and under qemu-aarch64. Bench gate: neutral.
+Several behaviour changes; see CHANGELOG [1.17.0] Breaking.)
 
 Earlier releases are in [CHANGELOG.md](../../CHANGELOG.md). The pinned release plan
 from 1.17.0 on is in [roadmap.md](roadmap.md).
@@ -26,8 +28,10 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
 
 - `cyrius = "6.7.18"` in `cyrius.cyml [package]` and `qemu/helpers/cyrius.cyml`.
   The manifest is the only pin source (no `.cyrius-toolchain`); CI and release
-  read it. A consumer that compiles argonaut's `src/` needs cyrius ≥ 6.6.8
-  (`sys_fcntl`).
+  read it. A consumer that compiles argonaut's `src/` needs cyrius ≥ 6.7.9
+  (`sys_ppoll`, used by `ag_sys_poll` since 1.16.1; 1.16.1–1.16.3 said 6.6.8 in error).
+  Measured at 1.17.0: the tree builds on 6.7.9, and kybernet on 6.6.20 fails with
+  `undefined function 'sys_ppoll'`.
 - **6.7.x language rules that bind argonaut's source:** `trait`, `const`, `true`,
   `false`, `do` and `dyn` are reserved; `!` is a real operator (it was silently
   dropped before 6.7.3); every forward call is arity-checked; an unmatched `}` at
@@ -66,8 +70,8 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
     the binding changes nothing. **Re-diff them at every sigil bump**; any build that
     includes both bundles (kybernet's does) prints the same set.
   - **Test and bench builds:** they also redefine eight `sakshi_*` fns as stubs (eight
-    more warnings). The test builds add two deliberate `#deprecated` warnings, for
-    `notify_try_recv` / `notify_drain`.
+    more warnings). Since 1.17.0 removed `notify_try_recv` / `notify_drain`, no test build
+    prints a `#deprecated` warning.
 - **`lib/bench.cyr`** (6.6.5+) takes min/max only from windows the clock
   resolves to 1 %, and otherwise reports the mean. On the dev host (HPET
   clocksource, ~2.3 µs clock error) that is every row, so compare `avg_us` only.
@@ -96,40 +100,46 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
 
 ## Binary
 
-- **x86_64: 761,960 B**, a statically linked ELF, at 1.16.3
+- **x86_64: 770,560 B**, a statically linked ELF, at 1.17.0
   (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`).
-  2,987 fns are unreachable and 1,118,796 B of dead code is eliminated.
-  - **+313,512 over 1.16.2's 448,448 B.** +308,544 B of that is the 6.7.18 toolchain alone
-    (the 1.16.2 pins built under 6.7.18).
+  2,982 fns are unreachable and 1,115,653 B of dead code is eliminated.
+  - **+8,600 over 1.16.3's 761,960 B:** the limits, env-file and name-check code. The shipped
+    binary reaches `fork_exec_service` through the qemu harness's L3 path.
+  - **1.16.3 was +313,512 over 1.16.2's 448,448 B.** +308,544 B of that is the 6.7.18
+    toolchain alone (the 1.16.2 pins built under 6.7.18).
   - **The cause:** `.rodata` grew 39,778 → 382,342 B. bayan 1.9.0 (folded at 6.7.13) includes
     seven `lib/unicode/` files whose tables are top-level string `var`s, and DCE does not
     remove global initializers. bayan reaches the build through `sigil-mldsa`, so it cannot be
     dropped from argonaut's side.
   - **The fix is upstream** (sigil or cyrius). Inside an initramfs the file sits in RAM, and the
     qemu boot test still boots at `-m 96M`.
-- **aarch64: 2,183,024 B** at 1.16.3 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`).
-  2,987 fns are unreachable and 1,325,172 B is NOPed. That is +612,536 over 1.16.2's
-  1,570,488 B. aarch64 DCE fills dead code with NOPs instead of compacting, so new code
-  usually shows in full.
+- **aarch64: 2,187,512 B** at 1.17.0 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`).
+  2,982 fns are unreachable and 1,321,368 B is NOPed. That is +4,488 over 1.16.3's
+  2,183,024 B (1.16.3 was +612,536, the toolchain). aarch64 DCE fills dead code with
+  NOPs instead of compacting, so new code usually shows in full.
 - **L3 helper: 15,080 B**, a static ELF (`qemu/helpers/l3-helper`), re-cut under
   6.7.18 at 1.16.3 with `CYRIUS_DCE=1`. It is bundled into the qemu harness
   initramfs as `/bin/l3-helper`. Its build is warning-free.
-- **`cyrius capacity`** at 1.16.3: `fn_table` 3,736 / 131,072, `string_data`
-  382,342 / 2,097,152.
+- **`cyrius capacity`** at 1.17.0: `fn_table` 3,745 / 131,072, `string_data`
+  382,699 / 2,097,152.
 
 ## Suites
 
-- **x86_64: 42 `.tcyr` suites / 1,670 assertions**, 0 failures (cyrius 6.7.18).
-  +8 at 1.16.3: `spawn_std_fds`, the std-fd regression test.
-- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 42 / 42, 1,670 assertions**,
-  identical to x86_64. Run on the dev host at 1.16.3. CI still runs only the
+- **x86_64: 45 `.tcyr` suites / 1,760 assertions**, 0 failures (cyrius 6.7.18).
+  +90 at 1.17.0: `spawn_rlimits` (14), `spawn_env_files` (52), `register_names` (22), and
+  `deferred_fixes` +3 / `harden_proc` −1 from the removals.
+- **qemu-user caveats the suites handle:** qemu drops a guest's `RLIMIT_AS`, and reports no
+  `MSG_CTRUNC` for SCM_RIGHTS on a SO_PASSCRED socket. `spawn_rlimits` and `deferred_fixes`
+  probe the platform for each and assert what it does.
+- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 45 / 45, 1,760 assertions**,
+  identical to x86_64. Run on the dev host at 1.17.0. CI still runs only the
   aarch64 smoke; native aarch64 CI is roadmap 1.17.2.
 - **PID 1 in a pid namespace** (`unshare -Urpf --mount-proc ./build/argonaut`, no
-  root needed): the quick check for the supervisor loop. At 1.16.3 it shows 0 idle
+  root needed): the quick check for the supervisor loop. At 1.17.0 it shows 0 idle
   wakeups in 3 s, reaps 300 simultaneous orphans with 0 zombies left, and shuts down
   cleanly on SIGTERM.
 - **qemu PID-1 harness** (`qemu/pid1-harness-test.sh`, `qemu/boot-test.sh`,
-  KVM + `+invtsc`): at 1.16.3, M3 + L3 end-to-end and the supervisor-loop smoke
+  KVM + `+invtsc`): at 1.17.0, M3 + L3 end-to-end and the supervisor-loop smoke
   pass at the scripts' committed `-m 256M`. They have passed there since 1.15.5,
   the first release built with a `MAP_NORESERVE` heap (cyrius 6.6.8+). At 1.16.3 the
   boot test also boots at `-m 128M` and `-m 96M`.
@@ -137,28 +147,25 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
   (`scripts/bench-history.sh`); `tests/bcyr/argonaut.bcyr` carries the same 29,
   `tests/bcyr/api.bcyr` 8 more. History in `bench-history.csv`.
 
-### Bench snapshot (1.16.3-cyrius-6.7.18, 2026-10-29)
+### Bench snapshot (1.17.0-closeout, 2026-10-29)
 
-**Verdict: neutral, no regression.** The comparison is against `1.16.2-baseline` (the same tree
-on 6.7.9, run on the same host just before the pin moved), plus a 24-round interleaved A/B of
-the two bench binaries, pinned to one core:
+**Verdict: neutral, no regression** against `1.16.3-cyrius-6.7.18`, plus a 24-round
+interleaved A/B of the 1.16.3 and 1.17.0 bench binaries, pinned to one core:
 
-| Bench | 1.16.2-baseline | 1.16.3 gate | A/B Δ |
+| Bench | 1.16.3 gate | 1.17.0 gate | A/B Δ |
 |---|---:|---:|---:|
-| resolve_order_chain_100 ⚠ | 210.370 | 230.147 | −3.1 % (ranges overlap) |
-| resolve_waves_chain_20 | 32.914 | 36.200 | −4.3 % |
-| resolve_waves_wide_20 | 12.358 | 15.173 | −2.1 % |
-| resolve_order_desktop | 11.488 | 11.152 | −4.4 % |
-| plan_shutdown_reboot | 13.864 | 13.862 | −3.5 % |
-| mark_all_steps_complete | 46.892 | 47.385 | −0.2 % |
-| audit_log_record | 3.947 | 3.962 | 0.0 % |
+| init_new_desktop | 25.086 | 25.769 | +0.68 µs (+2.7 %) |
+| init_new_minimal | 5.940 | 5.842 | +0.18 µs |
+| resolve_order_chain_100 ⚠ | 230.147 | 205.105 | +0.6 % (ranges overlap) |
+| resolve_waves_chain_20 ⚠ | 36.200 | 32.460 | +1.3 % (ranges overlap) |
+| mark_all_steps_complete | 47.385 | 48.945 | +0.75 µs |
+| audit_log_record | 3.962 | 4.146 | +0.3 % |
 
-- **Cleared by the A/B:** the three gate-row reads beyond ±2 µs (`resolve_order_chain_100`,
-  `resolve_waves_chain_20` and `resolve_waves_wide_20`). None of their paths changed.
-- **Sub-µs:** the four `build_boot_seq_*` read +0.03 to +0.06 µs in the A/B, with overlapping
-  ranges.
-- **Every other micro** is within ±0.6 µs.
-- **Next baseline:** `1.16.3-cyrius-6.7.18` is the next gate's baseline.
+- **`init_new_*`** is the name check at registration, about 0.08 µs per default service.
+- **The chain rows' gate reads** beyond ±2 µs are faster, and flat in the A/B.
+- **Every other micro** is within ±0.75 µs.
+- **Next baseline:** `1.17.0-closeout` is the next gate's baseline and the current
+  closeout label. `1.17.0-wired-helpers` is an intermediate row.
 
 Earlier snapshots are in the CHANGELOG's Performance sections; every row is in
 `bench-history.csv`.
@@ -216,25 +223,31 @@ Earlier snapshots are in the CHANGELOG's Performance sections; every row is in
 
 Each item is pinned to a release in [roadmap.md](roadmap.md).
 
-- **1.17.0:** removal of the deprecated `notify_try_recv`, `notify_drain` and
-  `spawn_service`, and the inert-helper decision. The next cyrius pin has no release
-  number; its target is open.
-- **1.17.1:** the 104 `0 - N` literal sites in `src/`. Cosmetic; it ships alone.
+- **1.17.1:** the 101 `0 - N` literal sites in `src/`. Cosmetic; it ships alone.
+- **The next cyrius pin** has no release number; its target is open.
 - **1.17.2:** native aarch64 CI. The release workflow should bump this file; it is
   still edited by hand.
 - **1.18.0:**
   - **pidfd process identity.** The window between reading a pid and signalling it is
     still open; the 2026-10-14 audit's B-1 closed only the PID-file side.
   - **Health-check commands and the hook.** `HC_COMMAND` checks run without the
-    pre-exec hook, so a confined service's check command runs unconfined, as root.
+    pre-exec hook, so a confined service's check command runs unconfined, as root, and
+    (since 1.17.0) without the service's limits and env files.
 - **Gated:**
   - the legacy SHA-256 emergency credential (still accepted beside v1 Argon2id), until
     kybernet migrates operators;
-  - cgroup membership; WitnessAnchor; signing-key rotation.
+  - cgroup membership; WitnessAnchor; signing-key rotation;
+  - kept inert by the 1.17.0 decision, until a design or a caller exists: `LogConfig`,
+    socket activation, `capability_setpriv_cmd`, `is_localhost_target`.
 - **Standing:** the re-audit trigger (see Audit cadence).
 
 ### Closed recently
 
+- **1.17.0:**
+  - the deprecated notify receivers and `spawn_service` are removed;
+  - resource limits, env files and service-name checks are wired (ADR-014);
+  - a MEDIUM found on the way (a FIFO env file could hang PID 1) is fixed;
+  - the consumer floor is corrected to 6.7.9.
 - **1.16.3:** the cyrius pin move the roadmap had planned for 1.17.0 (6.7.18), and every
   dependency at its latest tag. Also a MEDIUM found by its review: `fork_exec_service`
   could start a service with stdin or stdout closed.
@@ -246,13 +259,14 @@ Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 ## Pending release
 
-None after 1.16.3, which is ready to tag. The next release is 1.17.0
+None after 1.17.0, which is ready to tag. The next release is 1.17.1
 ([roadmap.md](roadmap.md)).
 
 ## Recent shipped
 
 | Releases | Date | Headline |
 |---|---|---|
+| 1.17.0 | 2026-10-29 | Deprecated APIs removed; resource limits, env files and name checks wired (ADR-014); FIFO env-file hang fixed (MEDIUM); consumer floor corrected to 6.7.9 |
 | 1.16.3 | 2026-10-29 | cyrius 6.7.18, libro 2.11.3, sigil 3.13.15; services always get std fds (MEDIUM); the documentation sweep; binary +313 KB of bayan Unicode tables |
 | 1.16.0 – 1.16.2 | 2026-10-14 | cyrius 6.7.9 and libro 2.11.0; the 2026-10-14 audit (13 MEDIUM, 26 LOW, 7 PERF fixed); ordered shutdown; Argon2id emergency credential |
 | 1.15.2 – 1.15.6 | 2026-09-22 – 2026-10-14 | cyrius 6.6.6 → 6.6.20; agnostik enum lockstep; PID 1 bootable at 256 MB; deterministic startup order |
@@ -265,19 +279,24 @@ Everything else is in [CHANGELOG.md](../../CHANGELOG.md).
 
 - **AGNOS boot** — PID 1 / systemd-delegate role
 - **kybernet** (AGNOS's PID 1) uses argonaut's `src/` as a library for service
-  orchestration. At its 1.7.9 it pins argonaut **1.15.4** on cyrius 6.6.6.
-  - **Taking 1.16.x needs cyrius ≥ 6.6.8** (`sys_fcntl`). At 1.16.0, a scratch kybernet on
-    6.7.9 built and passed 882 / 882.
-  - **Behaviour it will notice** is listed under CHANGELOG [1.16.1] and [1.16.2]
-    Downstream. Two assertions in its `test_emergency_auth`
-    (`src/test.cyr:1391-1393`) pin the old open `emergency_shell_default()`.
+  orchestration. At its 1.7.11 it pins argonaut **1.15.6** on cyrius 6.6.20.
+  - **Taking 1.16.1 or later needs cyrius ≥ 6.7.9** (`sys_ppoll`). On its 6.6.20 pin the
+    build fails with `undefined function 'sys_ppoll'` (measured at 1.17.0).
+  - **Against 1.17.0 on 6.7.18** (scratch copy, `CYRIUS_LOCAL=argonaut`): it builds
+    (1,102,008 B) and passes **888 / 890**. The two failures are its `test_emergency_auth`
+    assertions (`src/test.cyr:1391-1393`), which pin the open `emergency_shell_default()`
+    1.16.2 closed.
+  - **Behaviour it will notice** is listed under CHANGELOG [1.16.1], [1.16.2] and [1.17.0]
+    (Breaking, Downstream). It calls none of the removed functions and sets neither
+    `svc_def_rlimits` nor `svc_def_env_files`. Its own `load_env_file` call gets the FIFO
+    fix. A name it accepts but argonaut refuses (`a..b`) is no longer registered.
   - **It enforces service policy.** Its pre-exec hook (`kyb_pre_exec`,
     `src/lib/service_sandbox.cyr`) applies cgroup placement, `no_new_privs`,
     capabilities, Landlock and seccomp per service, through argonaut's
-    `argonaut_set_pre_exec_hook` (1.9.0). argonaut itself applies none of it.
-  - **Not yet rebuilt against 1.16.1, 1.16.2 or 1.16.3.** That is kybernet's own update,
-    and the roadmap's Kybernet-side section tracks it. 1.16.3's one `src/` change is the
-    std-fd fix in `fork_exec_service`, which kybernet spawns every service through.
+    `argonaut_set_pre_exec_hook` (1.9.0). argonaut applies resource limits and env files
+    itself since 1.17.0 (ADR-014), and none of that policy.
+  - **Not yet rebuilt against 1.16.x or 1.17.0 in its own tree.** That is kybernet's own
+    update, and the roadmap's Kybernet-side section tracks it.
   - **When it moves its own pin to 6.7.18,** its binary takes the same bayan Unicode
     tables, through its own `sigil-mldsa`, whichever argonaut it pins.
 
@@ -286,9 +305,9 @@ Everything else is in [CHANGELOG.md](../../CHANGELOG.md).
 ## Verification
 
 - Linux x86_64 (Arch, kernel 7.2, AMD Ryzen 7 5800H, HPET clocksource) — primary dev host; CI on `ubuntu-latest`
-- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **42 / 42, 1,670 assertions at 1.16.3** (cyrius 6.7.18), identical to x86_64. CI runs the aarch64 smoke only. Real-hardware validation (RPi4, Apple Silicon, Graviton / Ampere) is roadmap 1.17.2 (native aarch64 CI). See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
-- qemu PID-1 harness under KVM — passes at 1.16.3 at the scripts' committed `-m 256M`; the boot test also boots at `-m 128M` and `-m 96M`.
-- PID 1 of an unprivileged pid namespace (`unshare -Urpf`) — idle wakeups, orphan reaping and SIGTERM shutdown, at 1.16.3.
+- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **45 / 45, 1,760 assertions at 1.17.0** (cyrius 6.7.18), identical to x86_64. CI runs the aarch64 smoke only. Real-hardware validation (RPi4, Apple Silicon, Graviton / Ampere) is roadmap 1.17.2 (native aarch64 CI). See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
+- qemu PID-1 harness under KVM — passes at 1.17.0 at the scripts' committed `-m 256M`; at 1.16.3 the boot test also booted at `-m 128M` and `-m 96M`.
+- PID 1 of an unprivileged pid namespace (`unshare -Urpf`) — idle wakeups, orphan reaping and SIGTERM shutdown, at 1.17.0.
 
 ## Audit cadence
 

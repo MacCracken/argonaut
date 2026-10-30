@@ -402,11 +402,41 @@ fn valid_transition(from, to) {
 # Resource limits
 # =========================================================================
 
+# A service's resource limits. fork_exec_service APPLIES them in the child
+# (1.17.0): each field that is set becomes both the soft and the hard limit,
+# as `prlimit --nofile=N` sets both, and a limit the kernel refuses fails the
+# start closed (exit 126). Set one with svc_def_set_rlimits; build it with
+# svc_rlimits_new, resource_limits_empty or resource_limits_secure.
+#
+# ⚠ agnostik defines its own `struct ResourceLimits` (48 B, different fields).
+# A build that holds both (kybernet's) keeps the FIRST definition and warns
+# "redefined with a different layout". argonaut reads this struct only at the
+# raw offsets below, never through field names, and sizes it with sizeof,
+# which either definition satisfies (32 or 48 B). Fill it with argonaut's own
+# constructors, never agnostik's.
 struct ResourceLimits {
-    nofile;         # 0 = not set
-    address_space;  # 0 = not set
-    nproc;          # 0 = not set
-    core;           # -1 = not set, 0 = disabled
+    nofile;         # +0  RLIMIT_NOFILE; 0 = not set
+    address_space;  # +8  RLIMIT_AS, bytes; 0 = not set
+    nproc;          # +16 RLIMIT_NPROC; 0 = not set
+    core;           # +24 RLIMIT_CORE, bytes; -1 = not set, 0 = no core dumps
+}
+
+# Linux resource numbers, the same on x86_64 and aarch64 (asm-generic).
+enum AgRlimitResource {
+    AG_RLIMIT_CORE = 4;
+    AG_RLIMIT_NPROC = 6;
+    AG_RLIMIT_NOFILE = 7;
+    AG_RLIMIT_AS = 9;
+}
+
+# Every field at once. Pass 0 (or -1 for `core`) to leave a limit unset.
+fn svc_rlimits_new(nofile, address_space, nproc, core) {
+    var rl = alloc(sizeof(ResourceLimits));
+    store64(rl, nofile);
+    store64(rl + 8, address_space);
+    store64(rl + 16, nproc);
+    store64(rl + 24, core);
+    return rl;
 }
 
 fn resource_limits_empty() {
@@ -998,6 +1028,10 @@ fn svc_def_set_health_check(sd, hc)   { store64(sd + 72, hc); return sd; }
 fn svc_def_set_enabled(sd, on)        { store64(sd + 88, on); return sd; }
 fn svc_def_set_service_type(sd, t)    { store64(sd + 96, t); return sd; }
 fn svc_def_set_pid_file(sd, p)        { store64(sd + 112, p); return sd; }
+# 1.17.0 — both fields existed and nothing read them; fork_exec_service now
+# applies the limits and loads the env files (see process_mgmt.cyr).
+fn svc_def_set_env_files(sd, paths)   { store64(sd + 104, paths); return sd; }
+fn svc_def_set_rlimits(sd, rl)        { store64(sd + 120, rl); return sd; }
 
 fn svc_def_set_seccomp(sd, cfg)      { store64(sd + 144, cfg); return sd; }
 fn svc_def_set_landlock(sd, cfg)     { store64(sd + 152, cfg); return sd; }

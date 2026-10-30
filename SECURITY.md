@@ -47,8 +47,9 @@ and capability policy, but does not apply it.
 
 | Version | Supported |
 |---------|-----------|
-| 1.16.x  | Yes |
-| 1.15.x  | Security fixes only (kybernet still pins 1.15.4) |
+| 1.17.x  | Yes |
+| 1.16.x  | Security fixes only |
+| 1.15.x  | Security fixes only (kybernet still pins 1.15.6) |
 | < 1.15  | No |
 
 ## Reporting a Vulnerability

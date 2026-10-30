@@ -17,6 +17,15 @@ struct ArgonautInit {
     persistent_audit;    # 1.5.3 — PersistentAuditLog wrapper, 0 = in-memory only
 }
 
+# A service argonaut_init_new will not register (1.17.0). Warned now; audited
+# once the chain exists. A definition with no name at all has nothing to audit
+# under, so it is only warned.
+fn _init_refuse_name(refused, sd) {
+    sakshi_warn("service name refused (validate_service_name) - not registered", 61);
+    if (svc_def_name(sd) != 0) { vec_push(refused, sd); }
+    return 0;
+}
+
 fn argonaut_init_new(config) {
     sakshi_span_enter("init_new", 8);
     var init = alloc(sizeof(ArgonautInit));
@@ -26,21 +35,36 @@ fn argonaut_init_new(config) {
     store64(init + 8, build_boot_sequence(mode));
 
     # Register default services
+    #
+    # 1.17.0: a service whose name validate_service_name refuses is NOT
+    # registered. The name becomes a unit file name, an audit source and, in
+    # kybernet, a cgroup directory, so one that could leave a path component
+    # ("..", "/", a bare ".") is refused where it enters. Each refusal is
+    # audited (EVT_REGISTRATION_REFUSED) once the chain below exists.
+    var refused = vec_new();
     var svc_map = map_new();
     var defaults = default_services(mode);
     for (var i = 0; i < vec_len(defaults); i = i + 1) {
         var sd = vec_get(defaults, i);
-        var ms = managed_svc_new(sd);
-        map_set(svc_map, str_data(svc_def_name(sd)), ms);
+        if (validate_service_name(svc_def_name(sd)) == 0) {
+            _init_refuse_name(refused, sd);
+        } else {
+            var ms = managed_svc_new(sd);
+            map_set(svc_map, str_data(svc_def_name(sd)), ms);
+        }
     }
 
     # Also register extra services from config
     var cfg_svcs = config_services(config);
     for (var i = 0; i < vec_len(cfg_svcs); i = i + 1) {
         var sd = vec_get(cfg_svcs, i);
-        var name = str_data(svc_def_name(sd));
-        if (map_has(svc_map, name) == 0) {
-            map_set(svc_map, name, managed_svc_new(sd));
+        if (validate_service_name(svc_def_name(sd)) == 0) {
+            _init_refuse_name(refused, sd);
+        } else {
+            var name = str_data(svc_def_name(sd));
+            if (map_has(svc_map, name) == 0) {
+                map_set(svc_map, name, managed_svc_new(sd));
+            }
         }
     }
 
@@ -77,6 +101,10 @@ fn argonaut_init_new(config) {
             store64(init + 40, argonaut_audit_log_new_streaming());
         }
         store64(init + 56, 0);
+    }
+    # 1.17.0: audit every registration refused above, now that the chain exists.
+    for (var ri = 0; ri < vec_len(refused); ri = ri + 1) {
+        _init_audit_s(init, vec_get(refused, ri), EVT_REGISTRATION_REFUSED);
     }
     store64(init + 48, 0 - 1);            # notify_fd (M1) — opt-in via init_notify_bind
 

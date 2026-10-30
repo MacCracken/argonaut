@@ -116,6 +116,20 @@ fn ag_sys_symlinkat(target, newdirfd, linkpath): i64 {
     #endif
 }
 
+# prlimit64(pid, resource, new_limit, old_limit) — fork_exec_service applies a
+# service's resource limits in the child (1.17.0); the tests read them back.
+# The stdlib wraps only getrlimit. Each limit is a 16-byte struct rlimit
+# {u64 cur; u64 max}, or 0 for none.
+# x86_64 302 (native) / aarch64 261 (native, ladder-safe).
+fn ag_sys_prlimit64(pid, resource, new_limit, old_limit): i64 {
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(302, pid, resource, new_limit, old_limit);
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(261, pid, resource, new_limit, old_limit);
+    #endif
+}
+
 # getsid(pid) — test-harness assertion that fork_exec_service called setsid.
 # x86_64 124 (native) / aarch64 156 (native, ladder-safe).
 fn ag_sys_getsid(pid): i64 {

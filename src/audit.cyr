@@ -29,6 +29,7 @@ enum ServiceEventType {
     EVT_ENABLED;
     EVT_DISABLED;
     EVT_RESTART_LIMIT;   # 1.16.2: a restart refused at max_restarts (argonaut gives up)
+    EVT_REGISTRATION_REFUSED;   # 1.17.0: a service name validate_service_name refuses
 }
 
 fn event_type_str(t) {
@@ -49,6 +50,7 @@ fn event_type_str(t) {
     if (t == EVT_ENABLED)        { return "Enabled"; }
     if (t == EVT_DISABLED)       { return "Disabled"; }
     if (t == EVT_RESTART_LIMIT)  { return "RestartLimitReached"; }
+    if (t == EVT_REGISTRATION_REFUSED) { return "RegistrationRefused"; }
     return "Unknown";
 }
 
@@ -75,11 +77,13 @@ fn audit_event_severity(event_type) {
     if (event_type == EVT_HEALTH_FAILED) { return SEV_WARNING; }
     if (event_type == EVT_READY_FAILED)  { return SEV_WARNING; }
 
-    # Error: TimeoutKilled, CrashDetected, Stopped(non-zero), RestartLimitReached
+    # Error: TimeoutKilled, CrashDetected, Stopped(non-zero), RestartLimitReached,
+    # RegistrationRefused
     if (event_type == EVT_TIMEOUT_KILLED) { return SEV_ERROR; }
     if (event_type == EVT_CRASH_DETECTED) { return SEV_ERROR; }
     if (event_type == EVT_STOPPED_FAIL)   { return SEV_ERROR; }
     if (event_type == EVT_RESTART_LIMIT)  { return SEV_ERROR; }
+    if (event_type == EVT_REGISTRATION_REFUSED) { return SEV_ERROR; }
 
     # Default: Warning for unknown/future variants
     return SEV_WARNING;

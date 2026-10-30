@@ -8,21 +8,79 @@
 # Environment file loading
 # =========================================================================
 
-# Load KEY=VALUE pairs from a file into a map.
-# Lines starting with # are comments. Empty lines ignored.
-# Values optionally quoted with " or '.
+# Open an env file (a NUL-terminated path) for reading. Returns the fd, or -1
+# when it cannot be opened or is not a regular file; its st_size goes to
+# `size_out`.
+#
+# ⚠ 1.17.0, THE B-1 CLASS: A PLAIN open(O_RDONLY) OF A FIFO BLOCKS UNTIL A
+# WRITER APPEARS. fork_exec_service's preflight runs this in PID 1 on every
+# start, and kybernet calls load_env_file in PID 1 at config load, so an env
+# file swapped for a FIFO (by anyone who can write its directory) parked PID 1
+# in open(2) for good. O_NONBLOCK makes that open return at once, and the
+# S_ISREG check refuses it, a device or a directory. O_NOCTTY keeps a tty
+# node from becoming init's controlling terminal; O_CLOEXEC. A symlink IS
+# followed, as systemd's EnvironmentFile= follows one: an env file is
+# configuration. STAT_MODE / STAT_SIZE are the stdlib's per-arch offsets.
+fn _env_file_open(cpath, size_out) {
+    var fd = sys_open(cpath, O_RDONLY | O_NONBLOCK | ARG_O_NOCTTY | O_CLOEXEC, 0);
+    if (fd < 0) { return -1; }
+    var st[STAT_BUFSZ];
+    if (syscall(SYS_FSTAT, fd, &st) < 0) {
+        sys_close(fd);
+        return -1;
+    }
+    if ((load32(&st + STAT_MODE) & 0xF000) != 0x8000) {   # S_IFREG
+        sys_close(fd);
+        return -1;
+    }
+    store64(size_out, load64(&st + STAT_SIZE));
+    return fd;
+}
+
+# Load KEY=VALUE pairs from a file into a map (cstr key -> Str value). A key
+# already in the map is overwritten. Lines starting with # are comments.
+# Empty lines ignored. Values optionally quoted with " or '.
+# Returns 0, -1 when the file cannot be read (or is not a regular file), -2
+# when it is over 8 KiB. kybernet calls this for its own `env_files` config
+# key; fork_exec_service calls it through _service_env_map (1.17.0).
 fn load_env_file(path, env_map) {
-    # L4: reject silently-truncated env files. file_read_all caps the
-    # read at the buffer size; >8 KB env files would silently lose
-    # the tail. Probe the file size first via lseek and fail loud.
-    var probe_fd = sys_open(str_data(path), 0, 0);
-    if (probe_fd < 0) { return 0 - 1; }
-    var sz = syscall(SYS_LSEEK, probe_fd, 0, 2);   # SEEK_END
-    sys_close(probe_fd);
-    if (sz > 8191) { return 0 - 2; }   # distinct error: file too large
+    # L4: reject silently-truncated env files: over 8 KiB would lose the tail.
+    # 1.17.0: the size comes from fstat on the one fd that is then read, so
+    # the file checked is the file read (it used to be reopened by path, so a
+    # swap in between went unseen).
+    var szb[8];
+    var fd = _env_file_open(str_data(path), &szb);
+    if (fd < 0) { return -1; }
+    var sz = load64(&szb);
+    if (sz > 8191) {   # distinct error: file too large
+        sys_close(fd);
+        return -2;
+    }
+    # 1.17.0: an empty file is an empty environment, not a read failure.
+    # kybernet skips empty files before calling, so this changes nothing there.
+    if (sz == 0) {
+        sys_close(fd);
+        return 0;
+    }
     var buf = alloc(8192);
-    var n = file_read_all(str_data(path), buf, 8192);
-    if (n <= 0) { return 0 - 1; }
+    var n = 0;
+    var reading = 1;
+    while (reading == 1) {
+        var got = sys_read(fd, buf + n, 8192 - n);
+        if (got < 0) {
+            sys_close(fd);
+            return -1;
+        }
+        if (got == 0) {
+            reading = 0;
+        } else {
+            n = n + got;
+            if (n >= 8192) { reading = 0; }
+        }
+    }
+    sys_close(fd);
+    if (n > 8191) { return -2; }   # it grew past the cap since the fstat
+    if (n == 0) { return 0; }
 
     var line_start = 0;
     for (var i = 0; i <= n; i = i + 1) {
@@ -47,11 +105,18 @@ fn load_env_file(path, env_map) {
                         store8(buf + eq_pos, 0);
                         var val_start = eq_pos + 1;
                         var val_len = i - val_start;
-                        # Strip optional quotes
+                        # Strip optional quotes: the same quote at both ends.
+                        # Nested, not `(a && b) || (c && d)`: CLAUDE.md bars
+                        # mixing && and || in one expression.
                         if (val_len >= 2) {
                             var first_q = load8(buf + val_start);
                             var last_q = load8(buf + val_start + val_len - 1);
-                            if ((first_q == 34 && last_q == 34) || (first_q == 39 && last_q == 39)) {
+                            var quoted = 0;
+                            if (first_q == last_q) {
+                                if (first_q == 34) { quoted = 1; }   # "
+                                if (first_q == 39) { quoted = 1; }   # '
+                            }
+                            if (quoted == 1) {
                                 val_start = val_start + 1;
                                 val_len = val_len - 2;
                             }
@@ -76,13 +141,113 @@ fn load_env_file(path, env_map) {
     return 0;
 }
 
-# Load and merge env vars from multiple file paths (vec of Str).
+# Load and merge env vars from multiple file paths (vec of Str), in order, a
+# later file overriding an earlier one. Returns the merged map, or 0 when any
+# file fails to load or names an invalid variable.
+#
+# ⚠ 1.17.0: FAILS CLOSED. It used to ignore every load error and hand back
+# whatever it had, so a missing file meant a service started without part of
+# its configured environment and nobody was told.
 fn load_env_files(paths) {
     var merged = map_new();
-    for (var i = 0; i < vec_len(paths); i = i + 1) {
-        load_env_file(vec_get(paths, i), merged);
-    }
+    if (_env_files_merge(paths, merged) != 0) { return 0; }
     return merged;
+}
+
+# 1 if `k` (a cstr) is a valid environment variable name: [A-Za-z_][A-Za-z0-9_]*.
+# A file line such as `export FOO=1` or ` FOO=1` gives the key "export FOO" or
+# " FOO", which no program can read back, so it is refused, not passed on.
+fn env_name_is_valid(k) {
+    if (k == 0) { return 0; }
+    var c = load8(k);
+    if (c == 0) { return 0; }
+    if (c >= 48) { if (c <= 57) { return 0; } }      # a leading digit
+    var i = 0;
+    var ok = 1;
+    while (ok == 1) {
+        c = load8(k + i);
+        if (c == 0) {
+            ok = 2;
+        } else {
+            var good = 0;
+            if (c >= 48) { if (c <= 57) { good = 1; } }    # 0-9
+            if (c >= 65) { if (c <= 90) { good = 1; } }    # A-Z
+            if (c >= 97) { if (c <= 122) { good = 1; } }   # a-z
+            if (c == 95) { good = 1; }                     # _
+            if (good == 0) { ok = 0; }
+            i = i + 1;
+        }
+    }
+    if (ok == 2) { return 1; }
+    return 0;
+}
+
+# Load each file in `paths` (vec of Str) into `into`, in order. Each file is
+# read into its own map first and its names checked, so a bad file leaves
+# `into` without any of its entries. Returns 0, or the first error: -1 / -2 as
+# load_env_file, -3 for an invalid variable name.
+fn _env_files_merge(paths, into) {
+    if (paths == 0) { return 0; }
+    for (var i = 0; i < vec_len(paths); i = i + 1) {
+        var p = vec_get(paths, i);
+        if (p == 0) { return -1; }
+        var one = map_new();
+        # A NUL-terminated copy: open() reads str_data to the first NUL.
+        var rc = load_env_file(str_from_buf(str_data(p), str_len(p)), one);
+        if (rc != 0) { return rc; }
+        var keys = map_keys(one);
+        for (var j = 0; j < vec_len(keys); j = j + 1) {
+            var k = vec_get(keys, j);
+            if (env_name_is_valid(k) == 0) { return -3; }
+            map_set(into, k, map_get(one, k));
+        }
+    }
+    return 0;
+}
+
+# Parent-side check, before fork, that every env file of a service can be
+# loaded: each path absolute, a regular file, at most 8 KiB. It allocates
+# nothing, since PID 1 runs it on every start and `alloc` never frees; the
+# child does the real read (and still fails closed if a file changed in
+# between). Returns 0, or -1 with a sakshi warning naming the problem.
+var _ENVF_PATH[512];   # GLOBAL scope: 512 slots = 4,096 bytes
+var _ENVF_SIZE = 0;
+
+fn _env_files_preflight(paths) {
+    if (paths == 0) { return 0; }
+    for (var i = 0; i < vec_len(paths); i = i + 1) {
+        var p = vec_get(paths, i);
+        if (p == 0) {
+            sakshi_warn("env file path missing - service REFUSED", 39);
+            return -1;
+        }
+        var plen = str_len(p);
+        if (plen < 2) {
+            sakshi_warn("env file path too short - service REFUSED", 41);
+            return -1;
+        }
+        if (plen > 4095) {
+            sakshi_warn("env file path too long - service REFUSED", 40);
+            return -1;
+        }
+        if (load8(str_data(p)) != 47) {
+            sakshi_warn("env file path not absolute - service REFUSED", 44);
+            return -1;
+        }
+        memcpy(&_ENVF_PATH, str_data(p), plen);
+        store8(&_ENVF_PATH + plen, 0);
+        var fd = _env_file_open(&_ENVF_PATH, &_ENVF_SIZE);
+        if (fd < 0) {
+            sakshi_warn("env file missing, unreadable or not a regular file - service REFUSED", 68);
+            return -1;
+        }
+        sys_close(fd);
+        if (_ENVF_SIZE > 8191) {
+            sakshi_warn("env file over 8 KiB - service REFUSED", 37);
+            return -1;
+        }
+    }
+    return 0;
 }
 
 # =========================================================================
@@ -302,17 +467,6 @@ fn run_safe_cmd_sequence(cmds) {
 # Process spawning for services
 # =========================================================================
 
-# Spawn a service process. Returns child PID or -1 on error.
-#
-# 1.16.1 audit B-9: a forwarder. This used to hand the service's environment
-# MAP to the stdlib's exec_env_str, which expects a vec — it faulted before
-# forking — and would have returned the child's exit code, not the pid
-# documented above. Nothing in argonaut or kybernet called it.
-#deprecated("use fork_exec_service")
-fn spawn_service(svc_def) {
-    return fork_exec_service(svc_def);
-}
-
 # reset_child_signal_mask: clear the inherited signal mask
 # (1.6.3 audit MEDIUM-1). The PID-1 supervisor loop in
 # `src/main.cyr` blocks SIGTERM/SIGINT/SIGCHLD so the signalfd
@@ -390,10 +544,17 @@ fn _env_keys_define(keys, entry) {
 # entries used to be appended after the defaults on the theory that the last
 # duplicate wins. It does not: glibc's and musl's getenv return the FIRST
 # match, so a service that set its own PATH still got argonaut's.
+#
+# 1.17.0: the service's env files are part of its own map (_service_env_map),
+# so a file entry also replaces a default of the same name. Returns 0 when an
+# env file cannot be loaded or names an invalid variable; fork_exec_service's
+# child then exits 126 rather than start without part of its environment.
 fn build_service_envp(svc_def) {
     var skeys = 0;
+    var senv = 0;
     if (svc_def != 0) {
-        var senv = svc_def_env(svc_def);
+        senv = _service_env_map(svc_def);
+        if (senv < 0) { return 0; }
         if (senv != 0) { skeys = map_keys(senv); }
     }
     var v = vec_new();
@@ -405,8 +566,32 @@ fn build_service_envp(svc_def) {
             if (_env_keys_define(skeys, xe) == 0) { vec_push(v, xe); }
         }
     }
-    if (svc_def != 0) { _append_service_env(v, svc_def); }
+    if (senv != 0) { _append_env_map(v, senv); }
     return v;
+}
+
+# The service's environment as one cstr-keyed map (Str values): its
+# `environment` entries, then each of its `env_files` in order, a later entry
+# overriding an earlier one. That is systemd's order (an EnvironmentFile=
+# overrides Environment=) and kybernet's for its own `env_files` key.
+# Returns the `environment` map itself when there are no env files, a new map
+# when there are, and -1 when a file cannot be loaded or names an invalid
+# variable. 1.17.0: `env_files` existed since the beginning and nothing read it.
+fn _service_env_map(svc_def) {
+    var env = svc_def_env(svc_def);
+    var files = svc_def_env_files(svc_def);
+    if (files == 0) { return env; }
+    if (vec_len(files) == 0) { return env; }
+    var merged = map_new();
+    if (env != 0) {
+        var ekeys = map_keys(env);
+        for (var i = 0; i < vec_len(ekeys); i = i + 1) {
+            var ek = vec_get(ekeys, i);
+            map_set(merged, ek, map_get(env, ek));
+        }
+    }
+    if (_env_files_merge(files, merged) != 0) { return -1; }
+    return merged;
 }
 
 # ⚠ THE SERVICE'S OWN `environment` MAP, FLATTENED TO "KEY=VALUE" cstrs. 1.15.0.
@@ -427,7 +612,12 @@ fn build_service_envp(svc_def) {
 # map defines, because getenv returns the FIRST match, not the last (1.16.1
 # audit B-10).
 fn _append_service_env(v, svc_def) {
-    var env = svc_def_env(svc_def);
+    return _append_env_map(v, svc_def_env(svc_def));
+}
+
+# Flatten a cstr-keyed map of Str values into "KEY=VALUE" cstrs on `v`.
+# build_service_envp passes _service_env_map's result (1.17.0).
+fn _append_env_map(v, env) {
     if (env == 0) { return 0; }
     var keys = map_keys(env);
     if (keys == 0) { return 0; }
@@ -488,9 +678,54 @@ fn argonaut_pre_exec_hook() { return _pre_exec_hook; }
 
 # Fork + exec a service, returning child PID.
 # Parent returns immediately; child execs the binary.
+# One limit as both soft and hard, for the calling process. 0, or -1.
+fn _set_rlimit(resource, value) {
+    var lim[16];
+    store64(&lim, value);        # rlim_cur
+    store64(&lim + 8, value);    # rlim_max
+    if (ag_sys_prlimit64(0, resource, &lim, 0) < 0) { return -1; }
+    return 0;
+}
+
+# Apply a ResourceLimits (or 0) to the calling process: fork_exec_service's
+# child (1.17.0). A field that is set becomes both the soft and the hard
+# limit, as `prlimit --nofile=N` does: nofile, address_space and nproc when
+# > 0, core when >= 0. Returns 0, or -1 at the first limit the kernel refuses
+# (EPERM to raise a hard limit without CAP_SYS_RESOURCE, or nofile above
+# fs.nr_open).
+#
+# ⚠ BEFORE 1.17.0 NOTHING APPLIED THESE. `svc_def_rlimits` had a field and a
+# getter, `to_prlimit_commands` and `resource_limits_secure` built values for
+# it, and no code path ever set a limit on a service.
+fn _apply_rlimits(rl) {
+    if (rl == 0) { return 0; }
+    var nofile = load64(rl);
+    var aspace = load64(rl + 8);
+    var nproc = load64(rl + 16);
+    var core = load64(rl + 24);
+    if (nofile > 0) {
+        if (_set_rlimit(AG_RLIMIT_NOFILE, nofile) != 0) { return -1; }
+    }
+    if (aspace > 0) {
+        if (_set_rlimit(AG_RLIMIT_AS, aspace) != 0) { return -1; }
+    }
+    if (nproc > 0) {
+        if (_set_rlimit(AG_RLIMIT_NPROC, nproc) != 0) { return -1; }
+    }
+    if (core >= 0) {
+        if (_set_rlimit(AG_RLIMIT_CORE, core) != 0) { return -1; }
+    }
+    return 0;
+}
+
 fn fork_exec_service(svc_def) {
     var sn = svc_def_name(svc_def);
     sakshi_debug(str_data(sn), str_len(sn));
+
+    # Env files (1.17.0): refuse the start here, where the caller sees -1 and
+    # audits the failure, when a file is plainly missing or too large. The
+    # child reads them for real.
+    if (_env_files_preflight(svc_def_env_files(svc_def)) != 0) { return -1; }
 
     var pid = sys_fork();
     if (pid < 0) { return 0 - 1; }
@@ -554,6 +789,11 @@ fn fork_exec_service(svc_def) {
         # map is merged in, overriding any default it defines
         # (1.15.0; 1.16.1 audit B-10).
         var env_vec = build_service_envp(svc_def);
+        # 1.17.0: an env file that cannot be loaded (changed since the
+        # preflight, or names an invalid variable) fails the start CLOSED,
+        # with the hook's 126: a service started without part of its
+        # configured environment is one nobody configured.
+        if (env_vec == 0) { sys_exit(126); }
         var envc = vec_len(env_vec);
         var envp_buf = alloc((envc + 1) * 8);
         var enpi = 0;
@@ -568,6 +808,13 @@ fn fork_exec_service(svc_def) {
         # before exec so the service can install its own handlers
         # and receive shutdown signals.
         reset_child_signal_mask();
+
+        # Resource limits (1.17.0). After argv / envp are built, so an
+        # address-space limit cannot starve those allocations; before the
+        # hook, which may drop CAP_SYS_RESOURCE (needed to raise a hard
+        # limit). Fails CLOSED with the hook's 126: a limit the kernel
+        # refuses is a service started outside the bounds it was given.
+        if (_apply_rlimits(svc_def_rlimits(svc_def)) != 0) { sys_exit(126); }
 
         # Pre-exec hook (1.9.0) — LAST thing before execve, so anything it
         # installs (seccomp, Landlock, dropped capabilities) is in force for

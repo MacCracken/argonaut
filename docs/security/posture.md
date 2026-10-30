@@ -51,6 +51,10 @@ the CHANGELOG.
 |---------|--------|
 | Signalling the right process | argonaut never signals a pid that is not its child, or any pid ≤ 1. Timed children run in their own process group, and a timeout kills the group. The window between reading a pid and signalling it is still open; pidfd identity is roadmap 1.18.0 |
 | PID files | Read strictly: no symlinks, FIFOs or loose parsing; numeric only (`read_pid_file_safe`) |
+| Service standard fds | Every service starts with fds 0, 1 and 2 open on `/dev/null`, even when PID 1 started without them (1.16.3) |
+| Resource limits | Applied in the child before the pre-exec hook, as soft and hard limit; a refused limit fails the start closed with 126 (1.17.0, ADR-014) |
+| Env files | Regular files only, opened non-blocking (a FIFO cannot hang PID 1), at most 8 KiB, valid variable names only; a bad file refuses the start or fails it closed (1.17.0) |
+| Service names | Registration refuses a name outside `[A-Za-z0-9._-]`, empty, `.`, or holding `..`, and audits the refusal (`EVT_REGISTRATION_REFUSED`, 1.17.0) |
 | Start and stop bounds | Oneshot and forking starts have a 90 s default timeout. Stops escalate from SIGTERM to a process-group SIGKILL |
 | Restarts | Exponential backoff with a 100 ms floor, inside a restart window. `max_restarts` gives up, and the give-up is audited (`EVT_RESTART_LIMIT`) |
 | Watchdog | An authenticated `WATCHDOG=1` refreshes the deadline from `watchdog_ms`; a service that misses it is killed and audited |
@@ -66,7 +70,7 @@ the CHANGELOG.
 | Malformed input | Truncated datagrams (`MSG_TRUNC` / `MSG_CTRUNC`) are dropped. `MAINPID` is strictly parsed |
 | Passed descriptors | Any `SCM_RIGHTS` descriptor is closed before the verdict (1.16.2) |
 | Flooding | At most 32 datagrams per supervisor tick |
-| Deprecated paths | `notify_try_recv` / `notify_drain` skip authentication. They are deprecated, with removal at 1.17.0 |
+| Unauthenticated receive | Removed at 1.17.0: `notify_try_recv` / `notify_drain` skipped sender authentication. `notify_try_recv_authenticated` is the only receive |
 
 ### 5. Emergency shell
 
@@ -101,7 +105,7 @@ the CHANGELOG.
 | CWE-93 / CWE-74 | Injection into systemd units | Per-setting escaping; validated keys and dependency names |
 | CWE-22 | Path Traversal | `validate_device_path`, `validate_tmpfile_entries`, absolute-binary check in `generate_unit` |
 | CWE-59 | Link Following | `tmpfiles_apply` (`O_NOFOLLOW` walk, `*at` creation); strict PID-file reader |
-| CWE-20 | Improper Input Validation | Hash, device-path and mapper-name validation; strict PID-file and `MAINPID` parsing; port and URL checks; credential-record bounds |
+| CWE-20 | Improper Input Validation | Hash, device-path and mapper-name validation; service names checked at registration (1.17.0); env-file variable names checked; strict PID-file and `MAINPID` parsing; port and URL checks; credential-record bounds |
 | CWE-190 | Integer Overflow | Saturating backoff; Argon2 `m` bounded during digit accumulation |
 | CWE-400 | Uncontrolled Resource Consumption | Restart window and limits, backoff floor, health deadlines, watchdog kills, notify drain cap, streaming audit chain |
 | CWE-362 | TOCTOU | `*at` / `O_NOFOLLOW` tmpfiles. The pid-recycling window is open (pidfd is roadmap 1.18.0) |

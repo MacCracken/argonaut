@@ -83,8 +83,8 @@ fn notify_parse(data, len) {
                     # 2026-08-24 audit MEDIUM-1: str_new BORROWS `data`, which
                     # is the shared module-level receive buffer — every later
                     # datagram overwrote the Strs handed back for earlier ones
-                    # (notify_drain returned N messages all aliasing the last
-                    # one). Each message gets its own bytes: `str_from_buf`
+                    # (a drain got N messages all aliasing the last one).
+                    # Each message gets its own bytes: `str_from_buf`
                     # copies (and NUL-terminates) without the throwaway header
                     # `str_clone(str_new(...))` allocated first.
                     var kp = data + line_start;
@@ -213,7 +213,7 @@ var _notify_last = 0;
 var _notify_sender_pid = 0;
 var _notify_sender_uid = 0;
 
-# 1.16.2: the one recvmsg both receive paths share. Reads one datagram into
+# 1.16.2: the one recvmsg behind the receive path. Reads one datagram into
 # _notify_recv_buf without blocking (MSG_DONTWAIT). `ctrl` / `ctrllen` is the
 # ancillary buffer, or 0 / 0 for none. Returns recvmsg's result and leaves the
 # received msg_flags in _notify_rflags and msg_controllen in _notify_rctrllen.
@@ -351,58 +351,10 @@ fn notify_recv_outcome()   { return _notify_last; }
 fn notify_recv_sender_pid() { return _notify_sender_pid; }
 fn notify_recv_sender_uid() { return _notify_sender_uid; }
 
-# The unauthenticated receive behind notify_try_recv / notify_drain.
-# Returns a NotifyMessage ptr, or 0. _notify_unauth_consumed is 1 when a
-# datagram was taken off the queue (parsed or dropped), 0 when none was queued.
-#
-# 1.16.2 (a LOW the 1.16.1 audit left open; A-9's unauthenticated half):
-# recvmsg, not sys_read. read(2) cannot see MSG_TRUNC, so a datagram longer
-# than the buffer was parsed from its head — a cut inside `MAINPID=12345`
-# delivered `MAINPID=12`. A truncated datagram is now dropped. No control
-# buffer is passed: credentials are not checked on this path, and a
-# descriptor sent with SCM_RIGHTS must not be installed in PID 1 (with no
-# room for it the kernel discards it and sets MSG_CTRUNC, ignored here).
-var _notify_unauth_consumed = 0;
-
-fn _notify_recv_unauth(fd) {
-    _notify_unauth_consumed = 0;
-    var n = _notify_recvmsg(fd, 0, 0);
-    if (n < 0) { return 0; }
-    _notify_unauth_consumed = 1;
-    if (n == 0) { return 0; }
-    if ((_notify_rflags & 0x20) != 0) { return 0; }   # MSG_TRUNC
-    return notify_parse(_notify_recv_buf, n);
-}
-
-# Try to receive a notification without blocking.
-# Returns a NotifyMessage ptr, or 0 if no message available — or if the one
-# taken was empty or truncated (dropped, never half-parsed).
-# Deprecated at 1.16.2: no sender check, so any local process that can reach
-# the socket can claim READY=1 / WATCHDOG=1 / MAINPID= for a service.
-#deprecated("use notify_try_recv_authenticated: this skips sender authentication; removal planned for 1.17.0")
-fn notify_try_recv(fd) {
-    return _notify_recv_unauth(fd);
-}
-
-# Drain pending notifications, up to limit.
-# Returns vec of NotifyMessage ptrs. A dropped (empty or truncated) datagram
-# counts toward `limit` but does not end the drain; only an empty queue does.
-#deprecated("use notify_try_recv_authenticated in a loop: this skips sender authentication; removal planned for 1.17.0")
-fn notify_drain(fd, limit) {
-    var messages = vec_new();
-    var draining = 1;
-    var i = 0;
-    while (draining == 1 && i < limit) {
-        var msg = _notify_recv_unauth(fd);
-        if (msg != 0) {
-            vec_push(messages, msg);
-        } elif (_notify_unauth_consumed == 0) {
-            draining = 0;
-        }
-        i = i + 1;
-    }
-    return messages;
-}
+# 1.17.0: the unauthenticated receivers notify_try_recv and notify_drain
+# are removed (deprecated at 1.16.2). With no sender check, any local process
+# that could reach the socket could claim READY=1 / WATCHDOG=1 / MAINPID= for
+# a service. Receive with notify_try_recv_authenticated, in a loop to drain.
 
 # Send an sd_notify message to a socket path (client side).
 fn send_notify(socket_path, message) {

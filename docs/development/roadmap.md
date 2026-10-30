@@ -14,8 +14,7 @@ that gate opens.
 
 | Release | Theme | Can start |
 |---|---|---|
-| [1.17.0](#1170--the-announced-removals) | Remove the deprecated APIs; remove or wire the inert helpers | Now |
-| [1.17.1](#1171--negative-literals-mechanical) | `0 - N` → `-N`, no functional change | Any time after 1.17.0 |
+| [1.17.1](#1171--negative-literals-mechanical) | `0 - N` → `-N`, no functional change | Now |
 | [1.17.2](#1172--ci-native-aarch64-and-the-state-file) | Native aarch64 CI; `state.md` automation; CI bench fix; doc-tree conformance | Once a runner is chosen |
 | [1.18.0](#1180--process-identity-and-the-exec-paths) | pidfd process identity; health-check commands under the pre-exec hook | Now |
 
@@ -29,37 +28,10 @@ newer cyrius is wanted; [its checklist](#every-cyrius-pin-move) is below.
 
 ---
 
-## 1.17.0 — the announced removals
-
-The deprecation messages name 1.17.0. Before tagging, run the 1.16.x closeout pass
-(CLAUDE.md).
-
-**Removals (breaking):**
-- [ ] **`notify_try_recv` / `notify_drain`.** They skip sender authentication.
-      `notify_try_recv_authenticated` replaces both.
-- [ ] **`spawn_service`.** It is a forwarder to `fork_exec_service`.
-- [ ] **Check kybernet's tree for callers first.** At kybernet 1.7.9 there are none.
-
-**Inert helpers: remove each, or wire it (breaking either way).** Each of these suggests
-a feature argonaut does not have, and the 2026-10-14 doc sweep found no caller in `src/`
-for any of them:
-- [ ] `to_prlimit_commands` / `resource_limits_secure` and the `svc_def_rlimits` field.
-      Nothing applies resource limits (ADR-010).
-- [ ] `LogConfig` / `svc_def_log_config`. Nothing rotates logs; service output goes to
-      `/dev/null`.
-- [ ] `load_env_file` / `load_env_files` and `svc_def_env_files`. The spawn path never
-      loads env files; kybernet does.
-- [ ] The `socket_activation` field and `socket_env_listen_fds`. Nothing creates or
-      passes sockets.
-- [ ] `capability_setpriv_cmd`, `validate_service_name` and `is_localhost_target`.
-- [ ] **Check kybernet for each one before removing it.**
-
----
-
 ## 1.17.1 — negative literals (mechanical)
 
-- [ ] Rewrite the `0 - N` literal sites in `src/` (104 today) as `-N`. This form works since
-      cyrius 3.10.3.
+- [ ] Rewrite the `0 - N` literal sites in `src/` (101 today) as `-N`. This form works since
+      cyrius 3.10.3. Code added since 1.17.0 already uses `-N`.
 - [ ] Ship this patch alone so it cannot hide a functional change. The proof is a
       byte-identical DCE binary, or a diff whose every byte is explained.
 
@@ -111,10 +83,12 @@ recycled in that gap.
 consumer's pre-exec hook (1.9.0), which is where kybernet confines a service. A
 `HC_COMMAND` check runs through `check_command` → `run_safe_cmd_timeout` instead. That
 path has no service definition and no hook, so a confined service's health-check
-command runs unconfined, with PID 1's root privileges.
+command runs unconfined, with PID 1's root privileges. Since 1.17.0 it also runs without
+the service's resource limits and env files, which `fork_exec_service` applies.
 
 - [ ] **Run the check under the service's hook** (pass the definition through), or make
-      the unconfined run an explicit, documented choice.
+      the unconfined run an explicit, documented choice. Decide the limits and env files
+      in the same change.
 - [ ] **Tests:** with a denying hook, a service's command check runs confined or is
       refused. It must not run unconfined.
 
@@ -147,8 +121,8 @@ release is next.
 - [ ] **Re-check `src/syscall_compat.cyr`.** Where the stdlib now wraps `getsockopt`,
       `getsid`, `setpgid`, `symlinkat` or `clock_gettime`, move to the wrapper. Check each
       move with a before/after `qemu -strace` trace. As of 6.7.18 it wraps none of them.
-- [ ] State the consumer floor: the oldest toolchain argonaut's own calls need (≥ 6.6.8
-      today).
+- [ ] State the consumer floor: the oldest toolchain argonaut's own calls need (≥ 6.7.9
+      today, for `sys_ppoll`). Measure it: build the tree on that toolchain.
 - [ ] **Attribute any binary-size change** by building the old pins under the new toolchain.
 - [ ] Run the full gates, plus the bench gate against the previous release's label
       (`1.16.3-cyrius-6.7.18` today).
@@ -166,6 +140,9 @@ release is next.
 | **Abstract-namespace notify socket** | A consumer that needs it | `notify_bind` on an abstract address |
 | **dm-verity FEC** (`--fec-device`) | Edge storage that needs error correction | An optional FEC device in `verify_rootfs_integrity` |
 | **sd_notify `MAINPID=` / `STATUS=` / `RELOADING=1` / `STOPPING=1`** | A service that relies on them | These are parsed today, but only `READY=1` and `WATCHDOG=1` change state |
+| **Service log capture and rotation** (`LogConfig`, `log_config_default`, `svc_def_log_config`) | A design: where service output goes instead of `/dev/null` (a journal fd, files under a log dir), and who rotates. Kept, not removed, by the 1.17.0 decision | `fork_exec_service` wires stdout / stderr to the chosen sink, and `LogConfig` drives rotation |
+| **Socket activation** (the `socket_activation` field, `socket_env_listen_fds`) | A design for the listening-socket protocol (it is not a scalar config key) and a service that needs it. Kept by the 1.17.0 decision | argonaut creates and passes the sockets, and sets `LISTEN_FDS` / `LISTEN_PID` |
+| **`capability_setpriv_cmd`, `is_localhost_target`** | A call site. ADR-013 puts capability drops in the consumer's hook, and the health checks deliberately accept any IPv4 literal or `/etc/hosts` name. Kept by the 1.17.0 decision | Each is wired where a caller needs it |
 | **Shed bayan's Unicode tables** (~307 KB of the binary since 1.16.3) | Upstream: `sigil-mldsa` stops including the whole of bayan, or cyrius DCE drops unread global initializers | A pin move that takes the fix. Measure it with the binary-size attribution step above |
 
 ---
@@ -175,7 +152,12 @@ release is next.
 [kybernet](https://github.com/MacCracken/kybernet) consumes argonaut's `src/` as a
 library. These items are kybernet's to do; each touches argonaut's surface.
 
-- [ ] **Take 1.16.x.** It needs cyrius ≥ 6.6.8.
+- [ ] **Take 1.16.x and 1.17.0.** They need cyrius ≥ 6.7.9 (`sys_ppoll`, since 1.16.1;
+      1.16.1–1.16.3 said 6.6.8 in error). On 6.7.18 a scratch kybernet passes 888 / 890
+      against 1.17.0, the two being the `test_emergency_auth` assertions below.
+      - **CHANGELOG [1.17.0] Breaking:** the removed notify receivers and `spawn_service`
+        (kybernet calls none of them), names refused at registration (`a..b` is, though
+        kybernet accepts it), and the 126 exit's two new causes.
       - **CHANGELOG [1.16.1] Breaking (behaviour):** the start refusal, the 90 s start
         timeout, the restart window, the reused `init_poll_health` result, the bounded
         HTTP check and the strict PID-file reader.

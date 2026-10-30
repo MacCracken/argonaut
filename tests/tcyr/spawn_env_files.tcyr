@@ -1,0 +1,238 @@
+# spawn_env_files.tcyr — a service's `env_files` reach its environment (1.17.0).
+#
+# `ServiceDefinition.env_files` existed since the beginning and nothing read it.
+# Now fork_exec_service loads every file into the service's own environment:
+#   - the `environment` map first, then each file in order, a later entry
+#     overriding an earlier one (systemd's Environment= / EnvironmentFile=
+#     order, and kybernet's for its own `env_files` key);
+#   - a file entry also replaces a default of the same name (PATH), because
+#     getenv returns the first match (1.16.1 audit B-10);
+#   - a missing, too large or non-absolute file refuses the start in the
+#     parent (-1), and a file the child cannot load or that names an invalid
+#     variable fails the child closed (126).
+# Also: load_env_file reads an empty file as an empty environment, and
+# load_env_files no longer ignores a file that fails.
+#
+# Unprivileged. Fixtures live under /tmp/argonaut-envf-<pid>-*, removed at the end.
+include "tests/test_header.cyr"
+
+fn ef_path(suffix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/argonaut-envf-");
+    str_builder_add_int(sb, sys_getpid());
+    str_builder_add_cstr(sb, "-");
+    str_builder_add_cstr(sb, suffix);
+    return str_builder_build(sb);
+}
+
+fn ef_write(path, text) {
+    return file_write_all(str_data(path), text, strlen(text));
+}
+
+# 1 if the envp vec holds the cstr `entry` exactly.
+fn ef_has(v, entry) {
+    var hit = 0;
+    for (var i = 0; i < vec_len(v); i = i + 1) {
+        if (streq(vec_get(v, i), entry) == 1) { hit = 1; }
+    }
+    return hit;
+}
+
+# How many envp entries define `prefix` ("NAME=").
+fn ef_count(v, prefix) {
+    var n = 0;
+    var plen = strlen(prefix);
+    for (var i = 0; i < vec_len(v); i = i + 1) {
+        var e = vec_get(v, i);
+        if (strlen(e) >= plen) {
+            if (memeq(e, prefix, plen) == 1) { n = n + 1; }
+        }
+    }
+    return n;
+}
+
+fn ef_paths2(a, b) {
+    var v = vec_new();
+    vec_push(v, a);
+    if (b != 0) { vec_push(v, b); }
+    return v;
+}
+
+# Run `which` (0 = preflight on a vec, 1 = load_env_file on a Str,
+# 2 = fork_exec_service on a ServiceDefinition) on `arg` in a child, and
+# return its result + 10, or 99 when it is still blocked after 3 s (killed).
+# A FIFO used to park the caller in open(2) for good.
+fn ef_bounded(which, arg) {
+    var c = sys_fork();
+    if (c == 0) {
+        var rc = 0;
+        if (which == 0) { rc = _env_files_preflight(arg); }
+        if (which == 1) { rc = load_env_file(arg, map_new()); }
+        if (which == 2) { rc = fork_exec_service(arg); }
+        sys_exit(rc + 10);
+    }
+    var deadline = monotonic_ms() + 3000;
+    var wb[8];
+    while (monotonic_ms() < deadline) {
+        store64(&wb, 0);
+        if (sys_waitpid(c, &wb, WNOHANG) == c) { return WEXITSTATUS(load64(&wb)); }
+        sleep_ms(20);
+    }
+    sys_kill(c, SIGKILL);
+    sys_waitpid(c, &wb, 0);
+    return 99;
+}
+
+fn ef_spawn_status(sd) {
+    var pid = fork_exec_service(sd);
+    if (pid <= 0) { return -1; }
+    var wb[8];
+    store64(&wb, 0);
+    if (sys_waitpid(pid, &wb, 0) != pid) { return 252; }
+    var st = load64(&wb);
+    if (WIFEXITED(st)) { return WEXITSTATUS(st); }
+    return 250;
+}
+
+fn main() {
+    alloc_init();
+    test_group("spawn-env-files");
+
+    var f1 = ef_path("one.env");
+    var f2 = ef_path("two.env");
+    var f0 = ef_path("empty.env");
+    var fb = ef_path("bad.env");
+    var fbig = ef_path("big.env");
+    var fmiss = ef_path("missing.env");
+    ef_write(f1, "# comment\nA=file1\nC=\"from f1\"\n\nQ='single'\nM=\"mixed'\n");
+    ef_write(f2, "C=f2\nPATH=/opt/svc/bin\n");
+    ef_write(f0, "");
+    ef_write(fb, "export X=1\n");
+    var big = alloc(8192);
+    memset(big, 65, 8192);
+    file_write_all(str_data(fbig), big, 8192);
+    sys_unlink(str_data(fmiss));
+
+    # --- env_name_is_valid ---
+    assert_eq(env_name_is_valid("A"), 1, "name: A");
+    assert_eq(env_name_is_valid("_x9"), 1, "name: _x9");
+    assert_eq(env_name_is_valid("9a"), 0, "name: leading digit refused");
+    assert_eq(env_name_is_valid("export X"), 0, "name: 'export X' refused");
+    assert_eq(env_name_is_valid(" FOO"), 0, "name: leading space refused");
+    assert_eq(env_name_is_valid("A-B"), 0, "name: '-' refused");
+    assert_eq(env_name_is_valid(""), 0, "name: empty refused");
+
+    # --- load_env_file: an empty file is an empty environment ---
+    var m0 = map_new();
+    assert_eq(load_env_file(f0, m0), 0, "empty file loads");
+    assert_eq(vec_len(map_keys(m0)), 0, "empty file: no entries");
+
+    # --- load_env_file: comments, quotes ---
+    var m1 = map_new();
+    assert_eq(load_env_file(f1, m1), 0, "f1 loads");
+    assert(str_eq_cstr(map_get(m1, "A"), "file1") == 1, "f1: A=file1");
+    assert(str_eq_cstr(map_get(m1, "C"), "from f1") == 1, "f1: double quotes stripped");
+    assert(str_eq_cstr(map_get(m1, "Q"), "single") == 1, "f1: single quotes stripped");
+    assert(str_eq_cstr(map_get(m1, "M"), "\"mixed'") == 1, "f1: mismatched quotes kept");
+    assert_eq(load_env_file(fmiss, map_new()), -1, "missing file: -1");
+    assert_eq(load_env_file(fbig, map_new()), -2, "8 KiB file: -2");
+
+    # --- load_env_files: order, and it fails closed ---
+    var mm = load_env_files(ef_paths2(f1, f2));
+    assert(mm != 0, "two files load");
+    if (mm != 0) {
+        assert(str_eq_cstr(map_get(mm, "C"), "f2") == 1, "the later file wins");
+        assert(str_eq_cstr(map_get(mm, "A"), "file1") == 1, "the earlier file's other keys stay");
+    }
+    assert_eq(load_env_files(ef_paths2(f1, fmiss)), 0, "a missing file fails the set");
+    assert_eq(load_env_files(ef_paths2(fb, 0)), 0, "an invalid name fails the set");
+
+    # --- build_service_envp: environment, then files, over the defaults ---
+    var sd = svc_def_new(str_from("envf"), str_from("t"), str_from("/bin/true"));
+    map_set(svc_def_env(sd), "A", str_from("env"));
+    map_set(svc_def_env(sd), "B", str_from("env"));
+    var nofiles = build_service_envp(sd);
+    assert_eq(ef_count(nofiles, "PATH="), 1, "no env files: one PATH");
+    assert(ef_has(nofiles, "A=env") == 1, "no env files: A from environment");
+
+    var two = ef_paths2(f1, f2);
+    assert_eq(svc_def_set_env_files(sd, two), sd, "env_files setter returns sd");
+    assert_eq(svc_def_env_files(sd), two, "env_files set");
+    assert_eq(vec_len(svc_def_env_files(sd)), 2, "env_files set: 2 paths");
+    var ev = build_service_envp(sd);
+    assert(ev != 0, "envp with env files");
+    if (ev != 0) {
+        assert(ef_has(ev, "A=file1") == 1, "a file overrides environment");
+        assert(ef_has(ev, "B=env") == 1, "environment keys a file does not set stay");
+        assert(ef_has(ev, "C=f2") == 1, "the later file wins in envp");
+        assert(ef_has(ev, "PATH=/opt/svc/bin") == 1, "a file's PATH is used");
+        assert_eq(ef_count(ev, "PATH="), 1, "... and the default PATH is left out");
+    }
+    # The service's own map is not modified by the merge.
+    assert(str_eq_cstr(map_get(svc_def_env(sd), "A"), "env") == 1, "environment map untouched");
+
+    var sdb = svc_def_new(str_from("envf-bad"), str_from("t"), str_from("/bin/true"));
+    svc_def_set_env_files(sdb, ef_paths2(fb, 0));
+    assert_eq(build_service_envp(sdb), 0, "an invalid name: envp refused");
+
+    # --- the parent-side preflight ---
+    assert_eq(_env_files_preflight(0), 0, "preflight: no files");
+    assert_eq(_env_files_preflight(vec_new()), 0, "preflight: empty vec");
+    assert_eq(_env_files_preflight(ef_paths2(f1, f2)), 0, "preflight: good files");
+    assert_eq(_env_files_preflight(ef_paths2(str_from("relative.env"), 0)), -1, "preflight: relative path refused");
+    assert_eq(_env_files_preflight(ef_paths2(fmiss, 0)), -1, "preflight: missing file refused");
+    assert_eq(_env_files_preflight(ef_paths2(fbig, 0)), -1, "preflight: 8 KiB file refused");
+
+    # --- a FIFO or a directory is refused at once, never blocked on (B-1 class) ---
+    var ffifo = ef_path("fifo.env");
+    sys_unlink(str_data(ffifo));
+    assert_eq(sys_mknodat(-100, str_data(ffifo), 0x1180, 0), 0, "fifo fixture made");   # S_IFIFO | 0600
+    assert_eq(ef_bounded(0, ef_paths2(ffifo, 0)), 9, "preflight: a FIFO is refused, not blocked on");
+    assert_eq(ef_bounded(1, ffifo), 9, "load_env_file: a FIFO is refused, not blocked on");
+    assert_eq(_env_files_preflight(ef_paths2(str_from("/tmp"), 0)), -1, "preflight: a directory is refused");
+    assert_eq(load_env_file(str_from("/tmp"), map_new()), -1, "load_env_file: a directory is refused");
+    var sdf = svc_def_new(str_from("envf-fifo"), str_from("t"), str_from("/bin/true"));
+    svc_def_set_env_files(sdf, ef_paths2(ffifo, 0));
+    assert_eq(ef_bounded(2, sdf), 9, "spawn: a FIFO env file refuses the start");
+    var withnull = vec_new();
+    vec_push(withnull, 0);
+    assert_eq(_env_files_preflight(withnull), -1, "preflight: a null path is refused");
+    assert_eq(load_env_files(withnull), 0, "load_env_files: a null path fails the set");
+
+    # --- fork_exec_service end to end ---
+    # A missing file: refused in the parent, no child at all.
+    var sdm = svc_def_new(str_from("envf-miss"), str_from("t"), str_from("/bin/true"));
+    svc_def_set_env_files(sdm, ef_paths2(fmiss, 0));
+    assert_eq(fork_exec_service(sdm), -1, "spawn: a missing env file refuses the start");
+
+    # An invalid name passes the preflight (it parses nothing) and fails the
+    # child closed.
+    assert_eq(ef_spawn_status(sdb), 126, "spawn: an invalid name fails the child with 126");
+
+    # The values reach the exec'd program.
+    var sds = svc_def_new(str_from("envf-sh"), str_from("t"), str_from("/bin/sh"));
+    vec_push(svc_def_args(sds), str_from("-c"));
+    var script = str_builder_new();
+    str_builder_add_cstr(script, "test \"$A\" = file1 && test \"$B\" = env && test \"$C\" = f2");
+    str_builder_add_cstr(script, " && test \"$Q\" = single && test \"$PATH\" = /opt/svc/bin");
+    vec_push(svc_def_args(sds), str_builder_build(script));
+    map_set(svc_def_env(sds), "A", str_from("env"));
+    map_set(svc_def_env(sds), "B", str_from("env"));
+    svc_def_set_env_files(sds, ef_paths2(f1, f2));
+    assert_eq(ef_spawn_status(sds), 0, "spawn: the service sees the merged environment");
+
+    # An empty env file starts the service normally.
+    var sde = svc_def_new(str_from("envf-empty"), str_from("t"), str_from("/bin/true"));
+    svc_def_set_env_files(sde, ef_paths2(f0, 0));
+    assert_eq(ef_spawn_status(sde), 0, "spawn: an empty env file is fine");
+
+    sys_unlink(str_data(f1));
+    sys_unlink(str_data(f2));
+    sys_unlink(str_data(f0));
+    sys_unlink(str_data(fb));
+    sys_unlink(str_data(fbig));
+    sys_unlink(str_data(ffifo));
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

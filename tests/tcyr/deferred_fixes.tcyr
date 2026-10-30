@@ -2,8 +2,9 @@
 #
 # 1. notify_try_recv / notify_drain (the unauthenticated receive) read with
 #    sys_read, which cannot see MSG_TRUNC: a datagram longer than the 1,024-byte
-#    buffer was parsed from its head. They now receive with recvmsg and drop it.
-#    Both are #deprecated, so this suite's calls of them print warnings.
+#    buffer was parsed from its head. They moved to recvmsg and dropped it at
+#    1.16.2, and were removed at 1.17.0. The same properties are now asserted
+#    on notify_try_recv_authenticated, the receive that remains.
 # 2. generate_unit emitted WatchdogSec= for every type, from the health check
 #    (a probe argonaut runs, not a ping the service sends), and wrote any binary
 #    after ExecStart=, where systemd reads a leading - @ : + ! as an Exec prefix
@@ -161,6 +162,80 @@ fn df_dgram_pair(rfd_out, sfd_out, passcred) {
     return 0;
 }
 
+# Send "READY=1\n" carrying one SCM_RIGHTS descriptor (`pass_fd`) on `sfd`.
+fn df_send_rights(sfd, pass_fd) {
+    var iov[16];
+    store64(&iov, "READY=1\n");
+    store64(&iov + 8, 8);
+    var cm[24];
+    memset(&cm, 0, 24);
+    store64(&cm, 20);              # CMSG_LEN(sizeof(int))
+    store32(&cm + 8, 1);           # SOL_SOCKET
+    store32(&cm + 12, 1);          # SCM_RIGHTS
+    store32(&cm + 16, pass_fd);
+    var mh[56];
+    memset(&mh, 0, 56);
+    store64(&mh + 16, &iov);
+    store64(&mh + 24, 1);
+    store64(&mh + 32, &cm);
+    store64(&mh + 40, 24);         # CMSG_SPACE(sizeof(int))
+    return sys_sendmsg(sfd, &mh, 0);
+}
+
+# 1 if this platform reports MSG_CTRUNC when SCM_RIGHTS meets SO_PASSCRED in a
+# 32-byte control buffer (the buffer notify_try_recv_authenticated passes).
+# A real kernel does: the credentials fill the buffer and the fd is
+# discarded. qemu-user does not: it receives into a larger host buffer and
+# hands the guest the credentials alone, with no MSG_CTRUNC.
+fn df_ctrunc_reported() {
+    var rs = alloc(8);
+    var ss = alloc(8);
+    if (df_dgram_pair(rs, ss, 1) != 0) { return -1; }
+    var r = load64(rs);
+    var s = load64(ss);
+    df_send_rights(s, s);
+    var buf[64];
+    var iov[16];
+    store64(&iov, &buf);
+    store64(&iov + 8, 64);
+    var ctrl[32];
+    memset(&ctrl, 0, 32);
+    var mh[56];
+    memset(&mh, 0, 56);
+    store64(&mh + 16, &iov);
+    store64(&mh + 24, 1);
+    store64(&mh + 32, &ctrl);
+    store64(&mh + 40, 32);
+    sys_recvmsg(r, &mh, 64);       # MSG_DONTWAIT
+    var flags = load32(&mh + 48);
+    sys_close(r);
+    sys_close(s);
+    if ((flags & 8) != 0) { return 1; }   # MSG_CTRUNC
+    return 0;
+}
+
+# Drain through the authenticated receive as init_poll_health does: stop only
+# on an empty queue (or after `limit` datagrams), stepping past a dropped one.
+fn df_drain(fd, pids, limit) {
+    var out = vec_new();
+    var draining = 1;
+    var i = 0;
+    while (draining == 1) {
+        if (i >= limit) {
+            draining = 0;
+        } else {
+            var m = notify_try_recv_authenticated(fd, pids);
+            if (m != 0) {
+                vec_push(out, m);
+            } elif (notify_recv_outcome() == NOTIFY_RECV_EMPTY) {
+                draining = 0;
+            }
+            i = i + 1;
+        }
+    }
+    return out;
+}
+
 fn df_svc(binary, stype) {
     var sd = svc_def_new(str_from("dfx"), str_from("d"), binary);
     svc_def_set_service_type(sd, stype);
@@ -178,9 +253,9 @@ fn main() {
     var sslot = alloc(8);
 
     # =====================================================================
-    # 1. notify_try_recv / notify_drain — truncation
+    # 1. notify receive — truncation (authenticated path since 1.17.0)
     # =====================================================================
-    test_group("1 notify_try_recv truncation");
+    test_group("1 notify receive truncation");
 
     var big = alloc(1500);
     memset(big, 120, 1500);
@@ -189,10 +264,14 @@ fn main() {
     assert_eq(df_dgram_pair(rslot, sslot, 1), 0, "1: socketpair with SO_PASSCRED");
     var rfd = load64(rslot);
     var sfd = load64(sslot);
+    var me = vec_new();
+    vec_push(me, sys_getpid());
 
     sys_sendto(sfd, big, 1500, 0, 0, 0);
-    assert_eq(notify_try_recv(rfd), 0, "1: a 1,500-byte datagram is dropped, not parsed");
-    assert_eq(notify_try_recv(rfd), 0, "1: the dropped datagram was consumed");
+    assert_eq(notify_try_recv_authenticated(rfd, me), 0, "1: a 1,500-byte datagram is dropped, not parsed");
+    assert_eq(notify_recv_outcome(), NOTIFY_RECV_TRUNCATED, "1: ... and reported as truncated");
+    assert_eq(notify_try_recv_authenticated(rfd, me), 0, "1: the dropped datagram was consumed");
+    assert_eq(notify_recv_outcome(), NOTIFY_RECV_EMPTY, "1: ... the queue is empty behind it");
 
     # 1.16.2: descriptors passed with SCM_RIGHTS are closed, never kept. A
     # socket without SO_PASSCRED leaves room in the 32-byte control buffer for
@@ -236,8 +315,8 @@ fn main() {
 
     var normal = "READY=1\nMAINPID=4242\n";
     sys_sendto(sfd, normal, strlen(normal), 0, 0, 0);
-    var nm = notify_try_recv(rfd);
-    assert(nm != 0, "1: a normal datagram still parses (SO_PASSCRED on, no control buffer)");
+    var nm = notify_try_recv_authenticated(rfd, me);
+    assert(nm != 0, "1: a normal datagram still parses");
     if (nm != 0) {
         assert_eq(load64(nm), 1, "1: READY=1 parsed");
         assert_eq(load64(nm + 16), 4242, "1: MAINPID parsed");
@@ -245,13 +324,13 @@ fn main() {
 
     # Exactly the buffer size is complete, not truncated.
     sys_sendto(sfd, big, 1024, 0, 0, 0);
-    assert(notify_try_recv(rfd) != 0, "1: a 1,024-byte datagram fits and parses");
+    assert(notify_try_recv_authenticated(rfd, me) != 0, "1: a 1,024-byte datagram fits and parses");
 
     # The drain steps past a dropped datagram instead of stopping at it.
     sys_sendto(sfd, big, 1500, 0, 0, 0);
     sys_sendto(sfd, "WATCHDOG=1\n", 11, 0, 0, 0);
-    var dm = notify_drain(rfd, 10);
-    assert_eq(vec_len(dm), 1, "1: notify_drain returns only the complete datagram");
+    var dm = df_drain(rfd, me, 10);
+    assert_eq(vec_len(dm), 1, "1: the drain returns only the complete datagram");
     if (vec_len(dm) == 1) {
         assert_eq(load64(vec_get(dm, 0) + 24), 1, "1: ... and it is the WATCHDOG=1 behind the truncated one");
     }
@@ -259,38 +338,35 @@ fn main() {
     # A zero-length datagram is consumed, and does not end the drain either.
     sys_sendto(sfd, "", 0, 0, 0, 0);
     sys_sendto(sfd, "STOPPING=1\n", 11, 0, 0, 0);
-    var dz = notify_drain(rfd, 10);
-    assert_eq(vec_len(dz), 1, "1: a zero-length datagram does not end notify_drain");
-    assert_eq(vec_len(notify_drain(rfd, 10)), 0, "1: the queue is empty afterwards");
+    var dz = df_drain(rfd, me, 10);
+    assert_eq(vec_len(dz), 1, "1: a zero-length datagram does not end the drain");
+    assert_eq(vec_len(df_drain(rfd, me, 10)), 0, "1: the queue is empty afterwards");
     sys_close(rfd);
     sys_close(sfd);
 
-    # SCM_RIGHTS: the unauthenticated path passes no control buffer, so a
-    # descriptor riding on a datagram is never installed in the receiver (a
-    # socket without SO_PASSCRED would otherwise have room for four).
-    assert_eq(df_dgram_pair(rslot, sslot, 0), 0, "1: socketpair without SO_PASSCRED");
+    # SCM_RIGHTS on a socket WITH SO_PASSCRED: the credentials fill the 32-byte
+    # control buffer, so a real kernel has no room for the descriptor,
+    # discards it and sets MSG_CTRUNC. argonaut's part is the verdict: refused
+    # as truncated exactly when MSG_CTRUNC is reported, accepted otherwise.
+    # df_ctrunc_reported asks the platform first, because qemu-user reports no
+    # MSG_CTRUNC here (it receives into a larger host buffer and hands back
+    # the credentials alone). The fd's fate is the kernel's, so it is not
+    # counted; 1b (no SO_PASSCRED, the fd IS in the buffer) asserts argonaut
+    # closes a passed descriptor it can see.
+    var ctrunc = df_ctrunc_reported();
+    assert(ctrunc >= 0, "1: MSG_CTRUNC probe ran");
+    assert_eq(df_dgram_pair(rslot, sslot, 1), 0, "1: socketpair with SO_PASSCRED, for SCM_RIGHTS");
     rfd = load64(rslot);
     sfd = load64(sslot);
-    var siov[16];
-    store64(&siov, "READY=1\n");
-    store64(&siov + 8, 8);
-    var scm[24];
-    memset(&scm, 0, 24);
-    store64(&scm, 20);              # CMSG_LEN(sizeof(int))
-    store32(&scm + 8, 1);           # SOL_SOCKET
-    store32(&scm + 12, 1);          # SCM_RIGHTS
-    store32(&scm + 16, sfd);
-    var smh[56];
-    memset(&smh, 0, 56);
-    store64(&smh + 16, &siov);
-    store64(&smh + 24, 1);
-    store64(&smh + 32, &scm);
-    store64(&smh + 40, 24);         # CMSG_SPACE(sizeof(int))
-    assert_eq(sys_sendmsg(sfd, &smh, 0), 8, "1: datagram with SCM_RIGHTS sent");
-    var low0 = df_lowest_fd();
-    var nr = notify_try_recv(rfd);
-    assert(nr != 0, "1: a datagram carrying SCM_RIGHTS still parses");
-    assert_eq(df_lowest_fd(), low0, "1: SCM_RIGHTS descriptors are not installed in the receiver");
+    assert_eq(df_send_rights(sfd, sfd), 8, "1: datagram with SCM_RIGHTS sent");
+    var got_r = notify_try_recv_authenticated(rfd, me);
+    if (ctrunc == 1) {
+        assert_eq(got_r, 0, "1: MSG_CTRUNC reported: the datagram is refused");
+        assert_eq(notify_recv_outcome(), NOTIFY_RECV_TRUNCATED, "1: ... as truncated");
+    } else {
+        assert(got_r != 0, "1: no MSG_CTRUNC (qemu-user): the datagram is accepted");
+        assert_eq(notify_recv_outcome(), NOTIFY_RECV_OK, "1: ... with credentials");
+    }
     sys_close(rfd);
     sys_close(sfd);
 

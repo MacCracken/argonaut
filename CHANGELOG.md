@@ -7,6 +7,268 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.17.0] — 2026-10-29
+
+**The roadmap's 1.17.0: the three deprecated APIs are removed, and three inert helpers are
+wired instead of removed.**
+- **Removed:** the unauthenticated notify receivers, and `spawn_service`.
+- **Wired:**
+  - a service's resource limits are applied in its spawn child;
+  - its env files are loaded into its environment;
+  - its name is checked when it is registered.
+- **Kept as they are,** by decision: `LogConfig`, socket activation, `capability_setpriv_cmd`
+  and `is_localhost_target`.
+- **Fixed on the way:** an env file that is a FIFO could hang PID 1 (MEDIUM).
+- **The real consumer floor is cyrius 6.7.9,** not the 6.6.8 that 1.16.1–1.16.3 stated.
+
+45 suites / 1,760 assertions, 0 failures, on x86_64 and under qemu-aarch64. Bench gate
+neutral. New: ADR-014.
+
+### Breaking
+
+- **Removed: `notify_try_recv` and `notify_drain`** (deprecated at 1.16.2). Neither checked
+  the sender, so any local process that could reach the socket could claim `READY=1`,
+  `WATCHDOG=1` or `MAINPID=` for a service. **Migration:** call
+  `notify_try_recv_authenticated(fd, expected_pids)`. To drain, loop until
+  `notify_recv_outcome()` is `NOTIFY_RECV_EMPTY`, as `init_poll_health` does.
+- **Removed: `spawn_service`** (deprecated at 1.16.2, a forwarder). **Migration:** call
+  `fork_exec_service`, which takes the same argument.
+- **Behaviour: `fork_exec_service` applies a service's resource limits.** A `ResourceLimits`
+  in `svc_def_rlimits` now takes effect:
+  - each field that is set becomes the soft and the hard limit;
+  - a limit the kernel refuses makes the child exit **126** before exec.
+- **Behaviour: `fork_exec_service` loads a service's env files.**
+  - **Before fork,** a path that is missing, too large (over 8 KiB), not absolute or not a
+    regular file makes it return **-1**.
+  - **In the child,** a file it cannot load, or one naming an invalid variable, makes it
+    exit **126**.
+- **Behaviour: `argonaut_init_new` refuses names `validate_service_name` refuses.** That is a
+  name outside `[A-Za-z0-9._-]`, an empty name, a bare `.` (newly refused) or one holding
+  `..`. Such a service is not registered, and the refusal is audited.
+- **Behaviour: 126 has three causes now:** the pre-exec hook refused, a resource limit was
+  refused, or the environment could not be built. All three mean the start failed closed
+  before exec.
+- **Behaviour: `load_env_files` fails closed.** It returns 0 when any file fails or names an
+  invalid variable; it used to ignore the failure and return what it had.
+- **Behaviour: `load_env_file`.**
+  - An empty file is now an empty environment (0), not -1.
+  - A FIFO, device or directory is -1 at once (see Security).
+  - kybernet skips empty files before calling, so the first change does not reach it.
+- **Audit: a new event, `EVT_REGISTRATION_REFUSED`** ("RegistrationRefused", error
+  severity), appended after `EVT_RESTART_LIMIT`. Every earlier value is unchanged.
+- **Consumer floor: cyrius 6.7.9, and it has been since 1.16.1.** `ag_sys_poll` calls the
+  stdlib's `sys_ppoll`, which first ships in 6.7.9 (CHANGELOG [1.16.1]). 1.16.1–1.16.3
+  said 6.6.8. Measured: a kybernet on its 6.6.20 pin fails to build argonaut at this tree
+  with `undefined function 'sys_ppoll'`. On 6.7.9 (with libro 2.11.0 and sigil 3.13.12),
+  the tree builds, and the four new and changed spawn and registration suites pass.
+  **Migration:** raise the consumer's `cyrius` pin to 6.7.9 or later.
+
+### Added
+
+- **Resource limits, applied** (`src/process_mgmt.cyr`, ADR-014). `_apply_rlimits` runs in
+  the spawn child, after argv and envp are built and before the pre-exec hook. It sets
+  NOFILE, AS and NPROC when > 0, and CORE when >= 0, through `ag_sys_prlimit64`.
+  - **New API:**
+    - `svc_rlimits_new(nofile, address_space, nproc, core)`;
+    - `svc_def_set_rlimits(sd, rl)`;
+    - the `AG_RLIMIT_*` numbers;
+    - `ag_sys_prlimit64` (x86_64 302 / aarch64 261, both read back under
+      `qemu -d strace`).
+  - **Names:** they avoid agnostik's `resource_limits_new` and `rlimit_*`, which a
+    same-named argonaut fn would have rebound in kybernet's build.
+- **Env files, loaded.** `build_service_envp` merges the service's `environment` map and
+  then its `env_files` in order (`_service_env_map`); a later entry overrides an earlier
+  one, and a file entry replaces a default of the same name. `fork_exec_service`
+  preflights the paths in the parent without allocating, and the child reads them.
+  **New API:** `svc_def_set_env_files(sd, paths)` and `env_name_is_valid(name)`.
+- **Service names, checked at registration** (`src/init.cyr`). Each refused name gets a
+  sakshi warning and an `EVT_REGISTRATION_REFUSED` record, once the chain exists.
+  `validate_service_name` also refuses a bare `.`, and scans for `..` in its one pass
+  instead of allocating a Str per call.
+- **ADR-014**, "argonaut applies resource limits and env files at spawn, and checks names
+  at registration". It supersedes ADR-010 and narrows ADR-013's resource-limit part.
+  Security policy (seccomp, Landlock, capabilities, cgroups) stays the consumer's.
+
+### Security
+
+| Finding | Severity | Fix |
+|---|---|---|
+| An env file that is a FIFO blocked its reader in `open(2)` | MEDIUM | Opened `O_NONBLOCK`, regular files only (below) |
+| `load_env_files` dropped failed files silently | LOW | Fails closed |
+| Unauthenticated notify receive (A-9 class) | — | Removed (deprecated 1.16.2) |
+| Service names unchecked | LOW | Checked at registration and audited |
+
+**An env file that is a FIFO could hang PID 1.**
+- **What it did:** `load_env_file` opened the file with a plain `open(O_RDONLY)`, which
+  blocks on a FIFO until a writer appears. kybernet calls it in PID 1 at config load, for
+  its own `env_files` key. So anyone who can write the directory an env file lives in
+  could swap the file for a FIFO and park kybernet's PID 1 at its next boot.
+- **And the new path would have too:** the new parent-side preflight runs in PID 1 on
+  every start.
+- **Fixed:** both now go through `_env_file_open`. It opens with
+  `O_NONBLOCK | O_NOCTTY | O_CLOEXEC` and refuses anything that is not a regular file
+  (`S_ISREG`), the 2026-10-14 audit's B-1 rule for PID files.
+- **Also fixed:** `load_env_file` reads the size from `fstat` on the fd it then reads.
+  Before, it reopened the file by path, so a swap between the size check and the read went
+  unseen.
+- **Followed:** a symlink still is, as systemd's EnvironmentFile= follows one.
+- **Found by:** this release's review (no audit report).
+- **kybernet:** it gets the fix by taking this release; its call is unchanged.
+
+The other three:
+- **`load_env_files`:** it now fails closed, so a service never starts without part of its
+  environment. It had no caller before, so nothing was exposed.
+- **The unauthenticated notify receive:** removed (Breaking).
+- **Service names:** checked when a service is registered. argonaut puts no name into a
+  filesystem path itself; kybernet puts it into a cgroup path, behind its own check.
+
+**What was not changed:** `run_safe_cmd_timeout` (command health checks) still runs without
+the hook, and so without a service's limits or env files. That is roadmap 1.18.0, whose item
+names the hook; limits and env files join it.
+
+### Tests
+
+**42 → 45 suites, 1,670 → 1,760 assertions (+90).** Every new suite was mutation-checked:
+each mutation, applied alone, fails it.
+
+| Suite | Assertions | Mutation | Fails |
+|---|---:|---|---:|
+| `spawn_rlimits` (new) | 14 | limits not applied | 4 |
+| `spawn_env_files` (new) | 52 | env files ignored | 6 |
+| | | `load_env_files` ignores errors | 2 |
+| | | no parent preflight | 1 |
+| | | a blocking `open` (the FIFO bug) | 3, each bounded to 3 s (no hang) |
+| `register_names` (new) | 22 | no registration gate | 5 |
+| | | a bare `.` accepted | 4 |
+
+- **`spawn_rlimits`:** the pre-exec hook runs after the limits, reads each back with
+  `prlimit64` and reports any difference through its exit code.
+  - **Under qemu-user:** qemu accepts a guest's `RLIMIT_AS` and drops it, because applying
+    it would limit qemu itself. So the test probes whether the platform applies AS, and
+    expects the inherited value where it does not. `qemu -d strace` shows the set is still
+    issued.
+- **`spawn_env_files`:**
+  - `env_name_is_valid`, plus quotes, comments and empty files;
+  - file order and override;
+  - PATH replacement;
+  - the preflight's refusals, and a FIFO, a directory and a null path;
+  - end to end, a `/bin/sh -c 'test …'` service that sees the merged environment.
+- **`register_names`:** the predicate, registration through `argonaut_init_new`, the
+  audited refusals, and that no default service is refused.
+- **`deferred_fixes`:** section 1 asserted the removed receivers' 1.16.2 hardening; it now
+  asserts the same through `notify_try_recv_authenticated`. That is truncation, the drain
+  stepping past a dropped datagram, and a zero-length datagram.
+  - **SCM_RIGHTS on a SO_PASSCRED socket:** the test now asserts argonaut's verdict, which
+    is to refuse exactly when the kernel reports `MSG_CTRUNC`. It probes the platform
+    first, because qemu-user reports none.
+  - 116 → 119 assertions.
+- **`harden_proc`:** the B-9 `spawn_service` check goes with the function (106 → 105).
+  **`notify`:** the empty-socket checks use the authenticated receive.
+- **No `0 - N`:** new and rewritten code uses `-N`, per CLAUDE.md. 101 pre-existing sites
+  remain for 1.17.1, down from 104.
+
+### Performance
+
+The gate ran `./scripts/bench-history.sh "1.17.0-closeout"` against `1.16.3-cyrius-6.7.18`,
+with a 24-round A/B of the two bench binaries pinned to one core. An earlier run with the
+helpers wired is recorded as `1.17.0-wired-helpers`.
+
+| bench | 1.16.3 gate | 1.17.0 gate | A/B medians |
+|---|---:|---:|---|
+| init_new_desktop | 25.086 | 25.769 | 25.026 → 25.709 (+0.68 µs, +2.7 %) |
+| init_new_minimal | 5.940 | 5.842 | 5.575 → 5.754 (+0.18 µs) |
+| resolve_order_chain_100 ⚠ | 230.147 | 205.105 | 212.147 → 213.359 (+0.6 %) |
+| resolve_order_chain_50 ⚠ | 105.663 | 89.470 | 97.106 → 98.120 (+1.0 %) |
+| resolve_waves_chain_20 ⚠ | 36.200 | 32.460 | 30.674 → 31.062 (+1.3 %) |
+| mark_all_steps_complete | 47.385 | 48.945 | 47.371 → 48.118 (+0.75 µs) |
+| audit_log_record | 3.962 | 4.146 | 3.947 → 3.959 (+0.3 %) |
+
+**Verdict: neutral, no regression.**
+- **`init_new_*` is the name check at registration:** about 0.08 µs per default service,
+  eight in the desktop profile.
+  - **First cut:** it read +1.3 µs, while `validate_service_name` still allocated
+    `str_from("..")` on every call.
+  - **Now:** the `..` scan runs in the same pass and allocates nothing.
+- **The three chain rows beyond ±2 µs** read faster in the gate and flat in the A/B, with
+  overlapping ranges. ⚠ Noise-bound, as at every release since 1.15.2.
+- **Everything else** is within ±0.75 µs in the A/B. `mark_all_steps_complete` is on no
+  changed path.
+
+### Binary
+
+- **x86_64:** 761,960 → **770,560 B** (+8,600). The new code is in `fork_exec_service`,
+  which the shipped binary reaches through the qemu harness's L3 path.
+- **aarch64:** 2,183,024 → **2,187,512 B** (+4,488).
+- **Dead-code floor:**
+  - x86_64: 2,982 unreachable fns, 1,115,653 B eliminated;
+  - aarch64: 2,982 fns, 1,321,368 B NOPed.
+
+### Closeout pass (CLAUDE.md, before a minor)
+
+- **Full test suite:** 45 / 45 and 1,760 assertions, on x86_64 and under qemu-aarch64.
+- **Benchmark snapshot:** above, against `1.16.3-cyrius-6.7.18`. The last closeout label,
+  `1.8.0-closeout`, is too old to compare against.
+- **Dead-code floor:** above.
+- **Refactor pass:** one consolidation. The parent preflight and `load_env_file` used to
+  open each file their own way; both now go through `_env_file_open`.
+  `_append_service_env` is now a wrapper over `_append_env_map`, kept because two
+  `process.tcyr` cases call it.
+- **Code review** of the whole diff turned up four things, each fixed above:
+  - the FIFO open;
+  - the reopen between size check and read;
+  - a null entry in an env-file vec, which was dereferenced;
+  - three `sakshi_warn` literal lengths, one byte too long (libro 2.11.3's defect class).
+  After the fix, every `sakshi_*` literal in `src/` matches its length.
+- **Cleanup sweep:** no TODO or FIXME, and no reference to a removed API outside the comment
+  recording its removal.
+- **Security re-scan:**
+  - no `sys_system`, and no raw `execve` outside `process_mgmt`;
+  - the new buffers (`_ENVF_PATH`: 512 slots = 4,096 B for at most 4,095 + NUL;
+    `st[STAT_BUFSZ]`; `lim[16]`; `szb[8]`) are each sized for their largest write;
+  - the one new syscall, `prlimit64`, has its return checked.
+- **Downstream check:** below.
+- **Doc sync:**
+  - CHANGELOG, roadmap and `state.md`;
+  - ADR-014, plus the ADR-010 and ADR-013 statuses;
+  - `docs/architecture/feature-gaps.md` and `docs/security/posture.md`.
+- **Version verify:** `VERSION` reads 1.17.0; `cyrius.cyml` reads it through
+  `${file:VERSION}`.
+- **Full clean build:** `rm -rf build lib && cyrius deps && CYRIUS_DCE=1 cyrius build
+  --check-lib-sync` passes and gives the same 770,560 B binary.
+
+### Verification
+
+- **Tests:** 45 / 45 and 1,760 assertions on x86_64, and under qemu-aarch64. Lint,
+  `fmt --check` and `cyrius vet` are clean on every file CI gates.
+- **qemu under KVM:** the PID-1 harness passes at `-m 256M`, and its L3 case spawns through
+  the new code. The boot test reaches `pid1 loop ready`.
+- **PID 1 of an unprivileged pid namespace:** 0 idle wakeups in 3 s, 300 orphans reaped with
+  0 zombies, and a clean SIGTERM shutdown.
+
+### Downstream: kybernet
+
+kybernet 1.7.11 pins argonaut 1.15.6 on cyrius 6.6.20. Built from scratch copies:
+
+| kybernet toolchain | Against | Result |
+|---|---|---|
+| 6.6.20 (its pin) | argonaut 1.15.6 (its pin) | builds, 751,544 B, **890 / 890** |
+| 6.6.20 | this tree (`path` dep) | **build fails:** `undefined function 'sys_ppoll'`, the consumer floor above |
+| 6.7.18 | this tree (`CYRIUS_LOCAL=argonaut`) | builds, 1,102,008 B, **888 / 890** |
+
+- **The two failures** are kybernet's own `test_emergency_auth` assertions
+  (`src/test.cyr:1391-1393`). They pin the open `emergency_shell_default()` that 1.16.2
+  closed, and `state.md` has listed them since.
+- **Vendored modules:** every one in that build is byte-identical to this tree's `src/`.
+- **kybernet calls none of the removed functions.**
+- **What reaches kybernet:**
+  - its `load_env_file` call gets the FIFO fix;
+  - a service name it accepts but argonaut refuses (`a..b`; kybernet refuses only `.` and
+    `..`) is no longer registered.
+  - It sets neither `svc_def_rlimits` nor `svc_def_env_files`, so its services start as
+    before.
+- **Known build warning:** `struct 'ResourceLimits' redefined with a different layout`, the
+  agnostik twin kybernet documents. It is present with argonaut 1.15.6 too.
+
 ## [1.16.3] — 2026-10-29
 
 **Toolchain cyrius 6.7.9 → 6.7.18, libro 2.11.0 → 2.11.3 and sigil 3.13.12 → 3.13.15. Every

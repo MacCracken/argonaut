@@ -451,11 +451,21 @@ fn on_service_crash(ms, exit_code) {
 # Service name validation
 # =========================================================================
 
+# 1 if `name` (a Str) is safe to register: [A-Za-z0-9._-] only, not empty,
+# not ".", and no ".." anywhere. argonaut_init_new refuses a service whose
+# name fails (1.17.0): the name becomes a unit file name, an audit source and,
+# in kybernet, a cgroup directory, so one that could walk out of a path
+# component is refused where it enters. Until 1.17.0 nothing called this.
 fn validate_service_name(name) {
+    if (name == 0) { return 0; }
     var data = str_data(name);
     var len = str_len(name);
     if (len == 0) { return 0; }
+    if (len == 1) {
+        if (load8(data) == 46) { return 0; }   # "."
+    }
 
+    var prev = 0;
     for (var i = 0; i < len; i = i + 1) {
         var c = load8(data + i);
         # alphanumeric, hyphen, underscore, dot
@@ -465,10 +475,12 @@ fn validate_service_name(name) {
         if (c >= 97 && c <= 122) { ok = 1; }
         if (c == 45 || c == 95 || c == 46) { ok = 1; }
         if (ok == 0) { return 0; }
+        # Path traversal: ".." anywhere. Checked in this pass (1.17.0) rather
+        # than with str_contains(name, str_from("..")), which allocated a Str
+        # on every call, now that every registration calls this.
+        if (c == 46 && prev == 46) { return 0; }
+        prev = c;
     }
-
-    # Check for path traversal
-    if (str_contains(name, str_from(".."))) { return 0; }
 
     return 1;
 }

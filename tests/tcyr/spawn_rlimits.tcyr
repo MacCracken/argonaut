@@ -1,0 +1,165 @@
+# spawn_rlimits.tcyr — fork_exec_service applies a service's ResourceLimits
+# in the child (1.17.0).
+#
+# Before 1.17.0 the field, its getter, to_prlimit_commands and
+# resource_limits_secure all existed, and no code path set a limit on any
+# service. Now each field that is set becomes both the soft and the hard
+# limit, before the pre-exec hook runs, and a limit the kernel refuses fails
+# the start closed (126).
+#
+# The pre-exec hook runs in the service's process after the limits are
+# applied. It reads NOFILE, AS, NPROC and CORE back and exits before exec with
+# 64 plus one bit per limit that differs from what the case expects:
+#   1 NOFILE   2 AS   4 NPROC   8 CORE
+# 64 alone means every limit is as expected (and that the hook ran).
+include "tests/test_header.cyr"
+
+# Expected {cur, max} per resource, in the order NOFILE, AS, NPROC, CORE.
+var _EXP[8];
+
+fn _rl_get(resource, out) {
+    return ag_sys_prlimit64(0, resource, 0, out);
+}
+
+# The parent's own limits, which an unset field must leave alone.
+fn _expect_current() {
+    var cur[16];
+    _rl_get(AG_RLIMIT_NOFILE, &cur);
+    store64(&_EXP, load64(&cur));
+    store64(&_EXP + 8, load64(&cur + 8));
+    _rl_get(AG_RLIMIT_AS, &cur);
+    store64(&_EXP + 16, load64(&cur));
+    store64(&_EXP + 24, load64(&cur + 8));
+    _rl_get(AG_RLIMIT_NPROC, &cur);
+    store64(&_EXP + 32, load64(&cur));
+    store64(&_EXP + 40, load64(&cur + 8));
+    _rl_get(AG_RLIMIT_CORE, &cur);
+    store64(&_EXP + 48, load64(&cur));
+    store64(&_EXP + 56, load64(&cur + 8));
+    return 0;
+}
+
+# Expect `value` as both soft and hard limit for the slot (0..3).
+fn _expect(slot, value) {
+    store64(&_EXP + slot * 16, value);
+    store64(&_EXP + slot * 16 + 8, value);
+    return 0;
+}
+
+fn _rl_differs(resource, slot) {
+    var got[16];
+    if (_rl_get(resource, &got) < 0) { return 1; }
+    if (load64(&got) != load64(&_EXP + slot * 16)) { return 1; }
+    if (load64(&got + 8) != load64(&_EXP + slot * 16 + 8)) { return 1; }
+    return 0;
+}
+
+fn _rl_probe_hook(sd) {
+    var code = 64;
+    if (_rl_differs(AG_RLIMIT_NOFILE, 0) == 1) { code = code + 1; }
+    if (_rl_differs(AG_RLIMIT_AS, 1) == 1) { code = code + 2; }
+    if (_rl_differs(AG_RLIMIT_NPROC, 2) == 1) { code = code + 4; }
+    if (_rl_differs(AG_RLIMIT_CORE, 3) == 1) { code = code + 8; }
+    sys_exit(code);
+    return 0;
+}
+
+# 1 if this platform applies RLIMIT_AS to the calling process. qemu-user does
+# not: its linux-user layer accepts a guest's RLIMIT_AS / DATA / STACK and
+# drops it (applying it would limit qemu itself), then reports the host's
+# value. Probed in a child, which sets 64 GiB and reads it back. Under
+# qemu-aarch64 the set is still issued (`-d strace` shows it); only the
+# readback cannot see it.
+fn _as_honoured() {
+    var c = sys_fork();
+    if (c == 0) {
+        var lim[16];
+        store64(&lim, 68719476736);
+        store64(&lim + 8, 68719476736);
+        ag_sys_prlimit64(0, AG_RLIMIT_AS, &lim, 0);
+        var back[16];
+        ag_sys_prlimit64(0, AG_RLIMIT_AS, 0, &back);
+        if (load64(&back) == 68719476736) { sys_exit(1); }
+        sys_exit(0);
+    }
+    var wb[8];
+    store64(&wb, 0);
+    sys_waitpid(c, &wb, 0);
+    return WEXITSTATUS(load64(&wb));
+}
+
+# Spawn /bin/true with `rl` (or 0) and return the child's exit code.
+fn _spawn_rl(rl) {
+    var sd = svc_def_new(str_from("rlimits"), str_from("t"), str_from("/bin/true"));
+    if (rl != 0) { svc_def_set_rlimits(sd, rl); }
+    var pid = fork_exec_service(sd);
+    if (pid <= 0) { return 251; }
+    var wb[8];
+    store64(&wb, 0);
+    if (sys_waitpid(pid, &wb, 0) != pid) { return 252; }
+    var st = load64(&wb);
+    if (WIFEXITED(st)) { return WEXITSTATUS(st); }
+    return 250;
+}
+
+fn main() {
+    alloc_init();
+    test_group("spawn-rlimits");
+    argonaut_set_pre_exec_hook(&_rl_probe_hook);
+    var before[16];
+    _rl_get(AG_RLIMIT_NOFILE, &before);
+
+    # --- the setter round-trips, and svc_rlimits_new fills every field ---
+    var rl0 = svc_rlimits_new(64, 0, 0, -1);
+    var sd0 = svc_def_new(str_from("r0"), str_from("t"), str_from("/bin/true"));
+    assert_eq(svc_def_rlimits(sd0), 0, "rlimits default 0");
+    svc_def_set_rlimits(sd0, rl0);
+    assert_eq(svc_def_rlimits(sd0), rl0, "rlimits set");
+    assert_eq(load64(rl0), 64, "svc_rlimits_new nofile");
+    assert_eq(load64(rl0 + 24), -1, "svc_rlimits_new core");
+    # its neighbours (pid_file +112, log_config +128) are untouched
+    assert_eq(svc_def_pid_file(sd0), 0, "pid_file untouched");
+    assert_eq(svc_def_log_config(sd0), 0, "log_config untouched");
+
+    # --- no limits: the child keeps the parent's ---
+    _expect_current();
+    assert_eq(_spawn_rl(0), 64, "no rlimits: every limit inherited");
+    assert_eq(_spawn_rl(resource_limits_empty()), 64, "resource_limits_empty: every limit inherited");
+
+    # --- NOFILE set: soft and hard both, the rest inherited ---
+    _expect_current();
+    _expect(0, 64);
+    assert_eq(_spawn_rl(svc_rlimits_new(64, 0, 0, -1)), 64, "nofile 64: soft = hard = 64");
+
+    # --- CORE 0 (resource_limits_secure): no core dumps ---
+    _expect_current();
+    _expect(3, 0);
+    assert_eq(_spawn_rl(resource_limits_secure()), 64, "resource_limits_secure: core 0/0");
+
+    # --- every field at once ---
+    _expect_current();
+    _expect(0, 128);
+    # 64 GiB address space, checked where the platform applies RLIMIT_AS
+    # (a real kernel); under qemu-user the inherited value is what reads back.
+    if (_as_honoured() == 1) { _expect(1, 68719476736); }
+    _expect(2, 4096);
+    _expect(3, 1048576);
+    var all = svc_rlimits_new(128, 68719476736, 4096, 1048576);
+    assert_eq(_spawn_rl(all), 64, "all four applied");
+
+    # --- a limit the kernel refuses fails CLOSED: 126, the hook never runs ---
+    # 2^40 open files is above fs.nr_open for root and above the hard limit
+    # for anyone else, so prlimit refuses it either way.
+    assert_eq(_spawn_rl(svc_rlimits_new(1099511627776, 0, 0, -1)), 126, "refused nofile: exit 126");
+
+    # --- the parent's own limits are not touched ---
+    var mine[16];
+    _rl_get(AG_RLIMIT_NOFILE, &mine);
+    assert_eq(load64(&mine), load64(&before), "parent nofile soft unchanged");
+    assert_eq(load64(&mine + 8), load64(&before + 8), "parent nofile hard unchanged");
+
+    argonaut_set_pre_exec_hook(0);
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

@@ -1,6 +1,6 @@
 # ADR-010: Resource Limits via prlimit(1) Instead of pre_exec
 
-**Status**: Superseded by ADR-013 — the prlimit path was never wired
+**Status**: Superseded by ADR-014 (1.17.0: limits are applied with `setrlimit` semantics in the spawn child). ADR-013 had recorded that the prlimit path was never wired
 **Date**: 2026-04-02
 
 ## Context
@@ -47,4 +47,9 @@ This approach was never wired.
   argonaut's `ResourceLimits`, whose layout clashes with agnostik's struct of the same
   name.
 
-Whether to remove the generator or wire it is on the roadmap.
+## Update (2026-10-29)
+
+Wired at 1.17.0, by ADR-014: `fork_exec_service` applies `svc_def_rlimits` in the child
+through `prlimit64`, before the pre-exec hook, and fails closed (126) on a refused limit.
+`to_prlimit_commands` stays as a renderer for an already-running pid; the spawn path does
+not use it.

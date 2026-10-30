@@ -1,7 +1,8 @@
 # ADR-013: Service Policy Is Enforced by the Consumer, Through a Pre-Exec Hook
 
 **Status**: Accepted (decided at 1.9.0, 2026-08-24; recorded 2026-10-14). Supersedes the
-enforcement parts of ADR-010 and ADR-011.
+enforcement parts of ADR-010 and ADR-011. Narrowed by ADR-014 (1.17.0): argonaut now applies
+resource limits and env files itself; security policy stays the consumer's.
 **Date**: 2026-10-14
 
 ## Context
