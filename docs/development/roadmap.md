@@ -14,7 +14,6 @@ that gate opens.
 
 | Release | Theme | Can start |
 |---|---|---|
-| [1.17.1](#1171--negative-literals-mechanical) | `0 - N` → `-N`, no functional change | Now |
 | [1.17.2](#1172--ci-native-aarch64-and-the-state-file) | Native aarch64 CI; `state.md` automation; CI bench fix; doc-tree conformance | Once a runner is chosen |
 | [1.18.0](#1180--process-identity-and-the-exec-paths) | pidfd process identity; health-check commands under the pre-exec hook | Now |
 
@@ -25,15 +24,6 @@ that gate opens.
 **The next cyrius pin has no release number.** 1.16.3 moved to 6.7.18, the latest release,
 with every dependency at its latest tag. The next move takes the next free number when a
 newer cyrius is wanted; [its checklist](#every-cyrius-pin-move) is below.
-
----
-
-## 1.17.1 — negative literals (mechanical)
-
-- [ ] Rewrite the `0 - N` literal sites in `src/` (101 today) as `-N`. This form works since
-      cyrius 3.10.3. Code added since 1.17.0 already uses `-N`.
-- [ ] Ship this patch alone so it cannot hide a functional change. The proof is a
-      byte-identical DCE binary, or a diff whose every byte is explained.
 
 ---
 

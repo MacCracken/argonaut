@@ -131,7 +131,7 @@ fn generate_tmpfile_commands(entries) {
 fn validate_tmpfile_entries(entries) {
     for (var i = 0; i < vec_len(entries); i = i + 1) {
         if (_tmpfile_entry_check(vec_get(entries, i)) != 0) {
-            return 0 - 1;
+            return -1;
         }
     }
 

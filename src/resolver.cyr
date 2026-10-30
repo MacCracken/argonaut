@@ -40,8 +40,8 @@ fn parse_ipv4(host) {
 # (1.16.1 audit A-3). Same rules, same result.
 fn parse_ipv4_span(data, len) {
     # "0.0.0.0" = 7 chars min; "255.255.255.255" = 15 chars max.
-    if (len < 7) { return 0 - 1; }
-    if (len > 15) { return 0 - 1; }
+    if (len < 7) { return -1; }
+    if (len > 15) { return -1; }
 
     var ip = 0;
     var octet = 0;
@@ -52,32 +52,32 @@ fn parse_ipv4_span(data, len) {
     for (var i = 0; i < len; i = i + 1) {
         var c = load8(data + i);
         if (c == 46) {                          # '.'
-            if (digits == 0) { return 0 - 1; }
-            if (dots >= 3)   { return 0 - 1; }
+            if (digits == 0) { return -1; }
+            if (dots >= 3)   { return -1; }
             ip = (ip << 8) | octet;
             octet = 0;
             digits = 0;
             dots = dots + 1;
             leading_zero = 0;
         } elif (c >= 48) {
-            if (c > 57) { return 0 - 1; }       # not a digit
+            if (c > 57) { return -1; }       # not a digit
             # Leading-zero check: first digit '0' with more digits to
             # follow inside this octet → ambiguous (CVE-2021-29923).
             if (digits == 1) {
-                if (leading_zero == 1) { return 0 - 1; }
+                if (leading_zero == 1) { return -1; }
             }
             if (digits == 0 && c == 48) { leading_zero = 1; }
             octet = octet * 10 + (c - 48);
             digits = digits + 1;
-            if (digits > 3) { return 0 - 1; }
-            if (octet > 255) { return 0 - 1; }
+            if (digits > 3) { return -1; }
+            if (octet > 255) { return -1; }
         } else {
-            return 0 - 1;
+            return -1;
         }
     }
 
-    if (dots != 3) { return 0 - 1; }
-    if (digits == 0) { return 0 - 1; }
+    if (dots != 3) { return -1; }
+    if (digits == 0) { return -1; }
     ip = (ip << 8) | octet;
     return ip;
 }
@@ -170,12 +170,12 @@ fn _hosts_token_end(buf, i, le, hash_ends) {
 # `hdata`, otherwise -1.
 fn _hosts_line_match(buf, ls, le, hdata, hlen) {
     var j = _hosts_skip_blank(buf, ls, le);
-    if (j >= le) { return 0 - 1; }                     # blank line
-    if (load8(buf + j) == 35) { return 0 - 1; }        # comment line
+    if (j >= le) { return -1; }                     # blank line
+    if (load8(buf + j) == 35) { return -1; }        # comment line
     var ip_start = j;
     j = _hosts_token_end(buf, j, le, 0);
     var ip = parse_ipv4_span(buf + ip_start, j - ip_start);
-    if (ip < 0) { return 0 - 1; }                      # IPv6 or malformed
+    if (ip < 0) { return -1; }                      # IPv6 or malformed
     var hit = 0;
     var scanning = 1;
     while (scanning == 1) {
@@ -194,7 +194,7 @@ fn _hosts_line_match(buf, ls, le, hdata, hlen) {
         }
     }
     if (hit == 1) { return ip; }
-    return 0 - 1;
+    return -1;
 }
 
 # hosts_scan(buf, n, host) — the /etc/hosts scan over `n` bytes already in
@@ -203,7 +203,7 @@ fn _hosts_line_match(buf, ls, le, hdata, hlen) {
 fn hosts_scan(buf, n, host) {
     var hdata = str_data(host);
     var hlen = str_len(host);
-    var found = 0 - 1;
+    var found = -1;
     var ls = 0;
     while (ls < n) {
         var le = ls;
@@ -236,7 +236,7 @@ fn lookup_etc_hosts(host) {
     # scan back to the last complete LINE so a record severed mid-token is
     # never parsed as though it were whole.
     var n = file_read_all("/etc/hosts", buf, 8193);
-    if (n <= 0) { return 0 - 1; }
+    if (n <= 0) { return -1; }
     if (n > 8192) {
         # 1.16.1 audit: the length is measured, not a hand count (it said 78
         # for an 80-byte message, so the log line lost its last two bytes).
@@ -247,7 +247,7 @@ fn lookup_etc_hosts(host) {
         while (cut > 0 && load8(buf + cut - 1) != 10) { cut = cut - 1; }
         # No newline at all in 8 KB: nothing complete to scan.
         n = cut;
-        if (n == 0) { return 0 - 1; }
+        if (n == 0) { return -1; }
     }
     return hosts_scan(buf, n, host);
 }
@@ -259,7 +259,7 @@ fn lookup_etc_hosts(host) {
 # resolve_host_ipv4(host) — single entry point used by health checks.
 # Returns a packed BE IPv4 address (>= 0) on success, -1 otherwise.
 fn resolve_host_ipv4(host) {
-    if (str_len(host) == 0) { return 0 - 1; }
+    if (str_len(host) == 0) { return -1; }
     var ip = parse_ipv4(host);
     if (ip >= 0) { return ip; }
     return lookup_etc_hosts(host);

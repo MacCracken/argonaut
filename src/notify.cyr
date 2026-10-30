@@ -75,7 +75,7 @@ fn notify_parse(data, len) {
             var line_len = i - line_start;
             if (line_len > 0) {
                 # Find the first '=' in the line.
-                var eq_pos = 0 - 1;
+                var eq_pos = -1;
                 for (var j = line_start; j < i; j = j + 1) {
                     if (eq_pos < 0 && load8(data + j) == 61) { eq_pos = j; }  # '='
                 }
@@ -130,7 +130,7 @@ fn notify_bind(path) {
     # truncated — a shortened path binds (and first unlinks) a different
     # file. 1.16.1 audit.
     var path_len = str_len(path);
-    if (path_len <= 0 || path_len > 107) { return 0 - 1; }
+    if (path_len <= 0 || path_len > 107) { return -1; }
 
     # Build sockaddr_un
     var addr[110];
@@ -153,13 +153,13 @@ fn notify_bind(path) {
     # services' READY / WATCHDOG datagrams. 0x80000 is SOCK_CLOEXEC on both
     # x86_64 and aarch64.
     var fd = sys_socket(1, 2 | 0x80000, 0);
-    if (fd < 0) { return 0 - 1; }
+    if (fd < 0) { return -1; }
 
     # bind(fd, &addr, sizeof(sa_family) + path_len + 1)
     var ret = sys_bind(fd, &addr, 2 + path_len + 1);
     if (ret < 0) {
         sys_close(fd);
-        return 0 - 1;
+        return -1;
     }
 
     # Set non-blocking
@@ -175,7 +175,7 @@ fn notify_bind(path) {
     store32(&one, 1);
     if (sys_setsockopt(fd, 1, 16, &one, 4) < 0) {   # SOL_SOCKET=1, SO_PASSCRED=16
         sys_close(fd);
-        return 0 - 1;
+        return -1;
     }
 
     return fd;
@@ -271,7 +271,7 @@ fn _notify_close_passed_fds(ctrl, ctrllen) {
                         }
                     }
                 }
-                off = off + ((clen + 7) & (0 - 8));
+                off = off + ((clen + 7) & -8);
             }
         }
     }
@@ -359,7 +359,7 @@ fn notify_recv_sender_uid() { return _notify_sender_uid; }
 # Send an sd_notify message to a socket path (client side).
 fn send_notify(socket_path, message) {
     var fd = sys_socket(1, 2, 0);  # AF_UNIX, SOCK_DGRAM
-    if (fd < 0) { return 0 - 1; }
+    if (fd < 0) { return -1; }
 
     var addr[110];
     memset(&addr, 0, 110);
@@ -369,7 +369,7 @@ fn send_notify(socket_path, message) {
     # Refused, not truncated: a shortened path is another socket (1.16.1 audit).
     if (path_len > 107) {
         sys_close(fd);
-        return 0 - 1;
+        return -1;
     }
     memcpy(&addr + 2, path_data, path_len);
 
@@ -380,6 +380,6 @@ fn send_notify(socket_path, message) {
     var ret = sys_sendto(fd, msg_data, msg_len, 0, &addr, 2 + path_len + 1);
     sys_close(fd);
 
-    if (ret < 0) { return 0 - 1; }
+    if (ret < 0) { return -1; }
     return 0;
 }

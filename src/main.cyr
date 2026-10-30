@@ -161,7 +161,7 @@ fn main() {
         sigset_add(sigset, SIGINT);
         sigset_add(sigset, SIGCHLD);
         sys_sigprocmask(SIG_BLOCK, sigset, 0);
-        var sfd = sys_signalfd(0 - 1, sigset, SFD_NONBLOCK);
+        var sfd = sys_signalfd(-1, sigset, SFD_NONBLOCK);
         # 2026-08-24 audit MEDIUM-6: check it. SIGTERM/SIGINT/SIGCHLD are
         # already BLOCKED above, so if signalfd fails we would spin forever
         # reading fd -1 with the shutdown signals masked — an unkillable PID 1
@@ -224,7 +224,7 @@ fn main() {
                 store32(spfd, sfd);
                 store16(spfd + 4, 1);     # POLLIN
                 store16(spfd + 6, 0);
-                ag_sys_poll(spfd, 1, 0 - 1);
+                ag_sys_poll(spfd, 1, -1);
             }
         }
 

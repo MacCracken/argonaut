@@ -444,7 +444,7 @@ fn resource_limits_empty() {
     store64(rl, 0);
     store64(rl + 8, 0);
     store64(rl + 16, 0);
-    store64(rl + 24, 0 - 1);  # core not set
+    store64(rl + 24, -1);  # core not set
     return rl;
 }
 
@@ -833,7 +833,7 @@ fn runlevel_level(r) {
     if (r == RL_GRAPHICAL) { return 5; }
     if (r == RL_CONTAINER) { return 7; }
     if (r == RL_EDGE)      { return 8; }
-    return 0 - 1;
+    return -1;
 }
 
 fn runlevel_to_boot_mode(r) {
@@ -841,7 +841,7 @@ fn runlevel_to_boot_mode(r) {
     if (r == RL_GRAPHICAL) { return BOOT_DESKTOP; }
     if (r == RL_CONTAINER) { return BOOT_MINIMAL; }
     if (r == RL_EDGE)      { return BOOT_EDGE; }
-    return 0 - 1;  # Emergency/Rescue have no boot mode
+    return -1;  # Emergency/Rescue have no boot mode
 }
 
 fn boot_mode_to_runlevel(m) {

@@ -7,6 +7,133 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.17.1] — 2026-10-30
+
+**The roadmap's 1.17.1: the 101 `0 - N` literal sites in `src/` are written `-N`, and nothing
+else changes.**
+- **The binary is not byte-identical, as expected.** cyrius computes `0 - N` at run time but
+  loads `-N` as one immediate, so each site compiles shorter and the code after it moves.
+- **It is proven equivalent instead.** A lock-step walk of the before and after disassemblies
+  explains every differing byte, on both arches, with DCE on and off (Proof, below).
+- **Binary size is unchanged** on both arches; the shorter `.text` stays inside the same
+  page-aligned segment.
+
+45 suites / 1,760 assertions, 0 failures, on x86_64 and under qemu-aarch64. Bench gate neutral.
+
+### Changed
+
+- **`0 - N` → `-N` at 101 sites in nine files:** `process_mgmt.cyr` 32, `init.cyr` 28,
+  `resolver.cyr` 19, `notify.cyr` 9, `health.cyr` 5, `types.cyr` 3, `main.cyr` 2,
+  `pid1_harness.cyr` 2, `tmpfiles.cyr` 1.
+  - **The values:** 97 × `-1`, 2 × `-4` (`EINTR`), one `-115` (`EINPROGRESS`) and one `-8`
+    (the cmsg alignment mask).
+  - **Two lose their parentheses:** `ret == (0 - 115)` becomes `ret == -115`, and
+    `& (0 - 8)` becomes `& -8`.
+- **Kept:** `sys_kill(0 - pid, …)` (twice) and `sys_kill(0 - kp, …)`. They negate a variable to
+  name a process group, and CLAUDE.md's rule is about literals.
+- **`tests/` is untouched,** so the same 45 suites check the rewritten source. It has 74
+  `0 - N` literal sites of its own.
+
+### Proof: no functional change
+
+**Why the bytes differ.** cyrius does not fold `0 - N`; it emits the subtraction. `-N` is one
+immediate load. Both leave the same 64-bit value in the result register.
+
+| | `0 - N` | `-N` |
+|---|---|---|
+| x86_64 | `xor eax,eax; push rax; mov eax,N; mov rcx,rax; pop rax; sub rax,rcx`: 15 B | `movabs rax,-N`: 10 B |
+| aarch64 | `mov x0,#0; str x0,[sp,#-16]!; mov x0,#N; mov x1,x0; ldr x0,[sp],#16; sub x0,x0,x1`: 24 B | `mov` + 3 × `movk`: 16 B |
+
+**The check.** A script walked each pair of `.text` disassemblies (objdump) in lock step:
+- every instruction must match once code addresses are abstracted, except where the old
+  sequence above meets the new load of the same value;
+- every branch target, call target and function-pointer immediate must name the remapped
+  address of the one before, using the address map the walk builds (aarch64 `mov`/`movk`
+  chains are fused into one value first);
+- every byte outside `.text` must be identical, except the ELF size fields that track `.text`,
+  and `.text`'s zero tail.
+
+It rejects a tampered binary: a changed immediate, a call retargeted by 5 bytes and one flipped
+`.rodata` byte each failed it.
+
+| Build | Sites substituted | `.text` | Address operands remapped |
+|---|---|---:|---:|
+| x86_64, no DCE | 101 | −505 B | 42,581 |
+| aarch64, no DCE | 101 | −808 B | 42,735 |
+| x86_64, DCE (the release binary) | 9 live; the other 92 are in eliminated fns | −48 B | 9,970 |
+| aarch64, DCE | 9 live, 92 in NOPed fns | −808 B | 10,065 |
+
+- **The values match the source** on both no-DCE builds: 97 × −1, 2 × −4, −115 and −8.
+- **x86_64 DCE:** 1,115,653 → 1,115,193 B eliminated, the 92 dead sites × 5 B. Live code is
+  45 B shorter. `.text`'s zero tail goes from 9 B to 6 B, because DCE sizes `.text` as the
+  no-DCE size minus the eliminated bytes, rounded up to 8.
+- **aarch64 DCE:** 1,321,368 → 1,320,632 B NOPed, the 92 dead sites × 8 B. A dead fn is NOPed
+  in place, so the walk matches NOP runs and counts each 2-instruction shortfall as a site.
+- **What else the old sequence wrote:** it left N in `rcx` / `x1`, and on x86_64 it set the
+  flags. At all 101 sites, on both arches, the code that follows does one of three things before
+  reading either. It writes `rcx` / `x1`, or it calls with fewer register arguments than would
+  pass one, or it returns. Every flag reader has its own `cmp` or `test` first, and aarch64's
+  `sub` sets no flags.
+
+### Security
+
+- **No new syscall, input path or buffer.** The proof above covers the hardening pass for this
+  diff: no instruction outside the 101 sites changed.
+- **Known-CVE sweep (2026-10-30):** nothing new for argonaut's surface since the 2026-10-14
+  audit. The systemd CVEs it found (CVE-2026-29111, -40227, -4105, -40226) are in that audit's
+  table already, as surfaces argonaut does not have.
+
+### Performance
+
+The gate ran `./scripts/bench-history.sh "1.17.1-negative-literals"` against
+`1.17.0-closeout`, with a 24-round A/B of the 1.17.0 and 1.17.1 bench binaries pinned to one core.
+
+| bench | 1.17.0 gate | 1.17.1 gate | A/B medians |
+|---|---:|---:|---|
+| resolve_order_chain_50 ⚠ | 89.470 | 112.001 | 95.963 → 95.570 (−0.4 %) |
+| resolve_order_chain_100 ⚠ | 205.105 | 214.581 | 210.031 → 209.100 (−0.4 %) |
+| resolve_order_chain_10 ⚠ | 12.701 | 10.264 | 11.669 → 11.782 (+0.11 µs) |
+| resolve_waves_wide_20 | 14.379 | 13.134 | 13.117 → 12.686 (−0.43 µs) |
+| init_new_desktop | 25.769 | 25.537 | 25.697 → 25.738 (+0.04 µs) |
+| mark_all_steps_complete | 48.945 | 48.093 | 47.915 → 48.133 (+0.22 µs) |
+| audit_log_record | 4.146 | 3.947 | 3.953 → 3.959 (+0.2 %) |
+
+**Verdict: neutral, no regression.**
+- **The two gate reads beyond +2 µs, `resolve_order_chain_50` (+22.5) and `_100` (+9.5),**
+  are noise. In the A/B both are 0.4 % faster, and each gate read falls inside both binaries'
+  ranges (chain_50: 86.7–125.5 µs before, 80.5–116.1 after).
+- **Nor can they be the change.** The bench binary differs from 1.17.0's at one live site, a
+  `-1` outside the resolver. `resolve_service_order` and the 79 fns it can reach, by call, tail
+  call or function pointer, all lie below that site. So they are the same bytes at the same
+  addresses in both binaries. Only the bench loop around them moved, by 5 bytes.
+- **Every other micro** is within ±0.5 µs in the A/B. `state_transition_check` reads
+  0.044 → 0.083 µs, a 39 ns difference on a sub-0.1 µs micro, far below the HPET clock's
+  ~2.3 µs error.
+
+### Binary
+
+- **x86_64: 770,560 B,** unchanged. `.text` is 48 B shorter. Dead-code floor: 2,982
+  unreachable fns, 1,115,193 B eliminated.
+- **aarch64: 2,187,512 B,** unchanged. `.text` is 808 B shorter. Dead-code floor: 2,982 fns,
+  1,320,632 B NOPed.
+
+### Verification
+
+- **Tests:** 45 / 45 and 1,760 assertions on x86_64, and under qemu-aarch64
+  (`scripts/aarch64-sweep.sh`).
+- **Gates:** lint, `fmt --check` and `cyrius vet` are clean on every file CI gates.
+  `cyrius deps --verify`: 69 verified. CI's security-pattern scan and version check pass
+  locally.
+- **Build:** `CYRIUS_DCE=1 cyrius build --check-lib-sync` gives 770,560 B with ELF magic intact,
+  byte-identical to the binary the proof checked. The smoke run prints `all systems nominal`
+  on x86_64 and under qemu-aarch64. `cyrius capacity` is unchanged (`fn_table` 3,745 / 131,072).
+- **qemu under KVM** at `-m 256M`: the PID-1 harness passes (`m3 ok`, `l3 ok`, `done`), and the
+  boot test reaches `pid1 loop ready`.
+- **Not re-run:** the unprivileged pid-namespace check and the kybernet build. Neither is
+  required for a patch, and the proof shows the code they would exercise is unchanged.
+
+---
+
 ## [1.17.0] — 2026-10-29
 
 **The roadmap's 1.17.0: the three deprecated APIs are removed, and three inert helpers are

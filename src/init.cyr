@@ -106,7 +106,7 @@ fn argonaut_init_new(config) {
     for (var ri = 0; ri < vec_len(refused); ri = ri + 1) {
         _init_audit_s(init, vec_get(refused, ri), EVT_REGISTRATION_REFUSED);
     }
-    store64(init + 48, 0 - 1);            # notify_fd (M1) — opt-in via init_notify_bind
+    store64(init + 48, -1);            # notify_fd (M1) — opt-in via init_notify_bind
 
     proc_table_init();
 
@@ -422,7 +422,7 @@ fn init_service_names(init) {
 
 fn init_get_service_state(init, name) {
     var ms = init_get_service(init, name);
-    if (ms == 0) { return 0 - 1; }
+    if (ms == 0) { return -1; }
     return managed_svc_state(ms);
 }
 
@@ -500,10 +500,10 @@ fn init_set_service_state(init, name, state) {
 fn init_start_service(init, name) {
     sakshi_span_enter(name, strlen(name));
     var ms = init_get_service(init, name);
-    if (ms == 0) { sakshi_span_exit(); return 0 - 1; }
+    if (ms == 0) { sakshi_span_exit(); return -1; }
 
     var sd = managed_svc_def(ms);
-    if (svc_def_enabled(sd) == 0) { sakshi_span_exit(); return 0 - 1; }
+    if (svc_def_enabled(sd) == 0) { sakshi_span_exit(); return -1; }
 
     # 1.16.1 audit C-1: only a service that is not running may be started —
     # STOPPED (which is also the never-started state managed_svc_new leaves) or
@@ -515,14 +515,14 @@ fn init_start_service(init, name) {
     var cur = managed_svc_state(ms);
     if (cur != STATE_STOPPED && cur != STATE_FAILED) {
         sakshi_span_exit();
-        return 0 - 1;
+        return -1;
     }
 
     _init_audit_s(init, sd, EVT_STARTING);
 
     if (init_set_service_state(init, name, STATE_STARTING) == 0) {
         sakshi_span_exit();   # 1.16.1 audit C-10: every early return closes the span
-        return 0 - 1;
+        return -1;
     }
 
     # 1.16.2: a new run's first health result is recorded again, whatever the
@@ -532,7 +532,7 @@ fn init_start_service(init, name) {
 
     var svc_type = svc_def_service_type(sd);
 
-    var result = 0 - 1;
+    var result = -1;
     # ⚠ SVC_NOTIFY ROUTES HERE TOO. It is spawned exactly like SVC_SIMPLE —
     # fork+exec, no waiting — and differs only in the state it is LEFT in:
     # init_start_simple leaves a notify service STATE_STARTING rather than
@@ -563,7 +563,7 @@ fn init_start_simple(init, name, ms, sd) {
     if (pid < 0) {
         managed_svc_set_state(ms, STATE_FAILED);
         _init_audit_s(init, sd, EVT_STOPPED_FAIL);
-        return 0 - 1;
+        return -1;
     }
 
     proc_table_insert(svc_def_name(sd), pid);
@@ -583,7 +583,7 @@ fn init_start_simple(init, name, ms, sd) {
             _init_kill_start_child(pid);
             proc_table_remove(svc_def_name(sd));
             _init_audit_s(init, sd, EVT_READY_FAILED);
-            return 0 - 1;
+            return -1;
         }
         _init_audit_s(init, sd, EVT_READY_PASSED);
     }
@@ -714,7 +714,7 @@ fn _init_wait_start(pid) {
     var deadline = monotonic_ms() + _start_timeout_ms;
     var nap = 1;
     var status_buf[8];
-    var code = 0 - 1;
+    var code = -1;
     var done = 0;
     while (done == 0) {
         var ret = sys_waitpid(pid, &status_buf, WNOHANG);
@@ -722,7 +722,7 @@ fn _init_wait_start(pid) {
             var status = load64(&status_buf);
             if (WIFEXITED(status)) { code = WEXITSTATUS(status); }
             done = 1;
-        } elif (ret < 0 && ret != 0 - 4) {
+        } elif (ret < 0 && ret != -4) {
             done = 1;                    # ECHILD: reaped elsewhere, status lost
         } elif (monotonic_ms() >= deadline) {   # (EINTR falls through to here)
             _init_kill_start_child(pid);
@@ -741,7 +741,7 @@ fn init_start_oneshot(init, name, ms, sd) {
     if (pid < 0) {
         managed_svc_set_state(ms, STATE_FAILED);
         _init_audit_s(init, sd, EVT_STOPPED_FAIL);
-        return 0 - 1;
+        return -1;
     }
 
     managed_svc_set_pid(ms, pid);
@@ -763,7 +763,7 @@ fn init_start_oneshot(init, name, ms, sd) {
     } else {
         _init_audit_s(init, sd, EVT_STOPPED_FAIL);
     }
-    return 0 - 1;
+    return -1;
 }
 
 fn init_start_forking(init, name, ms, sd) {
@@ -771,7 +771,7 @@ fn init_start_forking(init, name, ms, sd) {
     if (pid < 0) {
         managed_svc_set_state(ms, STATE_FAILED);
         _init_audit_s(init, sd, EVT_STOPPED_FAIL);
-        return 0 - 1;
+        return -1;
     }
 
     # Wait for the parent to exit, bounded (C-4).
@@ -781,12 +781,12 @@ fn init_start_forking(init, name, ms, sd) {
         managed_svc_set_state(ms, STATE_FAILED);
         sakshi_error(name, strlen(name));
         _init_audit_s(init, sd, EVT_TIMEOUT_KILLED);
-        return 0 - 1;
+        return -1;
     }
     if (code != 0) {
         managed_svc_set_state(ms, STATE_FAILED);
         _init_audit_s(init, sd, EVT_STOPPED_FAIL);
-        return 0 - 1;
+        return -1;
     }
 
     # Read child PID from PID file
@@ -794,14 +794,14 @@ fn init_start_forking(init, name, ms, sd) {
     if (pid_file == 0) {
         managed_svc_set_state(ms, STATE_FAILED);
         _init_audit_s(init, sd, EVT_STOPPED_FAIL);
-        return 0 - 1;
+        return -1;
     }
 
     var child_pid = read_pid_file(pid_file);
     if (child_pid < 0) {
         managed_svc_set_state(ms, STATE_FAILED);
         _init_audit_s(init, sd, EVT_STOPPED_FAIL);
-        return 0 - 1;
+        return -1;
     }
 
     proc_table_insert(svc_def_name(sd), child_pid);
@@ -820,12 +820,12 @@ fn init_stop_service(init, name, timeout_ms) {
     var ms = init_get_service(init, name);
     if (ms == 0) {
         init_audit_record(init, name, EVT_STOPPING);
-        return 0 - 1;
+        return -1;
     }
     var sd = managed_svc_def(ms);
     _init_audit_s(init, sd, EVT_STOPPING);
     if (init_set_service_state(init, name, STATE_STOPPING) == 0) {
-        return 0 - 1;
+        return -1;
     }
 
     var svc_name = svc_def_name(sd);
@@ -851,7 +851,7 @@ fn init_stop_service(init, name, timeout_ms) {
 
 fn init_restart_service(init, name, stop_timeout_ms) {
     var ms = init_get_service(init, name);
-    if (ms == 0) { return 0 - 1; }
+    if (ms == 0) { return -1; }
 
     var sd = managed_svc_def(ms);
     var rc = svc_def_restart_config(sd);
@@ -871,7 +871,7 @@ fn init_restart_service(init, name, stop_timeout_ms) {
         # showed a crash followed by nothing.
         sakshi_warn(name, strlen(name));
         _init_audit_s(init, sd, EVT_RESTART_LIMIT);
-        return 0 - 1;
+        return -1;
     }
 
     _init_audit_s(init, sd, EVT_RESTARTING);
@@ -882,7 +882,7 @@ fn init_restart_service(init, name, stop_timeout_ms) {
         # ignored and the start below forked a second copy next to the one
         # still running. A stop that was ACCEPTED always leaves STOPPED, even
         # when the process needed SIGKILL; anything else means it never ran.
-        if (managed_svc_state(ms) != STATE_STOPPED) { return 0 - 1; }
+        if (managed_svc_state(ms) != STATE_STOPPED) { return -1; }
     }
 
     managed_svc_set_restarts(ms, restarts + 1);
@@ -1090,8 +1090,8 @@ fn _sd_reap_pass(members) {
             if (r > 0) {
                 store64(m + 24, _wait_status_code(load32(&st)));
                 store64(m + 16, 1);
-            } elif (r < 0 && r != 0 - 4) {
-                store64(m + 24, 0 - 1);      # ECHILD: reaped elsewhere, status lost
+            } elif (r < 0 && r != -4) {
+                store64(m + 24, -1);      # ECHILD: reaped elsewhere, status lost
                 store64(m + 16, 1);
             } else {
                 pending = pending + 1;       # still running (or EINTR)
@@ -1147,7 +1147,7 @@ fn _sd_stop_wave(init, svc_map, wave, deadline, results) {
                 store64(m + 24, _wait_status_code(load32(&st)));
                 store64(m + 16, 1);
             } elif (probe < 0) {
-                store64(m + 24, 0 - 1);
+                store64(m + 24, -1);
                 store64(m + 16, 1);
             } else {
                 sys_kill(pid, SIGTERM);
@@ -1166,7 +1166,7 @@ fn _sd_stop_wave(init, svc_map, wave, deadline, results) {
                 var kp = load64(km + 8);
                 sys_kill(0 - kp, SIGKILL);
                 sys_kill(kp, SIGKILL);
-                store64(km + 24, 0 - 1);     # until the reap below says otherwise
+                store64(km + 24, -1);     # until the reap below says otherwise
                 store64(km + 32, 1);
             }
         }
@@ -1266,7 +1266,7 @@ fn _init_shutdown(init, timeout_ms, results) {
 
     if (init != 0) { init_audit_flush(init); }
     sakshi_span_exit();
-    if (svc_map == 0) { return 0 - 1; }
+    if (svc_map == 0) { return -1; }
     return stopped;
 }
 

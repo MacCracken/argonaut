@@ -82,7 +82,7 @@ fn health_state_str(s) {
 fn connect_bounded(ip, port, timeout_ms) {
     # socket(AF_INET=2, SOCK_STREAM=1, 0)
     var fd = sys_socket(2, 1, 0);
-    if (fd < 0) { return 0 - 1; }
+    if (fd < 0) { return -1; }
 
     # Build sockaddr_in (16 bytes)
     var addr[16];
@@ -108,7 +108,7 @@ fn connect_bounded(ip, port, timeout_ms) {
     }
 
     # EINPROGRESS = -115: wait for writability, bounded.
-    if (ret == (0 - 115)) {
+    if (ret == -115) {
         var pollfd[8];
         store32(&pollfd, fd);
         store16(&pollfd + 4, 4);  # POLLOUT
@@ -139,7 +139,7 @@ fn connect_bounded(ip, port, timeout_ms) {
     }
 
     sys_close(fd);
-    return 0 - 1;
+    return -1;
 }
 
 # TCP reachability probe. 1 if a connection completed inside the bound.
@@ -545,7 +545,7 @@ fn execute_health_check(service_name, hc, pid) {
         }
         var offset = 7;
         # Parse host and port: the first ':' before the first '/'.
-        var colon_pos = 0 - 1;
+        var colon_pos = -1;
         var slash_pos = url_len;
         var ui = offset;
         while (ui < url_len) {
@@ -722,7 +722,7 @@ fn execute_health_check(service_name, hc, pid) {
                     # any HTTP/x.y prefix length without misreading.
                     if (n >= 12 && load8(&resp) == 72 && load8(&resp + 1) == 84) {
                         var status_code = 0;
-                        var sp = 0 - 1;
+                        var sp = -1;
                         for (var si = 0; si < n; si = si + 1) {
                             if (sp < 0 && load8(&resp + si) == 32) { sp = si; }
                         }

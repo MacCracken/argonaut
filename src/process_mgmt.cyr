@@ -93,7 +93,7 @@ fn load_env_file(path, env_map) {
                 var first = load8(buf + line_start);
                 if (first != 35) {  # not '#'
                     # Find '=' separator (first one; flag-style, no break)
-                    var eq_pos = 0 - 1;
+                    var eq_pos = -1;
                     var j = line_start;
                     while (eq_pos < 0 && j < i) {
                         if (load8(buf + j) == 61) { eq_pos = j; }   # '='
@@ -396,7 +396,7 @@ fn run_safe_cmd_timeout(cmd, timeout_ms) {
     store64(envp + 8, 0);
 
     var pid = sys_fork();
-    if (pid < 0) { return 0 - 1; }
+    if (pid < 0) { return -1; }
     if (pid == 0) {
         # 1.16.1 audit A-2: lead a process group of its own, so a timeout
         # can kill everything this command started — a health check's hung
@@ -421,12 +421,12 @@ fn run_safe_cmd_timeout(cmd, timeout_ms) {
             var status = load32(&status_buf);
             if (WIFEXITED(status)) { return WEXITSTATUS(status); }
             if (WIFSIGNALED(status)) { return 128 + WTERMSIG(status); }
-            return 0 - 1;
+            return -1;
         }
         # ret < 0 is a real wait failure (ECHILD, EINVAL). Report it as
         # failure — never fall through to a status read, which is exactly
         # the fail-open this function exists to avoid.
-        if (ret < 0) { return 0 - 1; }
+        if (ret < 0) { return -1; }
         sleep_ms(20);
     }
 
@@ -446,7 +446,7 @@ fn run_safe_cmd_timeout(cmd, timeout_ms) {
         if (sys_waitpid(pid, &kbuf, WNOHANG) != 0) { kdone = 1; }
         else { sleep_ms(20); }
     }
-    return 0 - 1;
+    return -1;
 }
 
 # Run a SafeCommand under the default bound and return its exit code.
@@ -728,7 +728,7 @@ fn fork_exec_service(svc_def) {
     if (_env_files_preflight(svc_def_env_files(svc_def)) != 0) { return -1; }
 
     var pid = sys_fork();
-    if (pid < 0) { return 0 - 1; }
+    if (pid < 0) { return -1; }
 
     if (pid == 0) {
         # Child process
@@ -906,7 +906,7 @@ fn process_kill(pid) {
 fn _wait_status_code(status) {
     if (WIFEXITED(status)) { return WEXITSTATUS(status); }
     if (WIFSIGNALED(status)) { return 128 + WTERMSIG(status); }
-    return 0 - 1;
+    return -1;
 }
 
 # Graceful stop: SIGTERM, wait up to timeout_ms, then SIGKILL.
@@ -919,12 +919,12 @@ fn _wait_status_code(status) {
 # then SIGKILLed whatever held the pid by then. A probe now runs before the
 # first signal and every wait failure ends the stop without signalling.
 fn process_stop(pid, timeout_ms) {
-    if (pid <= 0) { return 0 - 1; }
+    if (pid <= 0) { return -1; }
     var status_buf[8];
     store64(&status_buf, 0);
     var probe = sys_waitpid(pid, &status_buf, WNOHANG);
     if (probe > 0) { return _wait_status_code(load32(&status_buf)); }
-    if (probe < 0) { return 0 - 1; }
+    if (probe < 0) { return -1; }
 
     process_terminate(pid);
 
@@ -933,7 +933,7 @@ fn process_stop(pid, timeout_ms) {
         store64(&status_buf, 0);
         var ret = sys_waitpid(pid, &status_buf, WNOHANG);
         if (ret > 0) { return _wait_status_code(load32(&status_buf)); }
-        if (ret < 0) { return 0 - 1; }
+        if (ret < 0) { return -1; }
         sleep_ms(50);
     }
 
@@ -947,11 +947,11 @@ fn process_stop(pid, timeout_ms) {
         store64(&status_buf, 0);
         var kret = sys_waitpid(pid, &status_buf, WNOHANG);
         if (kret > 0) { return _wait_status_code(load32(&status_buf)); }
-        if (kret < 0) { return 0 - 1; }
+        if (kret < 0) { return -1; }
         sleep_ms(10);
     }
 
-    return 0 - 1;
+    return -1;
 }
 
 # (name, code) result pair for proc_table_stop_all.
@@ -981,11 +981,11 @@ fn proc_table_stop_all(timeout_ms) {
             store64(&pbuf, 0);
             var probe = sys_waitpid(pid, &pbuf, WNOHANG);
             if (probe > 0) {
-                var pcode = 0 - 1;
+                var pcode = -1;
                 if (WIFEXITED(load32(&pbuf))) { pcode = WEXITSTATUS(load32(&pbuf)); }
                 vec_push(results, _stop_result(name, pcode));
             } elif (probe < 0) {
-                vec_push(results, _stop_result(name, 0 - 1));
+                vec_push(results, _stop_result(name, -1));
             } else {
                 process_terminate(pid);
                 vec_push(remaining, name);
@@ -1007,11 +1007,11 @@ fn proc_table_stop_all(timeout_ms) {
                 var ret = sys_waitpid(pid, &status_buf, WNOHANG);
                 if (ret > 0) {
                     var status = load64(&status_buf);
-                    var code = 0 - 1;
+                    var code = -1;
                     if (WIFEXITED(status)) { code = WEXITSTATUS(status); }
                     vec_push(results, _stop_result(name, code));
                 } elif (ret < 0) {
-                    vec_push(results, _stop_result(name, 0 - 1));
+                    vec_push(results, _stop_result(name, -1));
                 } else {
                     vec_push(still_alive, name);
                 }
@@ -1028,7 +1028,7 @@ fn proc_table_stop_all(timeout_ms) {
         var name = vec_get(remaining, i);
         var pid = map_get(g_proc_table, name);
         if (pid > 0) { process_kill(pid); }
-        vec_push(results, _stop_result(name, 0 - 1));
+        vec_push(results, _stop_result(name, -1));
     }
 
     # Clear the table
@@ -1077,7 +1077,7 @@ fn proc_table_reap() {
                 var ret = sys_waitpid(pid, &status_buf, WNOHANG);
                 if (ret > 0) {
                     var status = load64(&status_buf);
-                    var code = 0 - 1;
+                    var code = -1;
                     if (WIFEXITED(status)) { code = WEXITSTATUS(status); }
                     if (exited == 0) { exited = vec_new(); }
                     var pair = alloc(16);
@@ -1133,7 +1133,7 @@ fn proc_table_reap_orphans_into(out, cap) {
     var guard = 0;
     while (draining == 1 && guard < 256) {
         var status_buf[8];
-        var ret = sys_waitpid(0 - 1, &status_buf, WNOHANG);
+        var ret = sys_waitpid(-1, &status_buf, WNOHANG);
         if (ret <= 0) { draining = 0; }   # 0 = no exited child; <0 = ECHILD/ESRCH
         else {
             if (out != 0 && n < cap) { store64(out + n * 8, ret); }
@@ -1177,10 +1177,10 @@ enum ArgOpenFlag { ARG_O_NOCTTY = 256; }
 # joined every digit in the buffer ("12 junk 34" -> 1234) and had no pid_t
 # bound, so "4294967295" became kill(-1) once the kernel truncated it.
 fn _parse_pid_strict(p, n) {
-    if (n <= 0) { return 0 - 1; }
+    if (n <= 0) { return -1; }
     if (load8(p + n - 1) == 10) { n = n - 1; }
-    if (n == 0) { return 0 - 1; }
-    if (n > 10) { return 0 - 1; }   # 2147483647 is ten digits
+    if (n == 0) { return -1; }
+    if (n > 10) { return -1; }   # 2147483647 is ten digits
     var v = 0;
     var ok = 1;
     var i = 0;
@@ -1191,9 +1191,9 @@ fn _parse_pid_strict(p, n) {
         if (ok == 1) { v = v * 10 + (c - 48); }
         i = i + 1;
     }
-    if (ok == 0) { return 0 - 1; }
-    if (v < 2) { return 0 - 1; }
-    if (v > 2147483647) { return 0 - 1; }
+    if (ok == 0) { return -1; }
+    if (v < 2) { return -1; }
+    if (v > 2147483647) { return -1; }
     return v;
 }
 
@@ -1216,7 +1216,7 @@ fn _parse_pid_strict(p, n) {
 fn read_pid_file_safe(path, expected_uid) {
     var oflags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK | ARG_O_NOCTTY | O_CLOEXEC;
     var fd = sys_open(str_data(path), oflags, 0);
-    if (fd < 0) { return 0 - 1; }
+    if (fd < 0) { return -1; }
 
     # fstat(fd, &stat_buf) — offsets via the arch-dispatched Stat enum.
     #
@@ -1233,7 +1233,7 @@ fn read_pid_file_safe(path, expected_uid) {
     var st_ret = syscall(SYS_FSTAT, fd, &stat_buf);
     if (st_ret < 0) {
         sys_close(fd);
-        return 0 - 1;
+        return -1;
     }
     var st_mode = load32(&stat_buf + STAT_MODE);
     var st_uid  = load32(&stat_buf + STAT_UID);
@@ -1242,18 +1242,18 @@ fn read_pid_file_safe(path, expected_uid) {
     # never a FIFO, socket, device or directory.
     if ((st_mode & 0xF000) != 0x8000) {
         sys_close(fd);
-        return 0 - 1;
+        return -1;
     }
 
     # Reject group- or other-writable pid files (mode & 0o022 = 18 dec).
     if ((st_mode & 18) != 0) {
         sys_close(fd);
-        return 0 - 1;
+        return -1;
     }
     # Reject ownership mismatch when caller specified an expected uid.
     if (expected_uid >= 0 && st_uid != expected_uid) {
         sys_close(fd);
-        return 0 - 1;
+        return -1;
     }
 
     # Read pid integer.
@@ -1262,7 +1262,7 @@ fn read_pid_file_safe(path, expected_uid) {
     sys_close(fd);
 
     var pid = _parse_pid_strict(&buf, n);
-    if (pid < 0) { return 0 - 1; }
-    if (process_alive(pid) == 0) { return 0 - 1; }
+    if (pid < 0) { return -1; }
+    if (process_alive(pid) == 0) { return -1; }
     return pid;
 }
