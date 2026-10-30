@@ -14,7 +14,6 @@ that gate opens.
 
 | Release | Theme | Can start |
 |---|---|---|
-| [1.17.2](#1172--ci-native-aarch64-and-the-state-file) | Native aarch64 CI; `state.md` automation; CI bench fix; doc-tree conformance | Once a runner is chosen |
 | [1.18.0](#1180--process-identity-and-the-exec-paths) | pidfd process identity; health-check commands under the pre-exec hook | Now |
 
 **Every release:**
@@ -24,31 +23,6 @@ that gate opens.
 **The next cyrius pin has no release number.** 1.16.3 moved to 6.7.18, the latest release,
 with every dependency at its latest tag. The next move takes the next free number when a
 newer cyrius is wanted; [its checklist](#every-cyrius-pin-move) is below.
-
----
-
-## 1.17.2 — CI: native aarch64, and the state file
-
-The qemu-user sweep (`scripts/aarch64-sweep.sh`) catches codegen regressions, not
-real-hardware behaviour. `scripts/aarch64-pi-smoke.sh` proves the hardware path by hand:
-argonaut initialises in ~536 µs on an RPi4.
-
-- [ ] **Pick the runner:** `ubuntu-24.04-arm`, or a self-hosted Pi. Match agnos and
-      kybernet.
-- [ ] **CI job:** an `aarch64-native` build and the full `.tcyr` suite, plus the qemu PID-1
-      harness when KVM is available.
-- [ ] **Release gate:** once that job is green, the `argonaut-<VER>-aarch64-linux` artifact
-      becomes required, not best-effort.
-- [ ] **The release workflow bumps `docs/development/state.md`.** Today it is edited by
-      hand every release.
-- [ ] **Run the CI bench step with `bash`.** `ci.yml` runs `sh scripts/bench-history.sh`,
-      but the script needs bash (`pipefail`, `BASH_SOURCE`, `[[`), and ubuntu's `sh` is
-      dash. `|| true` and `continue-on-error` hide the failure.
-- [ ] **Delete `scripts/version.sh`.** It edits `Cargo.toml` (Rust-era), fails under
-      `set -e`, and nothing calls it; the manifest reads `${file:VERSION}`.
-- [ ] **Doc-tree conformance** with the first-party documentation standard: add
-      `CODE_OF_CONDUCT.md` (and add it to the CI required-files list), a `README.md` in
-      `docs/adrs/` and in `docs/architecture/`, and `docs/examples/`.
 
 ---
 
@@ -103,6 +77,13 @@ release is next.
 - [ ] **Delete `cyrius.lock` and `lib/` before `cyrius deps`.** Otherwise old commit pins,
       and leaves the new toolchain no longer needs, survive into the lock.
 - [ ] Check every resolved library against its upstream tag byte for byte.
+- [ ] **Check that the new release ships both linux tarballs and a signed `SHA256SUMS`.**
+      `scripts/ci-install-cyrius.sh` installs x86_64-linux for the CI and release jobs and
+      aarch64-linux for the arm64 job, and refuses a release whose signature does not verify
+      against its pinned key.
+- [ ] **Check that the native and cross aarch64 builds still match** (`cmp`), before CI
+      does. Build `src/main.cyr` with `--aarch64` on x86_64, and natively with the
+      aarch64-linux tarball's `cycc` (on arm64, or under `qemu-aarch64`).
 - [ ] Re-cut the qemu L3 helper (`qemu/helpers/`) with `CYRIUS_DCE=1`, as
       `qemu/build-initramfs.sh` builds it. Then delete the `cyrius.lock` its resolve writes.
 - [ ] **Re-check the two stdlib layouts argonaut reads directly** (`state.md` Toolchain):
@@ -194,3 +175,5 @@ library. These items are kybernet's to do; each touches argonaut's surface.
 - **Scheduling and timer-based services** — that's samay (argonaut starts and stops; samay
   decides when)
 - **D-Bus interface** — only if the AGNOS desktop requires it
+- **Automating `docs/development/state.md`** — it is refreshed by hand as part of every
+  release; no generator, CI gate or workflow commit

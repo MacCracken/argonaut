@@ -14,10 +14,9 @@ entry in `src/syscall_compat.cyr`. That file's header records the ESYSXLAT rules
 each of its numbers was verified under `qemu-aarch64 -strace`. A literal `syscall(N, …)`
 is a defect.
 
-The binary ships in CI / release artifacts as
-`argonaut-<VER>-aarch64-linux` alongside the x86_64 build,
-**best-effort** (skipped without failing the run when the
-toolchain release didn't bundle `cycc_aarch64`).
+Every release ships it as `argonaut-<VER>-aarch64-linux` beside the x86_64 build. It is
+required: a toolchain without `cycc_aarch64`, a failed cross-build, or a mismatch with the
+native build (below) fails CI and the release.
 
 ## Producer
 
@@ -29,20 +28,25 @@ The aarch64 binary is about 3.5× the x86_64 one. Most of the gap is DCE: on aar
 fills dead code with NOPs instead of compacting it, because there is no compaction repair
 model yet. Current sizes are in `docs/development/state.md` (Binary).
 
-## Smoke (CI)
+## CI on arm64 hardware
 
-CI runs `qemu-aarch64` on the cross-built binary and grep-asserts
-`"all systems nominal"` on stdout. Best-effort:
+The `aarch64-native` job in `.github/workflows/ci.yml` runs on a GitHub-hosted
+`ubuntu-26.04-arm` runner:
+- it installs cyrius's aarch64-linux tarball, a native `cycc` and `cyrius`;
+- it builds `src/main.cyr` there, and requires the result to be **byte-identical** to the
+  x86_64 job's cross-build;
+- it smoke-tests that binary (`all systems nominal`) and runs every `.tcyr` suite natively.
 
-- Skips with a warning when `cycc_aarch64` isn't in the toolchain
-  bin dir.
-- Skips with a warning when neither `qemu-aarch64-static` nor
-  `qemu-aarch64` is on PATH.
+**The byte-identity is what makes the release artifact a tested one.** The release ships
+the cross-built binary, and rebuilds it from the tag only to `cmp` it against the bytes CI
+tested. A toolchain whose native and cross compilers disagree fails CI instead of shipping
+a binary no suite ran.
 
 ## Known-failure surface
 
 **None since 1.13.1.** `scripts/aarch64-sweep.sh` runs every `.tcyr` suite under
-qemu-user with no known-failure allowance, so any failure is a regression. The current
+qemu-user with no known-failure allowance, so any failure is a regression. CI runs the same
+suites natively (above), with the same rule. The current
 count, identical to x86_64, is in `docs/development/state.md` (Suites).
 
 ### Superseded: the "qemu-user emulation limits" claim (1.5.4 - 1.13.0)
@@ -89,7 +93,7 @@ received.
 
 ## Real-hardware validation
 
-Not in CI yet; native aarch64 CI is roadmap 1.17.2. Manual paths:
+CI covers a GitHub-hosted arm64 runner (above). Other hardware is checked by hand:
 
 - **RPi4 (Cortex-A72):** `scripts/aarch64-pi-smoke.sh` builds the static binary on
   x86_64, copies it to the Pi and runs it. It has been validated by hand (argonaut

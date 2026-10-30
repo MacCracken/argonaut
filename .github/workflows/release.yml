@@ -8,9 +8,11 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - '[0-9]+.[0-9]+.[0-9]+'
 
+# Read-only by default, the CI gate included. Only the publish job writes.
 permissions:
-  contents: write
+  contents: read
 
+# Actions are pinned to a full commit SHA, with the release tag beside it.
 jobs:
   ci:
     name: CI Gate
@@ -19,9 +21,12 @@ jobs:
   build:
     name: Build Release
     needs: [ci]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Verify version
         run: |
@@ -34,28 +39,9 @@ jobs:
           echo "Version verified: $TAG (cyrius.cyml pulls from VERSION via \${file:VERSION})"
 
       - name: Install Cyrius toolchain
-        # Version-pinned layout: cycc resolves arch-peer includes
-        # (syscalls_x86_64_linux.cyr etc.) under ~/.cyrius/versions/<V>/lib.
-        run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
-          echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          VERSIONED="$HOME/.cyrius/versions/$CYRIUS_VERSION"
-          mkdir -p "$VERSIONED/bin" "$VERSIONED/lib"
-          cp "$CYRIUS_DIR/bin/"* "$VERSIONED/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$VERSIONED/lib/" 2>/dev/null || true
-          # cycc_aarch64 (renamed from cc5_aarch64 in Cyrius 6.0) may
-          # ship under bin/ or at the tarball top-level depending on
-          # the release. Cover both.
-          [ -f "$CYRIUS_DIR/cycc_aarch64" ] && cp "$CYRIUS_DIR/cycc_aarch64" "$VERSIONED/bin/"
-          chmod +x "$VERSIONED/bin/"* 2>/dev/null || true
-          ln -sfn "$VERSIONED/bin" "$HOME/.cyrius/bin"
-          ln -sfn "$VERSIONED/lib" "$HOME/.cyrius/lib"
-          echo "$CYRIUS_VERSION" > "$HOME/.cyrius/current"
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+        # The cyrius.cyml pin, signature- and checksum-verified (see the
+        # script's header).
+        run: bash scripts/ci-install-cyrius.sh
 
       - name: Resolve deps
         run: cyrius deps
@@ -76,19 +62,27 @@ jobs:
           CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut
           echo "argonaut: $(wc -c < build/argonaut) bytes"
 
-      - name: Cross-build aarch64 (best-effort)
-        # Ship aarch64 alongside x86_64 when the toolchain bundles
-        # cycc_aarch64. Skip without failing the run when absent; the
-        # release publishes whatever binaries were produced.
+      - name: Cross-build aarch64
+        # Required: every release ships argonaut-<VER>-aarch64-linux.
         run: |
-          if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ]; then
-            echo "::warning::cycc_aarch64 not shipped with this Cyrius release — aarch64 binary skipped"
-            exit 0
-          fi
-          CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/argonaut-aarch64
+          CYRIUS_DCE=1 cyrius build --check-lib-sync --aarch64 src/main.cyr build/argonaut-aarch64
           echo "argonaut-aarch64: $(wc -c < build/argonaut-aarch64) bytes"
-          file build/argonaut-aarch64 | grep -q "aarch64" || {
+          file build/argonaut-aarch64 | grep -q "ARM aarch64" || {
             echo "ERROR: build/argonaut-aarch64 is not an aarch64 ELF"; exit 1; }
+
+      - name: Download the binaries the CI gate tested
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: build-*
+          path: tested
+
+      - name: Release binaries are the ones CI tested
+        # The CI gate tested these bytes: x86_64 in its build and qemu jobs,
+        # aarch64 on arm64 hardware. The rebuild from the tag must match both.
+        run: |
+          cmp build/argonaut tested/build-x86_64/argonaut
+          cmp build/argonaut-aarch64 tested/build-aarch64/argonaut-aarch64
+          echo "x86_64 and aarch64 release binaries match the CI gate's"
 
       - name: Test
         run: |
@@ -108,23 +102,16 @@ jobs:
         run: |
           ./build/argonaut | grep -q "all systems nominal"
 
-      - name: Clean toolchain artifacts
-        run: rm -f cyrius-*.tar.gz
-
       - name: Archive
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           git archive --format=tar.gz --prefix="argonaut-${TAG}/" -o "argonaut-${TAG}-src.tar.gz" HEAD
           cp build/argonaut "argonaut-${TAG}-x86_64-linux"
-          # aarch64 binary is best-effort (cycc_aarch64 may not be
-          # in the toolchain). Include it when produced; the SHA256SUMS
-          # glob lists whatever -linux binaries exist.
-          if [ -f build/argonaut-aarch64 ]; then
-            cp build/argonaut-aarch64 "argonaut-${TAG}-aarch64-linux"
-          fi
+          cp build/argonaut-aarch64 "argonaut-${TAG}-aarch64-linux"
           sha256sum argonaut-*.tar.gz argonaut-*-linux > SHA256SUMS
+          cat SHA256SUMS
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-artifacts
           path: |
@@ -136,10 +123,16 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-artifacts
 
@@ -149,7 +142,7 @@ jobs:
           awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > /tmp/body.md
           [ -s /tmp/body.md ] || echo "No changelog entry for $TAG." > /tmp/body.md
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: "argonaut ${{ github.ref_name }}"
           body_path: /tmp/body.md

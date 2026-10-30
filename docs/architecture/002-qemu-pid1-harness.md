@@ -93,8 +93,12 @@ through from the host CPU. Practical consequence:
   accordingly; runs that fall through to TCG print a clear
   "harness needs KVM" diagnostic and fail with the
   invariant-TSC panic.
-- **CI:** no workflow runs the harness yet. It is a local gate run at every release,
-  and running it in CI (where KVM is available) is roadmap 1.17.2.
+- **CI:** the `qemu-pid1` job in `.github/workflows/ci.yml` runs the boot test and the
+  harness on a GitHub-hosted `ubuntu-26.04` runner. It boots the runner's own kernel and
+  opens `/dev/kvm` to the runner user with a udev rule.
+  - **Skipped, with a warning on the run,** where the runner has no `/dev/kvm` or its CPU
+    reports no invariant TSC (`nonstop_tsc`). Anywhere else, a failure fails CI.
+  - It stays a local gate at every release too.
 - **Real-hardware:** any modern x86_64 host has the bit;
   not an issue.
 

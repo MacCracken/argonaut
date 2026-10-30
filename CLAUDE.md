@@ -186,23 +186,27 @@ Rationale: argonaut is PID 1 — boot sequencing, dependency resolution, and hea
 ## CI / Release
 
 - **Toolchain pin**: `cyrius = "X.Y.Z"` field in `cyrius.cyml [package]`. **No separate `.cyrius-toolchain`.** CI and release both read this; no hardcoded version strings in YAML
+- **Toolchain install**: `scripts/ci-install-cyrius.sh`, the one install path for every job. It verifies the release's `SHA256SUMS.sig` against a pinned cyrius key before trusting the tarball's checksum, and picks the x86_64 or aarch64 tarball by host
+- **Runners and actions**: GitHub-hosted only, never self-hosted: `ubuntu-26.04`, plus `ubuntu-26.04-arm` for the native aarch64 job. Every action is pinned to a full commit SHA with its release tag in a comment; bump both together, to the latest stable release
 - **Lockfile gate**: `cyrius.lock` checked in; CI runs `cyrius deps --verify`
 - **Dead code elimination**: every `cyrius build` in CI/release runs with `CYRIUS_DCE=1`. Binary size is a release metric — track in `state.md`
 - **Tag filter**: release workflow accepts both `v[0-9]+.[0-9]+.[0-9]+` and `[0-9]+.[0-9]+.[0-9]+` shapes; semver shape verified before build
 - **Version-verify gate**: release asserts `VERSION == git tag` (semver shape checked) before building; the manifest reads `${file:VERSION}`, and CI's docs job checks that VERSION appears in the CHANGELOG. Mismatch fails the run
-- **Lint / fmt sweep**: CI auto-discovers `src/*.cyr` + `tests/tcyr/*.tcyr` + `tests/bcyr/*.bcyr`; `cyrius lint` warnings are blocking; `cyrius fmt <file> --check` drift is blocking
-- **ELF magic check**: every CI build verifies the produced binary starts with `7f 45 4c 46`
+- **Lint / fmt sweep**: CI auto-discovers `src/*.cyr` + `tests/tcyr/*.tcyr` + `tests/bcyr/*.bcyr` + `docs/examples/*.cyr`; `cyrius lint` warnings are blocking; `cyrius fmt <file> --check` drift is blocking
+- **ELF magic check**: every CI build verifies the produced binary starts with `7f 45 4c 46` (with `od`; the 26.04 images have no `xxd`)
+- **aarch64 is required**: the release ships the x86_64-hosted cross-build, and CI's `aarch64-native` job requires the native arm64 build to be byte-identical to it before running every suite on hardware. The release rebuilds both binaries from the tag and `cmp`s them against the bytes CI tested
 - **Workflow layout**:
-  - `.github/workflows/ci.yml` — `build` job: toolchain install → deps resolve + verify → lint → fmt → vet → DCE build (`--check-lib-sync`) → ELF check → smoke → aarch64 cross-build + qemu-user smoke (best-effort) → every tcyr suite → bench (non-fatal artifact). Plus a `security` pattern scan and a `docs` job (required files, VERSION in CHANGELOG). Reusable via `workflow_call`
-  - `.github/workflows/release.yml` — CI gate → version verify → deps resolve + verify → DCE build → aarch64 cross-build (best-effort) → tests → smoke → archives (source tarball, x86_64 binary, aarch64 binary when built, SHA256SUMS, cyrius.lock) → GitHub release
+  - `.github/workflows/ci.yml` — `build` job: toolchain install → deps resolve + verify → lint → fmt → vet → DCE build (`--check-lib-sync`) → ELF check → smoke → aarch64 cross-build → upload both binaries → every tcyr suite → docs examples → bench (`bash`; numbers recorded, not gated). `aarch64-native` (arm64 runner): native build → `cmp` with the cross-build → smoke → every tcyr suite. `qemu-pid1`: boot test + PID-1 harness under KVM, skipped with a warning where the runner lacks KVM or an invariant TSC. Plus a `security` pattern scan and a `docs` job (required files, VERSION in CHANGELOG). Read-only token; reusable via `workflow_call`
+  - `.github/workflows/release.yml` — CI gate → version verify → deps resolve + verify → DCE build → aarch64 cross-build → `cmp` both against the CI gate's binaries → tests → smoke → archives (source tarball, x86_64 and aarch64 binaries, SHA256SUMS, cyrius.lock) → GitHub release (the only job with `contents: write`)
 - **Concurrency**: CI uses `cancel-in-progress: true` keyed on workflow + ref — only the latest push is tested
-- **State sync**: every release also bumps `docs/development/state.md`, by hand today; automating it is roadmap 1.17.2. Outside a release, state.md should not need editing
+- **State sync**: every release bumps `docs/development/state.md` by hand, as part of the release work. It is not automated, and must not be: no generator, CI gate or workflow commit. Outside a release, state.md should not need editing
 
 ## Docs
 
-- [`docs/adrs/`](docs/adrs/) — architecture decision records. *Why X over Y?*
-- [`docs/architecture/`](docs/architecture/) — non-obvious constraints and quirks
+- [`docs/adrs/`](docs/adrs/) — architecture decision records. *Why X over Y?* Indexed in its `README.md`
+- [`docs/architecture/`](docs/architecture/) — non-obvious constraints and quirks. Indexed in its `README.md`
 - [`docs/guides/`](docs/guides/) — task-oriented how-tos
+- [`docs/examples/`](docs/examples/) — runnable examples (`cyrius run docs/examples/<x>.cyr`); CI runs each one
 - [`docs/development/roadmap.md`](docs/development/roadmap.md) — the pinned release plan, gated work, non-goals
 - [`docs/development/state.md`](docs/development/state.md) — **live state snapshot, refreshed every release**
 - [`docs/audit/`](docs/audit/) — security audit reports (`YYYY-MM-DD-audit.md`)

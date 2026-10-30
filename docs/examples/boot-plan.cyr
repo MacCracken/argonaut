@@ -1,0 +1,81 @@
+# boot-plan.cyr — the order argonaut would start services in, without starting any.
+#
+# Why: dependency resolution is the first thing a consumer reasons about. argonaut
+# groups services into waves by dependency depth (Kahn's algorithm, ADR-008), and
+# every service in a wave can start in parallel. This example builds three service
+# definitions, prints their waves and their flat order, and then shows that a
+# dependency cycle is refused. Nothing is spawned, so it runs unprivileged:
+#
+#     cyrius run docs/examples/boot-plan.cyr
+#
+# Stdlib and dependencies come from cyrius.cyml; only argonaut's modules are
+# included, in src/main.cyr's order.
+
+include "lib/thread_local.cyr"
+include "src/syscall_compat.cyr"
+include "src/types.cyr"
+include "src/boot.cyr"
+include "src/services.cyr"
+
+# A service definition named `name` that depends on each name in `deps`.
+fn service(name, deps) {
+    var sd = svc_def_new(str_from(name), str_from(name), str_from("/bin/true"));
+    for (var i = 0; i < vec_len(deps); i = i + 1) {
+        vec_push(svc_def_deps(sd), str_from(vec_get(deps, i)));
+    }
+    return sd;
+}
+
+fn print_waves(waves) {
+    for (var w = 0; w < vec_len(waves); w = w + 1) {
+        var wave = vec_get(waves, w);
+        print_num(w);
+        print(":", 1);
+        for (var i = 0; i < vec_len(wave); i = i + 1) {
+            print(" ", 1);
+            str_print(vec_get(wave, i));
+        }
+        println("");
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # db and cache have no dependencies; api needs both.
+    var none = vec_new();
+    var api_deps = vec_new();
+    vec_push(api_deps, "db");
+    vec_push(api_deps, "cache");
+
+    var svcs = vec_new();
+    vec_push(svcs, service("api", api_deps));
+    vec_push(svcs, service("db", none));
+    vec_push(svcs, service("cache", none));
+
+    println("waves (each starts in parallel, sorted by name):");
+    print_waves(resolve_service_waves(svcs));
+
+    println("flat order:");
+    var order = resolve_service_order(svcs);
+    for (var i = 0; i < vec_len(order); i = i + 1) {
+        print("  ", 2);
+        str_println(vec_get(order, i));
+    }
+
+    # A cycle (a -> b -> a) has no start order; both resolvers return 0.
+    var to_a = vec_new();
+    vec_push(to_a, "a");
+    var to_b = vec_new();
+    vec_push(to_b, "b");
+    var cyclic = vec_new();
+    vec_push(cyclic, service("a", to_b));
+    vec_push(cyclic, service("b", to_a));
+    if (resolve_service_waves(cyclic) == 0) {
+        println("cycle a -> b -> a: refused");
+    }
+    return 0;
+}
+var r = main();
+syscall(SYS_EXIT, r);

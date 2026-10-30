@@ -6,10 +6,19 @@
 
 ## Version
 
-**1.17.1** (the roadmap's 1.17.1: the 101 `0 - N` literal sites in `src/` are written
-`-N`. No functional change. The binary is not byte-identical, because `-N` loads one immediate
-where `0 - N` computed a subtraction, but every differing byte is explained (CHANGELOG [1.17.1]
-Proof). 45 suites / 1,760 assertions on x86_64 and under qemu-aarch64. Bench gate: neutral.)
+**1.17.2** (the roadmap's 1.17.2: CI and release only.
+- **CI runs on arm64 hardware:** a native build, byte-identical to the shipped cross-build,
+  and every suite, on a GitHub-hosted `ubuntu-26.04-arm` runner. The qemu PID-1 harness runs
+  in CI under KVM.
+- **The aarch64 release binary is required.** The release `cmp`s both binaries against the
+  bytes CI tested.
+- **Workflows:** Ubuntu 26.04, the latest stable actions pinned by SHA, and a toolchain
+  installer that verifies cyrius's signed `SHA256SUMS`.
+- **Also:** the CI bench step runs under `bash`, `scripts/version.sh` is gone, and the doc tree
+  conforms to the first-party standard.
+
+No change to `src/`: both binaries are 1.17.1's bytes. 45 suites / 1,760 assertions. Bench gate:
+neutral. **The new CI jobs have not run on GitHub yet;** the first push to `main` runs them.)
 
 1.17.0 is the last release that changed behaviour; see CHANGELOG [1.17.0] Breaking.
 
@@ -20,7 +29,9 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
 
 - `cyrius = "6.7.18"` in `cyrius.cyml [package]` and `qemu/helpers/cyrius.cyml`.
   The manifest is the only pin source (no `.cyrius-toolchain`); CI and release
-  read it. A consumer that compiles argonaut's `src/` needs cyrius ≥ 6.7.9
+  read it, and install it with `scripts/ci-install-cyrius.sh`. That script takes the
+  x86_64-linux or aarch64-linux tarball by host, and refuses one whose `SHA256SUMS` is not
+  signed by the pinned cyrius release key. A consumer that compiles argonaut's `src/` needs cyrius ≥ 6.7.9
   (`sys_ppoll`, used by `ag_sys_poll` since 1.16.1; 1.16.1–1.16.3 said 6.6.8 in error).
   Measured at 1.17.0: the tree builds on 6.7.9, and kybernet on 6.6.20 fails with
   `undefined function 'sys_ppoll'`.
@@ -92,9 +103,10 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
 
 ## Binary
 
-- **x86_64: 770,560 B**, a statically linked ELF, at 1.17.1
+- **x86_64: 770,560 B**, a statically linked ELF, at 1.17.2
   (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`).
   2,982 fns are unreachable and 1,115,193 B of dead code is eliminated.
+  - **1.17.2 is byte-identical to 1.17.1.**
   - **1.17.1 is the same size as 1.17.0:** `.text` is 48 B shorter, inside the same
     page-aligned segment.
   - **+8,600 over 1.16.3's 761,960 B:** the limits, env-file and name-check code. The shipped
@@ -107,27 +119,32 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
     dropped from argonaut's side.
   - **The fix is upstream** (sigil or cyrius). Inside an initramfs the file sits in RAM, and the
     qemu boot test still boots at `-m 96M`.
-- **aarch64: 2,187,512 B** at 1.17.1 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`),
-  the same as 1.17.0. 2,982 fns are unreachable and 1,320,632 B is NOPed. 1.17.0 was +4,488
+- **aarch64: 2,187,512 B** at 1.17.2 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`),
+  byte-identical to 1.17.1's and the same size as 1.17.0's. The native compiler (the
+  aarch64-linux tarball's `cycc`) emits the same bytes as this cross-build, which CI now
+  requires. 2,982 fns are unreachable and 1,320,632 B is NOPed. 1.17.0 was +4,488
   over 1.16.3's 2,183,024 B (1.16.3 was +612,536, the toolchain). aarch64 DCE fills dead code with
   NOPs instead of compacting, so new code usually shows in full.
 - **L3 helper: 15,080 B**, a static ELF (`qemu/helpers/l3-helper`), re-cut under
   6.7.18 at 1.16.3 with `CYRIUS_DCE=1`. It is bundled into the qemu harness
   initramfs as `/bin/l3-helper`. Its build is warning-free.
-- **`cyrius capacity`** at 1.17.0: `fn_table` 3,745 / 131,072, `string_data`
-  382,699 / 2,097,152.
+- **`cyrius capacity`** at 1.17.2: `fn_table` 3,745 / 131,072, `string_data`
+  382,699 / 2,097,152 (unchanged since 1.17.0).
 
 ## Suites
 
 - **x86_64: 45 `.tcyr` suites / 1,760 assertions**, 0 failures (cyrius 6.7.18), unchanged
-  at 1.17.1. +90 at 1.17.0: `spawn_rlimits` (14), `spawn_env_files` (52), `register_names` (22), and
+  at 1.17.2. +90 at 1.17.0: `spawn_rlimits` (14), `spawn_env_files` (52), `register_names` (22), and
   `deferred_fixes` +3 / `harden_proc` −1 from the removals.
 - **qemu-user caveats the suites handle:** qemu drops a guest's `RLIMIT_AS`, and reports no
   `MSG_CTRUNC` for SCM_RIGHTS on a SO_PASSCRED socket. `spawn_rlimits` and `deferred_fixes`
   probe the platform for each and assert what it does.
 - **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 45 / 45, 1,760 assertions**,
-  identical to x86_64. Run on the dev host at 1.17.1. CI still runs only the
-  aarch64 smoke; native aarch64 CI is roadmap 1.17.2.
+  identical to x86_64. Run on the dev host at 1.17.1; 1.17.2 changes no source or test.
+- **aarch64 on hardware (CI):** from 1.17.2, `ci.yml`'s `aarch64-native` job runs every suite on
+  a GitHub-hosted `ubuntu-26.04-arm` runner, after `cmp`-ing its native build with the
+  cross-build. ⚠ **It has not run yet;** the first push to `main` after 1.17.2 is its first
+  run.
 - **PID 1 in a pid namespace** (`unshare -Urpf --mount-proc ./build/argonaut`, no
   root needed): the quick check for the supervisor loop. At 1.17.0 it shows 0 idle
   wakeups in 3 s, reaps 300 simultaneous orphans with 0 zombies left, and shuts down
@@ -137,14 +154,27 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
   pass at the scripts' committed `-m 256M`. They have passed there since 1.15.5,
   the first release built with a `MAP_NORESERVE` heap (cyrius 6.6.8+). At 1.16.3 the
   boot test also boots at `-m 128M` and `-m 96M`.
+  - **In CI from 1.17.2:** the `qemu-pid1` job runs both on `ubuntu-26.04`, skipped with a
+    warning where the runner lacks KVM or an invariant TSC. ⚠ **It has not run yet;** whether
+    the runner exposes both is settled by its first run.
 - **Benches**: `src/bench_main.cyr` — 29 micros, the release gate
   (`scripts/bench-history.sh`); `tests/bcyr/argonaut.bcyr` carries the same 29,
   `tests/bcyr/api.bcyr` 8 more. History in `bench-history.csv`.
 
-### Bench snapshot (1.17.1-negative-literals, 2026-10-30)
+### Bench snapshot (1.17.2-ci-native-aarch64, 2026-10-30)
 
-**Verdict: neutral, no regression** against `1.17.0-closeout`, plus a 24-round
-interleaved A/B of the 1.17.0 and 1.17.1 bench binaries, pinned to one core:
+**Verdict: neutral.** The bench binary is byte-identical to 1.17.1's, so no code moved.
+
+- **The gate row reads 0.1–37 µs slower across the board** against
+  `1.17.1-negative-literals`, because the host was busy (load average 8–12, from unrelated
+  processes).
+- **Under that same load,** an interleaved run of the 1.17.1 and 1.17.2 bench binaries reads
+  the same elevated numbers (`mark_all_steps_complete` 53.7 vs 53.4 µs). Their spread, up to
+  ±5 µs between identical bytes, is that load's noise floor (CHANGELOG [1.17.2] Performance).
+- **Next baseline: `1.17.1-negative-literals`,** the same bytes measured on a quiet host, not
+  the 1.17.2 row. The current closeout label is `1.17.0-closeout`.
+
+The last clean snapshot, from 1.17.1's 24-round A/B pinned to one core:
 
 | Bench | 1.17.0 gate | 1.17.1 gate | A/B Δ |
 |---|---:|---:|---:|
@@ -154,13 +184,6 @@ interleaved A/B of the 1.17.0 and 1.17.1 bench binaries, pinned to one core:
 | init_new_desktop | 25.769 | 25.537 | +0.04 µs |
 | mark_all_steps_complete | 48.945 | 48.093 | +0.22 µs |
 | audit_log_record | 4.146 | 3.947 | +0.2 % |
-
-- **The chain rows' gate reads** beyond ±2 µs are noise. They are flat in the A/B, and the
-  resolver's code is the same bytes at the same addresses in both bench binaries (CHANGELOG
-  [1.17.1] Performance).
-- **Every other micro** is within ±0.5 µs.
-- **Next baseline:** `1.17.1-negative-literals` is the next gate's baseline. The current
-  closeout label is `1.17.0-closeout`.
 
 Earlier snapshots are in the CHANGELOG's Performance sections; every row is in
 `bench-history.csv`.
@@ -219,8 +242,7 @@ Earlier snapshots are in the CHANGELOG's Performance sections; every row is in
 Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 - **The next cyrius pin** has no release number; its target is open.
-- **1.17.2:** native aarch64 CI. The release workflow should bump this file; it is
-  still edited by hand.
+- **The first CI run of 1.17.2's new jobs** (`aarch64-native`, `qemu-pid1`) on GitHub.
 - **1.18.0:**
   - **pidfd process identity.** The window between reading a pid and signalling it is
     still open; the 2026-10-14 audit's B-1 closed only the PID-file side.
@@ -237,6 +259,13 @@ Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 ### Closed recently
 
+- **1.17.2:**
+  - native aarch64 CI on a GitHub-hosted arm64 runner, and a required aarch64 artifact;
+  - the qemu PID-1 harness in CI;
+  - Ubuntu 26.04 and the latest stable actions, pinned by SHA, with a signature-verified
+    toolchain install;
+  - the CI bench fix, `scripts/version.sh` removed, and the doc-tree conformance.
+  - Automating this file was dropped: it stays hand-written (roadmap Non-goals).
 - **1.17.1:** the 101 `0 - N` literal sites in `src/` are `-N`, proven equivalent at the
   instruction level.
 - **1.17.0:**
@@ -255,13 +284,14 @@ Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 ## Pending release
 
-None after 1.17.1, which is ready to tag. The next releases are 1.17.2 and 1.18.0
-([roadmap.md](roadmap.md)).
+None after 1.17.2, which is ready to tag once a push to `main` shows its new CI jobs green.
+The next release is 1.18.0 ([roadmap.md](roadmap.md)).
 
 ## Recent shipped
 
 | Releases | Date | Headline |
 |---|---|---|
+| 1.17.2 | 2026-10-30 | Native aarch64 CI and a required aarch64 artifact; qemu PID-1 harness in CI; Ubuntu 26.04, SHA-pinned actions, a verified toolchain install; doc-tree conformance |
 | 1.17.1 | 2026-10-30 | `0 - N` → `-N` at 101 sites in `src/`; no functional change, proven instruction by instruction |
 | 1.17.0 | 2026-10-29 | Deprecated APIs removed; resource limits, env files and name checks wired (ADR-014); FIFO env-file hang fixed (MEDIUM); consumer floor corrected to 6.7.9 |
 | 1.16.3 | 2026-10-29 | cyrius 6.7.18, libro 2.11.3, sigil 3.13.15; services always get std fds (MEDIUM); the documentation sweep; binary +313 KB of bayan Unicode tables |
@@ -301,9 +331,9 @@ Everything else is in [CHANGELOG.md](../../CHANGELOG.md).
 
 ## Verification
 
-- Linux x86_64 (Arch, kernel 7.2, AMD Ryzen 7 5800H, HPET clocksource) — primary dev host; CI on `ubuntu-latest`
-- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **45 / 45, 1,760 assertions at 1.17.1** (cyrius 6.7.18), identical to x86_64. CI runs the aarch64 smoke only. Real-hardware validation (RPi4, Apple Silicon, Graviton / Ampere) is roadmap 1.17.2 (native aarch64 CI). See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
-- qemu PID-1 harness under KVM — passes at 1.17.1 at the scripts' committed `-m 256M`; at 1.16.3 the boot test also booted at `-m 128M` and `-m 96M`.
+- Linux x86_64 (Arch, kernel 7.2, AMD Ryzen 7 5800H, HPET clocksource) — primary dev host; CI on GitHub-hosted `ubuntu-26.04`
+- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **45 / 45, 1,760 assertions at 1.17.1** (cyrius 6.7.18), identical to x86_64; 1.17.2 changes no source. From 1.17.2, CI builds natively and runs every suite on a GitHub-hosted `ubuntu-26.04-arm` runner (not yet run). Other hardware (RPi4, Apple Silicon, Graviton / Ampere) is checked by hand with `scripts/aarch64-pi-smoke.sh`. See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
+- qemu PID-1 harness under KVM — passes at 1.17.1 at the scripts' committed `-m 256M` (1.17.2's binary is the same bytes); at 1.16.3 the boot test also booted at `-m 128M` and `-m 96M`. In CI from 1.17.2 (`qemu-pid1`, not yet run).
 - PID 1 of an unprivileged pid namespace (`unshare -Urpf`) — idle wakeups, orphan reaping and SIGTERM shutdown, at 1.17.0.
 
 ## Audit cadence

@@ -7,6 +7,172 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.17.2] — 2026-10-30
+
+**The roadmap's 1.17.2: CI runs on arm64 hardware, and the aarch64 release binary is required.**
+- **Native aarch64 CI** on a GitHub-hosted `ubuntu-26.04-arm` runner: a native build that must
+  be byte-identical to the shipped cross-build, then the smoke test and every suite.
+- **The qemu PID-1 harness runs in CI** under KVM.
+- **The aarch64 artifact is required** in CI and the release. The release `cmp`s both
+  binaries against the bytes CI tested.
+- **Every workflow** runs on Ubuntu 26.04, with the latest stable actions pinned by commit SHA.
+  A verified toolchain installer replaces three copies of an unverified one.
+- **Also from the roadmap:** the CI bench step runs under `bash`, `scripts/version.sh` is
+  deleted, and the doc tree conforms to the first-party standard.
+- **Dropped, by decision:** automating `docs/development/state.md`. It stays a hand-written
+  part of every release (roadmap Non-goals).
+
+No change to `src/`. Both binaries are byte-identical to 1.17.1's. 45 suites / 1,760
+assertions. Bench gate neutral.
+
+### Changed — CI and release
+
+- **Runners:** every job moves from `ubuntu-latest` (24.04) to `ubuntu-26.04`. The native job
+  runs on `ubuntu-26.04-arm`. All are GitHub-hosted.
+- **Actions, the latest stable releases, each pinned to its commit SHA** with the tag in a
+  comment:
+
+  | Action | Was | Now |
+  |---|---|---|
+  | `actions/checkout` | v4 | v7.0.1 |
+  | `actions/upload-artifact` | v4 | v7.0.2 |
+  | `actions/download-artifact` | v4 | v8.0.2 |
+  | `softprops/action-gh-release` | v2 | v3.0.3 |
+
+  - **None of their breaking changes reach argonaut's use.** The new majors run on Node 24.
+  - **`download-artifact` v8 now fails on a digest mismatch,** where v4 only warned.
+  - **v5's path change applies to downloads by ID,** and argonaut downloads by name.
+- **Hardening:**
+  - **Tokens:** every workflow's token is `contents: read`. Only the release's publish job gets
+    `contents: write`.
+  - **Checkouts** don't persist git credentials.
+  - **Timeouts:** every job has one.
+- **`scripts/ci-install-cyrius.sh`, the one toolchain install path** for every job. It replaces
+  an inline block repeated in `ci.yml` and `release.yml`, which checked nothing it downloaded.
+  - **The signature:** it verifies `SHA256SUMS.sig` against a pinned cyrius release key, then
+    the tarball against `SHA256SUMS`, and fails closed before unpacking anything.
+  - **Where it comes from:** agnostik's script of the same name, extended to pick the
+    x86_64-linux or aarch64-linux tarball by host.
+  - **The key:** the same in the release asset, the cyrius repo's `keys/` and its
+    `install.sh`.
+  - **Checked:** a wrong pinned key is refused, and nothing is installed.
+- **The ELF-magic checks use `od`.** The 26.04 images do not ship `xxd`, which the old check
+  needed.
+
+### Added — CI jobs
+
+- **`aarch64-native`** (`ubuntu-26.04-arm`):
+  - it installs cyrius's aarch64-linux tarball, a native `cycc` and `cyrius`;
+  - it builds `src/main.cyr` and `cmp`s the result with the x86_64 job's cross-build;
+  - it runs the smoke test and every `.tcyr` suite.
+  - **Checked before relying on it:** the 6.7.18 native `cycc`, run under `qemu-aarch64`
+    through `cyrius build --aarch64`, emits the byte-identical 2,187,512 B binary the cross
+    compiler does.
+- **`qemu-pid1`** (`ubuntu-26.04`): the boot test and the M3 + L3 harness, against the CI
+  build of the x86_64 binary.
+  - It boots the runner's own kernel, and opens `/dev/kvm` to the runner user with a udev rule.
+  - It installs `qemu-system-x86`, `busybox-static` and `libarchive-tools` (for `bsdcpio`).
+  - **Skipped with a warning** where the runner has no `/dev/kvm`, or its CPU reports no
+    invariant TSC (`nonstop_tsc`). The harness needs both (arch note 002). Anywhere else, a
+    failure fails CI.
+- **Run the docs examples:** the build job runs every `docs/examples/*.cyr`, and lint and fmt
+  cover them.
+
+### Changed — required aarch64
+
+- **CI:** the cross-build is no longer best-effort. A toolchain without `cycc_aarch64`, or a
+  failed build, fails CI. The build also gains `--check-lib-sync`, with the same output.
+- **Release:**
+  - it ships `argonaut-<VER>-aarch64-linux` every time;
+  - before packaging, it downloads the CI gate's binaries and `cmp`s its own rebuilds against
+    them, so both shipped binaries are the bytes CI tested.
+- **Removed:** the qemu-user aarch64 smoke in the build job. The native job runs the same
+  smoke on hardware.
+
+### Fixed
+
+- **The CI bench step never ran.** `sh scripts/bench-history.sh` ran a bash script under dash,
+  and `|| true` plus `continue-on-error` hid the failure. It now runs under `bash`.
+  - **What fails the step now:** a bench that fails to build, or a run that yields no rows.
+  - **What doesn't:** the numbers, which are recorded, not gated.
+
+### Removed
+
+- **`scripts/version.sh`.** It edited a Rust-era `Cargo.toml`, failed under `set -e`, and
+  nothing called it. The manifest reads `${file:VERSION}`.
+
+### Documentation
+
+- **New:**
+  - `CODE_OF_CONDUCT.md`, in the ecosystem's form (Contributor Covenant v2.1,
+    `conduct@agnos.dev`);
+  - `docs/adrs/README.md`, the conventions and an index of ADRs 001–014 with their status;
+  - `docs/architecture/README.md`, an index of notes 001, 002 and 005 with what each affects;
+  - `docs/examples/`, with `boot-plan.cyr`: startup waves and order for three services, and a
+    refused cycle, spawning nothing.
+- **CI's required-files check** adds `CODE_OF_CONDUCT.md`, `cyrius.lock`, the three new READMEs,
+  `roadmap.md` and `state.md`.
+- **Updated:**
+  - arch notes 001 (aarch64: required, natively tested, native = cross) and 002 (the harness
+    in CI);
+  - the headers of `scripts/aarch64-sweep.sh` and `scripts/aarch64-pi-smoke.sh`;
+  - CLAUDE.md's CI / Release rules, including state sync by hand;
+  - the roadmap: 1.17.2 removed, a Non-goal added, and two checks in the pin-move checklist
+    (both tarballs and a signed `SHA256SUMS`; native = cross).
+
+### Security
+
+- **The toolchain download is authenticated.** CI and the release used to install whatever
+  the release URL served, unchecked. That toolchain builds the binary every release ships.
+  The installer now refuses a tarball whose `SHA256SUMS` is not signed by the pinned cyrius
+  key.
+- **Least-privilege workflows:**
+  - **Tokens:** read-only everywhere except the publish job.
+  - **Credentials:** checkouts don't persist them.
+  - **Actions:** pinned to commit SHAs, so a moved tag cannot change what runs.
+- **No change to `src/`,** so the binary's attack surface is 1.17.1's. The known-CVE sweep is
+  1.17.1's, from the same day.
+
+### Performance
+
+The gate ran `./scripts/bench-history.sh "1.17.2-ci-native-aarch64"` against
+`1.17.1-negative-literals`.
+
+**Verdict: neutral.**
+- **The bench binary is byte-identical to 1.17.1's** (`cmp`), so no code moved.
+- **The gate read 0.1–37 µs slower across the board** (`resolve_order_chain_100` +37.0,
+  `resolve_waves_chain_20` +6.2, `mark_all_steps_complete` +5.1). The host was busy: load
+  average 8–12, with unrelated processes each holding a core.
+- **Under that same load, an 8-round interleaved run of the 1.17.1 and 1.17.2 bench binaries**
+  reads the same elevated numbers (`mark_all_steps_complete` 53.7 vs 53.4 µs,
+  `resolve_order_chain_100` 241.8 vs 240.4). The differences between the two identical
+  binaries, up to ±5 µs, are that load's noise floor.
+- **The next gate compares against `1.17.1-negative-literals`,** measured on a quiet host from
+  the same bytes, not against this row.
+
+### Binary
+
+Unchanged: x86_64 770,560 B and aarch64 2,187,512 B, each byte-identical to 1.17.1's. The
+dead-code floor is 1.17.1's.
+
+### Verification
+
+- **Tests:** 45 / 45 and 1,760 assertions on x86_64, through the same loop CI runs. Lint,
+  `fmt --check` (now including `docs/examples/`) and `cyrius vet` are clean.
+  `cyrius deps --verify`: 69 verified.
+- **Workflows:** both parse as YAML. Every one of their 39 `run:` scripts passes `bash -n`.
+  `actionlint` was not run.
+- **The installer:** run here for both arches, it verifies and installs 6.7.18. The aarch64
+  `cycc` it installs is the one shown to match the cross compiler. A wrong pinned key is
+  refused.
+- **Not verified here: the new CI jobs themselves.** `aarch64-native` and `qemu-pid1` have not
+  run on GitHub yet. The first push to `main` runs them, before any tag.
+  - **`aarch64-native` is required:** a failure there blocks the release.
+  - **`qemu-pid1`** depends on what the runner exposes (KVM, an invariant TSC, the kernel's
+    serial console). Its first run settles that.
+
+---
+
 ## [1.17.1] — 2026-10-30
 
 **The roadmap's 1.17.1: the 101 `0 - N` literal sites in `src/` are written `-N`, and nothing

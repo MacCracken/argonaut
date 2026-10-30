@@ -7,45 +7,30 @@ on:
     branches: [main]
   workflow_call:
 
+# Every job reads only. release.yml grants contents: write to its publish job
+# alone.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Actions are pinned to a full commit SHA, with the release tag beside it.
 jobs:
   build:
     name: Build & Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Cyrius toolchain
-        # Lays out ~/.cyrius/versions/<VERSION>/{bin,lib} and symlinks
-        # ~/.cyrius/{bin,lib} -> versions/<VERSION>/{bin,lib}. cycc (was
-        # cc5, renamed in Cyrius 6.0) resolves arch-peer includes (e.g.
-        # syscalls_x86_64_linux.cyr) against the version-pinned path;
-        # the un-versioned ~/.cyrius/lib layout that worked pre-5.10.9
-        # no longer finds peer files.
-        run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
-          echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          VERSIONED="$HOME/.cyrius/versions/$CYRIUS_VERSION"
-          mkdir -p "$VERSIONED/bin" "$VERSIONED/lib"
-          cp "$CYRIUS_DIR/bin/"* "$VERSIONED/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$VERSIONED/lib/" 2>/dev/null || true
-          # cycc_aarch64 (renamed from cc5_aarch64 in Cyrius 6.0) may
-          # ship under bin/ (picked up above) or at the tarball
-          # top-level depending on the release. Cover both. Mirrors
-          # the agnosys / sankoch / yukti workaround.
-          [ -f "$CYRIUS_DIR/cycc_aarch64" ] && cp "$CYRIUS_DIR/cycc_aarch64" "$VERSIONED/bin/"
-          chmod +x "$VERSIONED/bin/"* 2>/dev/null || true
-          ln -sfn "$VERSIONED/bin" "$HOME/.cyrius/bin"
-          ln -sfn "$VERSIONED/lib" "$HOME/.cyrius/lib"
-          echo "$CYRIUS_VERSION" > "$HOME/.cyrius/current"
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+        # The cyrius.cyml pin, signature- and checksum-verified, into
+        # ~/.cyrius/versions/<V>/{bin,lib} (see the script's header).
+        run: bash scripts/ci-install-cyrius.sh
 
       - name: Verify toolchain
         run: cyrius --version
@@ -73,7 +58,7 @@ jobs:
         # Treat any cyrlint "  warn " line as a failure.
         run: |
           fail=0
-          for f in src/*.cyr tests/tcyr/*.tcyr tests/bcyr/*.bcyr; do
+          for f in src/*.cyr tests/tcyr/*.tcyr tests/bcyr/*.bcyr docs/examples/*.cyr; do
             [ -f "$f" ] || continue
             out=$(cyrius lint "$f" 2>&1)
             echo "$out"
@@ -85,18 +70,13 @@ jobs:
 
       - name: Format check
         # `cyrius fmt <file> --check` sets the exit code (0 clean / 1 drift)
-        # and leaves the file untouched. Verified non-mutating at 6.5.35.
-        #
-        # Do NOT go back to the pre-1.8.5 `diff -q <(cyrius fmt "$f") "$f"`
-        # form. Cyrius changed `fmt` between 6.5.0 and 6.5.35: it used to
-        # print the formatted source to stdout and leave the file alone;
-        # it now REWRITES IN PLACE and prints nothing. Under 6.5.35 that
-        # gate diffs an empty stream against every file — so it reports
-        # drift unconditionally *and* silently reformats the CI checkout
-        # underneath the later build/test steps.
+        # and leaves the file untouched. Plain `cyrius fmt <file>` rewrites the
+        # file in place and prints nothing, so a `diff <(cyrius fmt f) f` gate
+        # would report drift on every file and reformat the checkout under the
+        # later steps.
         run: |
           fail=0
-          for f in src/*.cyr tests/tcyr/*.tcyr tests/bcyr/*.bcyr; do
+          for f in src/*.cyr tests/tcyr/*.tcyr tests/bcyr/*.bcyr docs/examples/*.cyr; do
             [ -f "$f" ] || continue
             if ! cyrius fmt "$f" --check > /dev/null 2>&1; then
               echo "needs fmt: $f"
@@ -109,79 +89,62 @@ jobs:
         run: cyrius vet src/main.cyr
 
       - name: Build (DCE)
-        # --check-lib-sync (cyrius 6.4.63+) turns the `./lib/ shadows
-        # version-pinned <path>` warning into a hard error. It is the guard
-        # for the 1.8.5 class of defect: a stale `deps.NAME` git pin silently
-        # overlaying an OLDER copy of a stdlib-folded library on top of the
-        # toolchain snapshot, on every build, invisible to `deps --verify`
-        # (the lock is written from disk, so it records the downgraded hash).
+        # --check-lib-sync turns the `./lib/ shadows version-pinned <path>`
+        # warning into a hard error: a stale `deps.NAME` git pin must not
+        # overlay an older copy of a stdlib-folded library on the toolchain
+        # snapshot. `deps --verify` cannot see that, because the lock is
+        # written from disk.
         run: |
           mkdir -p build
           CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut
           echo "argonaut: $(wc -c < build/argonaut) bytes"
 
       - name: Verify ELF
-        run: xxd -l 4 build/argonaut | grep -q "7f45 4c46"
+        # od, not xxd: the Ubuntu 26.04 runner images do not ship xxd.
+        run: test "$(head -c 4 build/argonaut | od -An -tx1 | tr -d ' \n')" = 7f454c46
 
       - name: Smoke test
         run: |
           ./build/argonaut | tee /tmp/smoke_output
           grep -q "all systems nominal" /tmp/smoke_output
 
-      - name: Cross-build aarch64 (best-effort)
-        # Requires `cycc_aarch64` in the toolchain bin dir; skips with a
-        # warning when the toolchain release does not bundle it, rather
-        # than failing the run (the agnosys / agnostik convention).
-        # Portability is in the source, not the compiler: every syscall
-        # goes through a stdlib sys_* wrapper or src/syscall_compat.cyr
-        # (arch note 001).
+      - name: Cross-build aarch64
+        # Required. This is the binary the release ships as
+        # argonaut-<VER>-aarch64-linux. The aarch64-native job builds the same
+        # source with the native toolchain on arm64 hardware, requires the two
+        # builds to be byte-identical, and runs every suite there.
+        # Portability is in the source, not the compiler: every syscall goes
+        # through a stdlib sys_* wrapper or src/syscall_compat.cyr (arch note 001).
         run: |
-          if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ]; then
-            echo "::warning::cycc_aarch64 not shipped with this Cyrius release — skipping aarch64 cross-build"
-            exit 0
-          fi
-          CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/argonaut-aarch64
+          CYRIUS_DCE=1 cyrius build --check-lib-sync --aarch64 src/main.cyr build/argonaut-aarch64
           echo "argonaut-aarch64: $(wc -c < build/argonaut-aarch64) bytes"
-          file build/argonaut-aarch64 | grep -q "aarch64" || {
+          file build/argonaut-aarch64 | grep -q "ARM aarch64" || {
             echo "ERROR: build/argonaut-aarch64 is not an aarch64 ELF"; exit 1; }
-          xxd -l 4 build/argonaut-aarch64 | grep -q "7f45 4c46"
+          test "$(head -c 4 build/argonaut-aarch64 | od -An -tx1 | tr -d ' \n')" = 7f454c46
 
-      - name: Smoke test (aarch64 via qemu-user)
-        # Best-effort. Native aarch64 CI is roadmap 1.17.2. Use
-        # qemu-user-static if available — most stock Ubuntu / Debian
-        # runners have it preinstalled, but we don't fail the run
-        # if it's absent or the cross-build was skipped.
-        run: |
-          if [ ! -f build/argonaut-aarch64 ]; then
-            echo "::warning::aarch64 binary not produced — skipping smoke"
-            exit 0
-          fi
-          if ! command -v qemu-aarch64-static >/dev/null 2>&1 && ! command -v qemu-aarch64 >/dev/null 2>&1; then
-            echo "::warning::qemu-aarch64 not installed — skipping aarch64 smoke"
-            exit 0
-          fi
-          QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64)"
-          "$QEMU" ./build/argonaut-aarch64 | tee /tmp/smoke_aarch64
-          grep -q "all systems nominal" /tmp/smoke_aarch64
+      - name: Upload build artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-x86_64
+          path: build/argonaut
+          retention-days: 5
+
+      - name: Upload aarch64 build artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-aarch64
+          path: build/argonaut-aarch64
+          retention-days: 5
 
       - name: Test (every tcyr suite)
-        # The name used to read "28 suites / 743 assertions" while the tree
-        # actually had 33 and 921. Nothing enforced either number — the step
-        # gates on `fail -eq 0` and nothing else — so the label was free to
-        # drift, and did, for releases. Hardcoded counts in a step NAME are
-        # documentation that looks like a gate; the real counts are reported
-        # from the run itself on the summary line below.
-        #
-        # Deliberately NOT gated on a count. An assertion-total floor would be
-        # a gate on the runner's environment rather than on the code (kybernet
-        # standing rule 33), and a suite-count floor is redundant: every path
-        # through the loop increments pass or fail, so `fail -eq 0` already
-        # implies every discovered suite ran to a clean summary. Checked rather
-        # than assumed: with bash's default globbing an unmatched
-        # tests/tcyr/*.tcyr leaves the literal pattern as $t, cyrius fails on
-        # it, and fail becomes 1 — so the empty-glob case is caught too, and
-        # only `shopt -s nullglob` (which Actions does not set) would make this
-        # vacuous.
+        # Deliberately not gated on a suite or assertion count. A count in a
+        # step name drifts silently, and an assertion floor gates the runner's
+        # environment rather than the code (kybernet standing rule 33).
+        # `fail -eq 0` already implies every discovered suite reached a clean
+        # summary: each pass through the loop increments pass or fail. An
+        # unmatched glob leaves the literal pattern as $t, cyrius fails on it,
+        # and fail becomes 1, so the empty case is caught too (Actions does not
+        # set nullglob). The real counts are printed on the summary line.
         run: |
           pass=0; fail=0; asserts=0
           for t in tests/tcyr/*.tcyr; do
@@ -200,44 +163,175 @@ jobs:
           echo "suites: $pass pass, $fail fail | assertions: $asserts"
           test $fail -eq 0
 
-      - name: Bench
-        # Non-fatal: numbers go to bench-history.csv and the artifact upload.
+      - name: Run the docs examples
+        # Every docs/examples/*.cyr must still build and run against src/.
         run: |
-          if [ -f scripts/bench-history.sh ]; then
-            sh scripts/bench-history.sh "ci-${GITHUB_SHA::7}" || true
-          fi
-        continue-on-error: true
+          for f in docs/examples/*.cyr; do
+            echo "== $f"
+            cyrius run "$f"
+          done
+
+      - name: Bench
+        # bash, not sh: the script needs pipefail, BASH_SOURCE and [[ ]], and
+        # ubuntu's sh is dash. The numbers are recorded, not gated (a shared
+        # runner is too noisy for the release gate's ±2 µs band). A bench that
+        # fails to build, or a run that yields no rows, fails the step.
+        run: |
+          label="ci-${GITHUB_SHA::7}"
+          bash scripts/bench-history.sh "$label"
+          rows=$(grep -c ",${label}," bench-history.csv || true)
+          echo "bench rows for $label: $rows"
+          test "$rows" -gt 0
 
       - name: Upload bench history
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bench-history
           path: bench-history.csv
           retention-days: 90
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+  aarch64-native:
+    name: aarch64 native (arm64 runner)
+    needs: [build]
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: build-x86_64
-          path: build/argonaut
-          retention-days: 5
+          persist-credentials: false
 
-      - name: Upload aarch64 build artifact
-        # Conditional — only uploads when the cross-build step
-        # actually produced a binary (cycc_aarch64 was available).
-        if: hashFiles('build/argonaut-aarch64') != ''
-        uses: actions/upload-artifact@v4
+      - name: Install Cyrius toolchain (aarch64-linux)
+        # On this runner the script installs the aarch64-linux tarball: a
+        # native cycc and cyrius CLI, the toolchain an arm64 user runs.
+        run: bash scripts/ci-install-cyrius.sh
+
+      - name: Verify toolchain
+        run: |
+          cyrius --version
+          file "$(readlink -f "$HOME/.cyrius/bin/cycc")" | grep -q "ARM aarch64"
+
+      - name: Resolve dependencies
+        run: cyrius deps
+
+      - name: Verify dep hashes
+        run: cyrius deps --verify
+
+      - name: Build (DCE, native)
+        run: |
+          mkdir -p build
+          CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut
+          echo "argonaut (native aarch64): $(wc -c < build/argonaut) bytes"
+          file build/argonaut | grep -q "ARM aarch64" || {
+            echo "ERROR: the native build is not an aarch64 ELF"; exit 1; }
+
+      - name: Download the cross-built aarch64 binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: build-aarch64
-          path: build/argonaut-aarch64
-          retention-days: 5
+          path: cross
+
+      - name: Native and cross builds are byte-identical
+        # The release ships the cross-built binary. This ties it to the bytes
+        # the smoke test and the suites below run on arm64 hardware.
+        run: cmp build/argonaut cross/argonaut-aarch64
+
+      - name: Smoke test
+        run: |
+          ./build/argonaut | tee /tmp/smoke_output
+          grep -q "all systems nominal" /tmp/smoke_output
+
+      - name: Test (every tcyr suite, native)
+        # The same loop as the build job. Suites that depend on a platform
+        # behaviour (RLIMIT_AS, MSG_CTRUNC) probe it first, so on hardware they
+        # assert what the kernel does, not what qemu-user does.
+        run: |
+          pass=0; fail=0; asserts=0
+          for t in tests/tcyr/*.tcyr; do
+            out=$(cyrius test "$t" 2>&1)
+            sum=$(echo "$out" | grep -E "^[0-9]+ passed,")
+            if echo "$sum" | grep -q "0 failed"; then
+              pass=$((pass + 1))
+              n=$(echo "$sum" | grep -oP "^\d+")
+              asserts=$((asserts + n))
+            else
+              fail=$((fail + 1))
+              echo "FAIL: $t"
+              echo "$out" | grep -vE '^  dead:|^warning:|^note:' | tail -10
+            fi
+          done
+          echo "suites: $pass pass, $fail fail | assertions: $asserts"
+          test $fail -eq 0
+
+  qemu-pid1:
+    name: qemu PID-1 harness (KVM)
+    needs: [build]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the x86_64 binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-x86_64
+          path: build
+
+      - name: Prepare KVM, qemu and a kernel
+        # The harness needs KVM and an invariant TSC: it boots with
+        # `-cpu host,+invtsc`, and sakshi's clock init panics without one
+        # (arch note 002). Where the runner lacks either, both steps below are
+        # skipped with a warning on the run. Where both are present, a failure
+        # is a real failure.
+        id: prep
+        timeout-minutes: 10
+        run: |
+          chmod +x build/argonaut
+          # Newer than cyrius.cyml and l3-helper.cyr, so build-initramfs.sh
+          # packs the tested binaries instead of rebuilding them (this job
+          # installs no toolchain).
+          touch build/argonaut qemu/helpers/l3-helper
+          if [ ! -e /dev/kvm ]; then
+            echo "::warning::/dev/kvm is absent on this runner: qemu PID-1 harness skipped"
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          [ -r /dev/kvm ] && [ -w /dev/kvm ] || {
+            echo "::error::/dev/kvm exists but is not usable after the udev rule"; exit 1; }
+          if ! grep -qw nonstop_tsc /proc/cpuinfo; then
+            echo "::warning::the runner's CPU reports no invariant TSC (nonstop_tsc): qemu PID-1 harness skipped"
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          sudo apt-get update -q
+          # busybox for the harness's M3/L3 cases; bsdcpio (libarchive-tools)
+          # packs the initramfs.
+          sudo apt-get install -y -q --no-install-recommends \
+            qemu-system-x86 busybox-static libarchive-tools
+          # The runner's own kernel (/boot is root-only).
+          sudo install -m 0644 "/boot/vmlinuz-$(uname -r)" "$RUNNER_TEMP/vmlinuz"
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Boot test
+        if: steps.prep.outputs.run == 'true'
+        run: bash qemu/boot-test.sh "$RUNNER_TEMP/vmlinuz"
+
+      - name: PID-1 harness (M3 + L3)
+        if: steps.prep.outputs.run == 'true'
+        run: bash qemu/pid1-harness-test.sh "$RUNNER_TEMP/vmlinuz"
 
   security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Scan for dangerous patterns
         # Match code lines only — strip comments via awk, not "grep -v '# '"
@@ -275,13 +369,22 @@ jobs:
 
   docs:
     name: Documentation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Check required files
+        # The first-party documentation standard's root files and docs tree.
         run: |
           MISSING=0
-          for f in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md LICENSE CLAUDE.md cyrius.cyml; do
+          for f in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md \
+                   CODE_OF_CONDUCT.md LICENSE CLAUDE.md cyrius.cyml cyrius.lock \
+                   docs/adrs/README.md docs/architecture/README.md \
+                   docs/examples/README.md \
+                   docs/development/roadmap.md docs/development/state.md; do
             if [ -f "$f" ]; then echo "  OK: $f"
             else echo "  MISSING: $f"; MISSING=1; fi
           done

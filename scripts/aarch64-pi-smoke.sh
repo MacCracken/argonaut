@@ -5,8 +5,8 @@
 # Closes the gap from `scripts/aarch64-sweep.sh` (qemu-user) — that
 # script validates aarch64 codegen under emulation; this one
 # validates **real hardware** execution (RPi4 / Pi 5 / Apple
-# Silicon under Asahi / Graviton / Ampere). It is the manual hardware
-# check until native aarch64 CI lands (roadmap 1.17.2).
+# Silicon under Asahi / Graviton / Ampere). CI runs the suites on a
+# GitHub-hosted arm64 runner; this is the manual check for other hardware.
 #
 # Usage:
 #   scripts/aarch64-pi-smoke.sh                 # default ssh alias "pi"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # aarch64-sweep.sh — build + run the full .tcyr sweep on aarch64
-# via qemu-user. A developer and release gate; CI runs the smoke only
-# until native aarch64 CI lands (roadmap 1.17.2; see
+# via qemu-user. A local developer and release gate; CI runs the same
+# suites natively on an arm64 runner (ci.yml's aarch64-native job; see
 # docs/architecture/001-cross-arch-aarch64.md).
 #
 # Usage:
