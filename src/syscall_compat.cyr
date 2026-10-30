@@ -130,6 +130,21 @@ fn ag_sys_prlimit64(pid, resource, new_limit, old_limit): i64 {
     #endif
 }
 
+# pidfd_send_signal(pidfd, sig, info, flags) — signal a tracked service through
+# the pidfd opened when it entered the proc table, so the signal reaches that
+# process or nothing (1.18.0). The stdlib wraps pidfd_open, not this. argonaut
+# passes info = 0 and flags = 0: a plain kill(2)-style signal. -ESRCH once the
+# process has been reaped, by anyone.
+# x86_64 424 / aarch64 424 (one number on both, ladder-safe).
+fn ag_sys_pidfd_send_signal(pidfd, sig, info, flags): i64 {
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(424, pidfd, sig, info, flags);
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(424, pidfd, sig, info, flags);
+    #endif
+}
+
 # getsid(pid) — test-harness assertion that fork_exec_service called setsid.
 # x86_64 124 (native) / aarch64 156 (native, ladder-safe).
 fn ag_sys_getsid(pid): i64 {

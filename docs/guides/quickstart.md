@@ -206,5 +206,10 @@ argonaut_set_pre_exec_hook(&my_pre_exec);
 ```
 
 A non-zero return aborts the child with exit 126, and the service never runs unconfined.
+
+The hook also runs for the service's command health and ready checks, with the same
+definition, so a check is confined as its service is (1.18.0, ADR-015).
+`argonaut_exec_kind()` tells the hook which image is about to exec: `EXEC_SERVICE` or
+`EXEC_HEALTH_CHECK`.
 kybernet's `src/lib/service_sandbox.cyr` is a complete hook. It applies cgroup placement,
 `no_new_privs`, capabilities, Landlock and seccomp, in that order.

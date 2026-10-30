@@ -13,7 +13,7 @@
 - **Language**: Cyrius (toolchain pinned in `cyrius.cyml [package].cyrius`)
 - **Version**: `VERSION` at the project root is the source of truth — do not inline the number here
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
-- **Not enforced by argonaut**: seccomp / Landlock / capability configs are **modelled and rendered, not applied**. `src/security.cyr` makes no enforcement syscalls, and argonaut's spawn path does not read those fields. By design, enforcement belongs to the consumer (ADR-013). `fork_exec_service` passes each definition to a fail-closed pre-exec hook (`argonaut_set_pre_exec_hook`, 1.9.0), and kybernet's hook applies the policy. With no hook registered, services run with PID 1's full root privileges. Do not describe argonaut itself as sandboxing services.
+- **Not enforced by argonaut**: seccomp / Landlock / capability configs are **modelled and rendered, not applied**. `src/security.cyr` makes no enforcement syscalls, and argonaut's spawn path does not read those fields. By design, enforcement belongs to the consumer (ADR-013). `fork_exec_service`, and a service's command health and ready checks (1.18.0, ADR-015), pass each definition to a fail-closed pre-exec hook (`argonaut_set_pre_exec_hook`, 1.9.0), and kybernet's hook applies the policy. With no hook registered, services run with PID 1's full root privileges. Do not describe argonaut itself as sandboxing services.
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md) · [First-Party Documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
 - **Shared crates**: [shared-crates.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/shared-crates.md)
@@ -76,7 +76,7 @@ cyrius capacity src/main.cyr                     # compiler-table headroom
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the only source of truth (no separate `.cyrius-toolchain` file)
 - Prefer `str_builder` over stdlib `json_build/1` for flat JSON on the hot path
 - Do not use `break` in `while` loops with `var` declarations — flag + `continue`
-- Do not write negative literals as `(0 - N)` — `-N` works since cyrius 3.10.3
+- Do not write negative literals as `(0 - N)` — `-N` works since cyrius 3.10.3, and unary minus works on a variable or enum name too (`-pid`, `-AG_ESRCH`)
 - Do not mix `&&` / `||` in one expression — nest `if` blocks instead
 - Do not use a reserved word (`match`, `trait`, `const`, `true`, `false`, `do`, `dyn`) as a name
 - Do not use `return;` without a value — always `return 0;`

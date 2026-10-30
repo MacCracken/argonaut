@@ -6,23 +6,17 @@
 
 ## Version
 
-**1.17.2** (the roadmap's 1.17.2: CI and release only.
-- **CI runs on arm64 hardware:** a native build, byte-identical to the shipped cross-build,
-  and every suite, on a GitHub-hosted `ubuntu-26.04-arm` runner. The qemu PID-1 harness runs
-  in CI under KVM.
-- **The aarch64 release binary is required.** The release `cmp`s both binaries against the
-  bytes CI tested.
-- **Workflows:** Ubuntu 26.04, the latest stable actions pinned by SHA, and a toolchain
-  installer that verifies cyrius's signed `SHA256SUMS`.
-- **Also:** the CI bench step runs under `bash`, `scripts/version.sh` is gone, and the doc tree
-  conforms to the first-party standard.
+**1.18.0** (the roadmap's 1.18.0: process identity, and the exec paths.
+- **pidfd identity (ADR-016):** every tracked process has a pidfd, and every signal goes
+  through it, so a process reaped behind argonaut's back is never signalled by its old number.
+  Before Linux 5.3 argonaut falls back to probe-then-signal (B-7).
+- **Command checks run under the service's spawn (ADR-015):** a service's `HC_COMMAND` health
+  or ready check gets its environment, env files and limits, and runs under its pre-exec hook.
+  `argonaut_exec_kind()` tells the hook which.
+- **Found on the way (LOW):** the watchdog sent `SIGKILL` to a pid it never probed.
 
-No change to `src/`: both binaries are 1.17.1's bytes. 45 suites / 1,760 assertions. Bench gate:
-neutral. On GitHub, `aarch64-native` passed its first run. `qemu-pid1` failed its first run
-before qemu started, on a udev race; the fix is in the tree, and the harness has not yet run in
-CI.)
-
-1.17.0 is the last release that changed behaviour; see CHANGELOG [1.17.0] Breaking.
+47 suites / 1,835 assertions on x86_64 and under qemu-aarch64. Bench gate: neutral. Several
+behaviour changes; see CHANGELOG [1.18.0] Breaking.)
 
 Earlier releases are in [CHANGELOG.md](../../CHANGELOG.md). The pinned release plan
 from 1.17.0 on is in [roadmap.md](roadmap.md).
@@ -105,14 +99,13 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
 
 ## Binary
 
-- **x86_64: 770,560 B**, a statically linked ELF, at 1.17.2
+- **x86_64: 774,768 B**, a statically linked ELF, at 1.18.0
   (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`).
-  2,982 fns are unreachable and 1,115,193 B of dead code is eliminated.
-  - **1.17.2 is byte-identical to 1.17.1.**
-  - **1.17.1 is the same size as 1.17.0:** `.text` is 48 B shorter, inside the same
-    page-aligned segment.
-  - **+8,600 over 1.16.3's 761,960 B:** the limits, env-file and name-check code. The shipped
-    binary reaches `fork_exec_service` through the qemu harness's L3 path.
+  2,998 fns are unreachable and 1,118,648 B of dead code is eliminated.
+  - **+4,208 over 1.17.2's 770,560 B:** the pidfd and check-spawn code. The shipped binary
+    reaches the spawn path through the qemu harness's L3 path.
+  - **1.17.0 was +8,600 over 1.16.3's 761,960 B:** the limits, env-file and name-check code.
+    1.17.1 and 1.17.2 kept its size.
   - **1.16.3 was +313,512 over 1.16.2's 448,448 B.** +308,544 B of that is the 6.7.18
     toolchain alone (the 1.16.2 pins built under 6.7.18).
   - **The cause:** `.rodata` grew 39,778 → 382,342 B. bayan 1.9.0 (folded at 6.7.13) includes
@@ -121,73 +114,68 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
     dropped from argonaut's side.
   - **The fix is upstream** (sigil or cyrius). Inside an initramfs the file sits in RAM, and the
     qemu boot test still boots at `-m 96M`.
-- **aarch64: 2,187,512 B** at 1.17.2 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`),
-  byte-identical to 1.17.1's and the same size as 1.17.0's. The native compiler (the
-  aarch64-linux tarball's `cycc`) emits the same bytes as this cross-build, which CI now
-  requires. 2,982 fns are unreachable and 1,320,632 B is NOPed. 1.17.0 was +4,488
-  over 1.16.3's 2,183,024 B (1.16.3 was +612,536, the toolchain). aarch64 DCE fills dead code with
-  NOPs instead of compacting, so new code usually shows in full.
+- **aarch64: 2,187,640 B** at 1.18.0 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`),
+  +128 over 1.17.2. The native compiler (the aarch64-linux tarball's `cycc`) emits the same
+  bytes as this cross-build, which CI requires. 2,998 fns are unreachable and 1,324,520 B is
+  NOPed. aarch64 DCE fills dead code with NOPs instead of compacting, so the size moves only
+  when the text crosses a page: 1.17.0 was +4,488 over 1.16.3, and 1.16.3 +612,536 (the
+  toolchain).
 - **L3 helper: 15,080 B**, a static ELF (`qemu/helpers/l3-helper`), re-cut under
   6.7.18 at 1.16.3 with `CYRIUS_DCE=1`. It is bundled into the qemu harness
   initramfs as `/bin/l3-helper`. Its build is warning-free.
-- **`cyrius capacity`** at 1.17.2: `fn_table` 3,745 / 131,072, `string_data`
-  382,699 / 2,097,152 (unchanged since 1.17.0).
+- **`cyrius capacity`** at 1.18.0: `fn_table` 3,768 / 131,072, `string_data`
+  382,751 / 2,097,152.
 
 ## Suites
 
-- **x86_64: 45 `.tcyr` suites / 1,760 assertions**, 0 failures (cyrius 6.7.18), unchanged
-  at 1.17.2. +90 at 1.17.0: `spawn_rlimits` (14), `spawn_env_files` (52), `register_names` (22), and
-  `deferred_fixes` +3 / `harden_proc` −1 from the removals.
+- **x86_64: 47 `.tcyr` suites / 1,835 assertions**, 0 failures (cyrius 6.7.18). +75 at 1.18.0:
+  `pidfd` (49) and `health_spawn` (26), both mutation-checked (CHANGELOG [1.18.0] Tests).
 - **qemu-user caveats the suites handle:** qemu drops a guest's `RLIMIT_AS`, and reports no
   `MSG_CTRUNC` for SCM_RIGHTS on a SO_PASSCRED socket. `spawn_rlimits` and `deferred_fixes`
   probe the platform for each and assert what it does.
-- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 45 / 45, 1,760 assertions**,
-  identical to x86_64. Run on the dev host at 1.17.1; 1.17.2 changes no source or test.
-- **aarch64 on hardware (CI):** from 1.17.2, `ci.yml`'s `aarch64-native` job runs every suite on
-  a GitHub-hosted `ubuntu-26.04-arm` runner, after `cmp`-ing its native build with the
-  cross-build. **It passed every step on its first run** (`d690852`): native = cross, the smoke
-  test, and every suite.
+- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 47 / 47, 1,835 assertions**,
+  identical to x86_64, at 1.18.0. qemu-user 11.1 passes `pidfd_open` and `pidfd_send_signal`
+  through, so the sweep runs the pidfd path, not the fallback.
+- **aarch64 on hardware (CI):** `ci.yml`'s `aarch64-native` job runs every suite on a
+  GitHub-hosted `ubuntu-26.04-arm` runner, after `cmp`-ing its native build with the
+  cross-build. Green since its first run (1.17.2).
 - **PID 1 in a pid namespace** (`unshare -Urpf --mount-proc ./build/argonaut`, no
   root needed): the quick check for the supervisor loop. At 1.17.0 it shows 0 idle
   wakeups in 3 s, reaps 300 simultaneous orphans with 0 zombies left, and shuts down
   cleanly on SIGTERM.
 - **qemu PID-1 harness** (`qemu/pid1-harness-test.sh`, `qemu/boot-test.sh`,
-  KVM + `+invtsc`): at 1.17.1, M3 + L3 end-to-end and the supervisor-loop smoke
+  KVM + `+invtsc`): at 1.18.0, M3 + L3 end-to-end and the supervisor-loop smoke
   pass at the scripts' committed `-m 256M`. They have passed there since 1.15.5,
   the first release built with a `MAP_NORESERVE` heap (cyrius 6.6.8+). At 1.16.3 the
   boot test also boots at `-m 128M` and `-m 96M`.
-  - **In CI from 1.17.2:** the `qemu-pid1` job runs both on `ubuntu-26.04`, skipped with a
-    warning where the runner lacks KVM or an invariant TSC. ⚠ **The harness has not run in CI
-    yet.** The first run (`d690852`) failed in its preparation step: a udev rule had not yet
-    opened `/dev/kvm`. The fix (`chmod`) is in the tree; the next run settles whether the
-    runner's CPU and kernel carry the harness.
+  - **In CI:** the `qemu-pid1` job runs both on `ubuntu-26.04`, skipped with a warning where
+    the runner lacks KVM or an invariant TSC. The runner has both: from 1.17.2's release
+    commit on, the boot test and the harness run and pass in CI, on the runner's own kernel.
 - **Benches**: `src/bench_main.cyr` — 29 micros, the release gate
   (`scripts/bench-history.sh`); `tests/bcyr/argonaut.bcyr` carries the same 29,
   `tests/bcyr/api.bcyr` 8 more. History in `bench-history.csv`.
 
-### Bench snapshot (1.17.2-ci-native-aarch64, 2026-10-30)
+### Bench snapshot (1.18.0-closeout, 2026-10-30)
 
-**Verdict: neutral.** The bench binary is byte-identical to 1.17.1's, so no code moved.
+**Verdict: neutral, no regression** against `1.17.0-closeout` and `1.17.1-negative-literals`,
+plus a 24-round A/B of the 1.17.2 and 1.18.0 bench binaries, pinned to one core. The host
+carried unrelated load (average 2–4), so the A/B carries the verdict:
 
-- **The gate row reads 0.1–37 µs slower across the board** against
-  `1.17.1-negative-literals`, because the host was busy (load average 8–12, from unrelated
-  processes).
-- **Under that same load,** an interleaved run of the 1.17.1 and 1.17.2 bench binaries reads
-  the same elevated numbers (`mark_all_steps_complete` 53.7 vs 53.4 µs). Their spread, up to
-  ±5 µs between identical bytes, is that load's noise floor (CHANGELOG [1.17.2] Performance).
-- **Next baseline: `1.17.1-negative-literals`,** the same bytes measured on a quiet host, not
-  the 1.17.2 row. The current closeout label is `1.17.0-closeout`.
-
-The last clean snapshot, from 1.17.1's 24-round A/B pinned to one core:
-
-| Bench | 1.17.0 gate | 1.17.1 gate | A/B Δ |
+| Bench | 1.17.1 | 1.18.0 gate | A/B 1.17.2 → 1.18.0 |
 |---|---:|---:|---:|
-| resolve_order_chain_50 ⚠ | 89.470 | 112.001 | −0.4 % (ranges overlap) |
-| resolve_order_chain_100 ⚠ | 205.105 | 214.581 | −0.4 % (ranges overlap) |
-| resolve_order_chain_10 ⚠ | 12.701 | 10.264 | +0.11 µs |
-| init_new_desktop | 25.769 | 25.537 | +0.04 µs |
-| mark_all_steps_complete | 48.945 | 48.093 | +0.22 µs |
-| audit_log_record | 4.146 | 3.947 | +0.2 % |
+| init_new_desktop | 25.537 | 26.431 | −0.15 µs |
+| init_new_minimal | 5.724 | 6.172 | −0.02 µs |
+| resolve_order_chain_50 ⚠ | 112.001 | 97.848 | −0.6 % (IQRs overlap) |
+| resolve_order_chain_100 ⚠ | 214.581 | 203.177 | −1.0 % (IQRs overlap) |
+| mark_all_steps_complete | 48.093 | 50.150 | −0.29 µs |
+| audit_log_record | 3.947 | 4.208 | +0.8 % |
+
+- **`init_new_*` is flat** after the pidfd map went lazy. Allocated eagerly, it cost
+  0.6–0.7 µs (CHANGELOG [1.18.0] Performance).
+- **Every other micro** is within ±0.7 µs in the A/B; the chain rows' gate reads are noise.
+- **Next baseline:** `1.18.0-closeout`, the current closeout label. It was taken under
+  moderate load, so the next gate should run its own A/B against this release's binary.
+  `1.17.1-negative-literals` is the last row taken on a quiet host.
 
 Earlier snapshots are in the CHANGELOG's Performance sections; every row is in
 `bench-history.csv`.
@@ -246,14 +234,7 @@ Earlier snapshots are in the CHANGELOG's Performance sections; every row is in
 Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 - **The next cyrius pin** has no release number; its target is open.
-- **`qemu-pid1`'s first full CI run** on GitHub, with the `/dev/kvm` fix. `aarch64-native`
-  is green.
-- **1.18.0:**
-  - **pidfd process identity.** The window between reading a pid and signalling it is
-    still open; the 2026-10-14 audit's B-1 closed only the PID-file side.
-  - **Health-check commands and the hook.** `HC_COMMAND` checks run without the
-    pre-exec hook, so a confined service's check command runs unconfined, as root, and
-    (since 1.17.0) without the service's limits and env files.
+- **No release is pinned after 1.18.0.** The work left is Gated.
 - **Gated:**
   - the legacy SHA-256 emergency credential (still accepted beside v1 Argon2id), until
     kybernet migrates operators;
@@ -264,9 +245,13 @@ Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 ### Closed recently
 
+- **1.18.0:**
+  - pidfd process identity, with probe-then-signal as the fallback (ADR-016);
+  - a service's command health and ready checks run under its spawn and hook (ADR-015);
+  - a LOW found on the way: the watchdog's unprobed `SIGKILL`.
 - **1.17.2:**
   - native aarch64 CI on a GitHub-hosted arm64 runner, and a required aarch64 artifact;
-  - the qemu PID-1 harness in CI;
+  - the qemu PID-1 harness in CI, green from its release commit on;
   - Ubuntu 26.04 and the latest stable actions, pinned by SHA, with a signature-verified
     toolchain install;
   - the CI bench fix, `scripts/version.sh` removed, and the doc-tree conformance.
@@ -289,14 +274,14 @@ Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 ## Pending release
 
-None after 1.17.2, which is ready to tag once a push to `main` shows `qemu-pid1` green
-(`aarch64-native` already is).
-The next release is 1.18.0 ([roadmap.md](roadmap.md)).
+None after 1.18.0, which is ready to tag. No release is pinned after it; the work left is
+Gated ([roadmap.md](roadmap.md)).
 
 ## Recent shipped
 
 | Releases | Date | Headline |
 |---|---|---|
+| 1.18.0 | 2026-10-30 | pidfd process identity (ADR-016); command health and ready checks under the service's spawn and hook (ADR-015); the watchdog's unprobed SIGKILL fixed (LOW) |
 | 1.17.2 | 2026-10-30 | Native aarch64 CI and a required aarch64 artifact; qemu PID-1 harness in CI; Ubuntu 26.04, SHA-pinned actions, a verified toolchain install; doc-tree conformance |
 | 1.17.1 | 2026-10-30 | `0 - N` → `-N` at 101 sites in `src/`; no functional change, proven instruction by instruction |
 | 1.17.0 | 2026-10-29 | Deprecated APIs removed; resource limits, env files and name checks wired (ADR-014); FIFO env-file hang fixed (MEDIUM); consumer floor corrected to 6.7.9 |
@@ -315,20 +300,22 @@ Everything else is in [CHANGELOG.md](../../CHANGELOG.md).
   orchestration. At its 1.7.11 it pins argonaut **1.15.6** on cyrius 6.6.20.
   - **Taking 1.16.1 or later needs cyrius ≥ 6.7.9** (`sys_ppoll`). On its 6.6.20 pin the
     build fails with `undefined function 'sys_ppoll'` (measured at 1.17.0).
-  - **Against 1.17.0 on 6.7.18** (scratch copy, `CYRIUS_LOCAL=argonaut`): it builds
-    (1,102,008 B) and passes **888 / 890**. The two failures are its `test_emergency_auth`
-    assertions (`src/test.cyr:1391-1393`), which pin the open `emergency_shell_default()`
-    1.16.2 closed.
-  - **Behaviour it will notice** is listed under CHANGELOG [1.16.1], [1.16.2] and [1.17.0]
-    (Breaking, Downstream). It calls none of the removed functions and sets neither
+  - **Against 1.18.0 on 6.7.18** (scratch copy, `CYRIUS_LOCAL=argonaut`): it builds
+    (1,106,216 B) and passes **888 / 890**, as against 1.17.0 (1,102,008 B). The two failures
+    are its `test_emergency_auth` assertions (`src/test.cyr:1391-1393`), which pin the open
+    `emergency_shell_default()` 1.16.2 closed.
+  - **Behaviour it will notice** is listed under CHANGELOG [1.16.1], [1.16.2], [1.17.0] and
+    [1.18.0] (Breaking, Downstream). From 1.18.0, `kyb_pre_exec` also confines its services'
+    command checks. It calls none of the removed functions and sets neither
     `svc_def_rlimits` nor `svc_def_env_files`. Its own `load_env_file` call gets the FIFO
     fix. A name it accepts but argonaut refuses (`a..b`) is no longer registered.
   - **It enforces service policy.** Its pre-exec hook (`kyb_pre_exec`,
     `src/lib/service_sandbox.cyr`) applies cgroup placement, `no_new_privs`,
     capabilities, Landlock and seccomp per service, through argonaut's
-    `argonaut_set_pre_exec_hook` (1.9.0). argonaut applies resource limits and env files
-    itself since 1.17.0 (ADR-014), and none of that policy.
-  - **Not yet rebuilt against 1.16.x or 1.17.0 in its own tree.** That is kybernet's own
+    `argonaut_set_pre_exec_hook` (1.9.0), for its services and, from 1.18.0, their command
+    checks (ADR-015). argonaut applies resource limits and env files itself since 1.17.0
+    (ADR-014), and none of that policy.
+  - **Not yet rebuilt against 1.16.x, 1.17.x or 1.18.0 in its own tree.** That is kybernet's own
     update, and the roadmap's Kybernet-side section tracks it.
   - **When it moves its own pin to 6.7.18,** its binary takes the same bayan Unicode
     tables, through its own `sigil-mldsa`, whichever argonaut it pins.
@@ -338,8 +325,8 @@ Everything else is in [CHANGELOG.md](../../CHANGELOG.md).
 ## Verification
 
 - Linux x86_64 (Arch, kernel 7.2, AMD Ryzen 7 5800H, HPET clocksource) — primary dev host; CI on GitHub-hosted `ubuntu-26.04`
-- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **45 / 45, 1,760 assertions at 1.17.1** (cyrius 6.7.18), identical to x86_64; 1.17.2 changes no source. From 1.17.2, CI builds natively and runs every suite on a GitHub-hosted `ubuntu-26.04-arm` runner: green on its first run. Other hardware (RPi4, Apple Silicon, Graviton / Ampere) is checked by hand with `scripts/aarch64-pi-smoke.sh`. See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
-- qemu PID-1 harness under KVM — passes at 1.17.1 at the scripts' committed `-m 256M` (1.17.2's binary is the same bytes); at 1.16.3 the boot test also booted at `-m 128M` and `-m 96M`. In CI from 1.17.2 (`qemu-pid1`, not yet run).
+- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **47 / 47, 1,835 assertions at 1.18.0** (cyrius 6.7.18), identical to x86_64. CI builds natively and runs every suite on a GitHub-hosted `ubuntu-26.04-arm` runner, green since 1.17.2. Other hardware (RPi4, Apple Silicon, Graviton / Ampere) is checked by hand with `scripts/aarch64-pi-smoke.sh`. See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
+- qemu PID-1 harness under KVM — passes at 1.18.0 at the scripts' committed `-m 256M`; at 1.16.3 the boot test also booted at `-m 128M` and `-m 96M`. In CI (`qemu-pid1`), green from 1.17.2's release commit on.
 - PID 1 of an unprivileged pid namespace (`unshare -Urpf`) — idle wakeups, orphan reaping and SIGTERM shutdown, at 1.17.0.
 
 ## Audit cadence
@@ -348,4 +335,5 @@ Everything else is in [CHANGELOG.md](../../CHANGELOG.md).
 - Most recent: **`2026-10-14-audit.md` (hardening and optimization pass for 1.16.1)** — 0 CRITICAL / 0 HIGH / 13 MEDIUM / 18 LOW fixed at 1.16.1. Its 6 deferred LOWs and 1 PERF were fixed at 1.16.2, with 2 more LOWs found on the way. The TPM item is documented in architecture note 005. Nothing from the pass is open. Prior: `2026-08-24` (P(-1) for 1.8.6; 9 MEDIUM / 6 LOW / 1 DOC, all closed), `2026-05-11` (1.6.3 closeout), `2026-05-10` (1.5.5 closeout), `2026-04-26` (1.4.0).
 - The 2026-10-14 pass rated reachability three ways (shipped binary, kybernet config, library-only), since kybernet drives most of the lifecycle machinery from PID 1.
 - **Re-audit trigger:** several severities (1.8.6 and 2026-10-14) are bounded by the fact that the shipped PID-1 loop does not call the service-lifecycle machinery (it is library surface for kybernet). **Re-rate them the day the supervisor loop is wired to `init_start_service` / `init_poll_health` / `init_notify_bind`.**
-- Every release's Security section in `CHANGELOG.md` cites its audit.
+- Every release's Security section in `CHANGELOG.md` cites its audit. 1.18.0's findings (the
+  two roadmap gaps and the watchdog LOW) are in its CHANGELOG entry; there was no audit pass.

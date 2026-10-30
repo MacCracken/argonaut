@@ -167,6 +167,18 @@ fn check_process_alive(pid) {
     return process_alive(pid);
 }
 
+# Process alive check for service `svc_def` (or 0): through the service's
+# pidfd when the proc table holds one (1.18.0), so a reaped service whose
+# number now names another process reads dead. Otherwise kill(pid, 0).
+fn check_process_alive_as(svc_def, pid) {
+    if (pid <= 0) { return 0; }
+    if (svc_def != 0) {
+        var pfd = proc_table_pidfd(svc_def_name(svc_def));
+        if (pfd >= 0) { return ag_sys_pidfd_send_signal(pfd, 0, 0, 0) == 0; }
+    }
+    return process_alive(pid);
+}
+
 # Command check — run command, exit 0 = healthy
 #
 # ⚠ THIS RAN UNBOUNDED ON PID 1's REACTOR PATH UNTIL 1.13.9, AND IGNORED THE
@@ -252,6 +264,14 @@ fn _hc_str(slot, cstr_ptr, n) {
 }
 
 fn check_command(cmd_str, timeout_ms) {
+    return check_command_as(0, cmd_str, timeout_ms);
+}
+
+# check_command for service `svc_def`: the command runs the way the service is
+# spawned, under its environment, limits and pre-exec hook (run_check_as,
+# 1.18.0, ADR-015). svc_def == 0 is check_command: no service, no service
+# policy.
+fn check_command_as(svc_def, cmd_str, timeout_ms) {
     var slen = str_len(cmd_str);
     if (slen <= 0 || slen >= 1023) { return 0; }
     memcpy(&_HC_CMD_BUF, str_data(cmd_str), slen);
@@ -306,7 +326,7 @@ fn check_command(cmd_str, timeout_ms) {
     var tmo = timeout_ms;
     if (tmo <= 0) { tmo = 2000; }
 
-    var code = run_safe_cmd_timeout(cmd, tmo);
+    var code = run_check_as(svc_def, cmd, tmo);
     return code == 0;
 }
 
@@ -447,6 +467,19 @@ fn _hc_path_ok(p, n) {
 }
 
 fn execute_health_check(service_name, hc, pid) {
+    return _execute_health_check(service_name, 0, hc, pid);
+}
+
+# execute_health_check for a service definition (1.18.0). A HC_COMMAND check
+# runs under the service's environment, limits and pre-exec hook, and a
+# HC_PROCESS_ALIVE check asks the service's pidfd (ADR-015, ADR-016).
+# init_poll_health calls this. The name-only form keeps the pre-1.18.0
+# behaviour: with no definition there is no service policy to apply.
+fn execute_service_health_check(svc_def, hc, pid) {
+    return _execute_health_check(svc_def_name(svc_def), svc_def, hc, pid);
+}
+
+fn _execute_health_check(service_name, svc_def, hc, pid) {
     var start = monotonic_ms();
     var check_type = load64(hc);      # HealthCheckType
     var target = load64(hc + 8);      # Str ptr
@@ -512,12 +545,12 @@ fn execute_health_check(service_name, hc, pid) {
             }
         }
     } elif (check_type == HC_PROCESS_ALIVE) {
-        passed = check_process_alive(pid);
+        passed = check_process_alive_as(svc_def, pid);
         if (passed == 0) {
             message = _hc_const(HCS_PROC_DEAD, "process not alive");
         }
     } elif (check_type == HC_COMMAND) {
-        passed = check_command(target, timeout);
+        passed = check_command_as(svc_def, target, timeout);
         if (passed == 0) {
             message = _hc_const(HCS_CMD_FAIL, "command check failed");
         }
@@ -774,6 +807,16 @@ fn execute_health_check(service_name, hc, pid) {
 # =========================================================================
 
 fn execute_ready_check(service_name, rc, pid) {
+    return _execute_ready_check(service_name, 0, rc, pid);
+}
+
+# execute_ready_check for a service definition (1.18.0): each attempt is an
+# execute_service_health_check. init_start_simple calls this.
+fn execute_service_ready_check(svc_def, rc, pid) {
+    return _execute_ready_check(svc_def_name(svc_def), svc_def, rc, pid);
+}
+
+fn _execute_ready_check(service_name, svc_def, rc, pid) {
     var check_type = load64(rc);
     var target = load64(rc + 8);
     var port = load64(rc + 16);
@@ -806,7 +849,7 @@ fn execute_ready_check(service_name, rc, pid) {
         # Update remaining timeout for this attempt
         store64(hc + 32, remaining);
 
-        var result = execute_health_check(service_name, hc, pid);
+        var result = _execute_health_check(service_name, svc_def, hc, pid);
         if (load64(result + 16)) {  # passed
             return result;
         }

@@ -7,6 +7,270 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.18.0] — 2026-10-30
+
+**The roadmap's 1.18.0: process identity, and the exec paths.**
+- **pidfd identity (ADR-016).** Every tracked process has a pidfd, and every signal goes
+  through it. A process reaped behind argonaut's back is never probed, waited on or
+  signalled by its old number. Without a pidfd (Linux < 5.3), argonaut falls back to
+  1.16.1's probe-then-signal (B-7).
+- **Command checks run under the service's spawn (ADR-015).** A service's `HC_COMMAND`
+  health or ready check gets the service's environment, env files and resource limits, and
+  runs under its pre-exec hook. Until now it ran unconfined, as PID 1's root.
+- **Found on the way:** the watchdog sent `SIGKILL` to a pid it had not probed (LOW, below).
+
+Both decisions were the maintainer's: fall back to B-7 rather than refusing to start, and
+run checks under the service's spawn rather than documenting an unconfined run.
+
+47 suites / 1,835 assertions, 0 failures, on x86_64 and under qemu-aarch64. Bench gate
+neutral. New: ADR-015, ADR-016.
+
+### Breaking
+
+- **Behaviour: a service's command checks run under its spawn.** This applies to
+  `init_poll_health`'s health checks and `init_start_simple`'s ready checks, through the new
+  `execute_service_health_check` / `execute_service_ready_check`.
+  - **The check runs** with the service's environment map and env files, its resource
+    limits, and the pre-exec hook, with stdio on `/dev/null`. It used to have only PATH,
+    and inherited PID 1's stdout.
+  - **Under kybernet's hook** it runs in the service's cgroup, as the service's uid, under
+    its Landlock ruleset and seccomp filter. A check binary the policy does not allow, or a
+    check that needed root, now fails: the service reads unhealthy and can trip the
+    watchdog.
+  - **Migration:** allow the check in the service's policy, or have the hook treat
+    `argonaut_exec_kind() == EXEC_HEALTH_CHECK` differently.
+  - **Unchanged:** the name-only `execute_health_check`, `execute_ready_check` and
+    `check_command`. With no definition there is no service policy, so they keep the
+    pre-1.18.0 behaviour.
+- **Behaviour: the hook also runs for checks.** A hook registered with
+  `argonaut_set_pre_exec_hook` is now called for a service's command checks too, with the
+  same definition. `argonaut_exec_kind()` tells it which image is about to exec.
+- **Behaviour: the watchdog probes.** Without a pidfd, `init_enforce_watchdog` signals only
+  a running child (B-7). It used to send `SIGKILL` to the number unprobed. With a pidfd it
+  kills through it, including a forking service's daemon that is not argonaut's child.
+- **Behaviour: `proc_table_reap` ends an entry reaped elsewhere.** When an entry's pidfd
+  shows its process was reaped by someone else, `proc_table_reap` reports it as exited,
+  with code -1 (status lost), and drops it. It used to keep probing the number forever, and
+  could reap a different child that had been given it.
+- **Consumer floor: unchanged** (cyrius 6.7.9). `sys_pidfd_open` is in the stdlib from
+  6.4.36. Linux 5.3 is needed for pidfds; older kernels take the fallback.
+
+### Added
+
+- **pidfd process identity** (`src/process_mgmt.cyr`, ADR-016):
+  - `proc_table_insert` opens a pidfd for the pid (`O_CLOEXEC`, so no service inherits it).
+    `proc_table_remove`, `proc_table_reap`, `proc_table_stop_all`, a re-insert and
+    `proc_table_init` close it. The map is allocated on the first insert that opens one;
+  - `proc_pidfd_gone(fd)`: 1 once the pidfd's process has been reaped. Every stop path asks
+    it before probing a number: `process_stop_fd`, `proc_table_stop_all`, `proc_table_reap`
+    and the ordered shutdown's waves;
+  - `proc_send_signal(fd, pid, sig)`: through the pidfd, or by number in the fallback, and
+    never to a pid ≤ 1;
+  - while a pidfd says its process exists, its number cannot be reused, so the B-7 probe
+    and the process-group kill (`kill(-pid)`, which no pidfd can express) stay exact;
+  - **New API:** `process_stop_fd`, `proc_table_pidfd`, `proc_pidfd_gone`, `proc_send_signal`,
+    `argonaut_set_pidfd_enabled` / `argonaut_pidfd_enabled`, and `ag_sys_pidfd_send_signal`
+    (424 on x86_64 and aarch64; both read back under `qemu-x86_64 -strace` and
+    `qemu-aarch64 -strace`, with `pidfd_open` as 434).
+- **Health and ready checks under the service's spawn** (ADR-015):
+  - `run_check_as(sd, cmd, timeout)` forks a child that leads its own process group, puts
+    stdio on `/dev/null` and ends in `_exec_service_image`. `fork_exec_service`'s child now
+    ends there too, so a service and its checks are spawned by the same code;
+  - `argonaut_exec_kind()` and `ExecKind`: `EXEC_SERVICE` or `EXEC_HEALTH_CHECK` in a spawn
+    child, `EXEC_NONE` everywhere else;
+  - **New API:** `run_check_as`, `check_command_as`, `check_process_alive_as`,
+    `execute_service_health_check`, `execute_service_ready_check`, `argonaut_exec_kind`;
+  - **Refactored, same behaviour:** `fork_exec_service`'s child setup became
+    `_child_stdio_devnull` and `_exec_service_image`. `run_safe_cmd_timeout`'s bounded wait
+    became `_wait_cmd_bounded`.
+- **`HC_PROCESS_ALIVE` asks the pidfd** for a service (`check_process_alive_as`), so a
+  reaped service whose number now names another process reads dead.
+- **ADR-015** and **ADR-016**. ADR-013 is narrowed by ADR-015.
+
+### Security
+
+| Finding | Severity | Fix |
+|---|---|---|
+| A confined service's command check ran unconfined, as PID 1's root | MEDIUM (roadmap) | Runs under the service's spawn (ADR-015) |
+| A tracked pid reaped elsewhere could be signalled after reuse | LOW (roadmap) | pidfd identity (ADR-016) |
+| The watchdog sent `SIGKILL` to a pid it never probed | LOW | Probes, or kills through the pidfd |
+
+**The health-check gap (MEDIUM).** The rating is the one `docs/security/posture.md`'s Known
+Gaps gave it when the roadmap pinned it, not an audit finding. A confined service's check
+ran with every privilege its policy removed from the service.
+- **Reach:** kybernet, wherever an operator configured both confinement and an
+  `HC_COMMAND` check. The shipped binary runs no health checks.
+- **Fixed:** the check is confined as its service is, and a refusal fails it closed (126).
+
+**pidfd identity (LOW).** The B-7 probe was exact while argonaut was the only reaper of its
+children.
+- **Where it was not:** a consumer's own `waitpid(-1)`, or a caller of `proc_table_*`, could
+  reap a tracked process. Its number could then name another process, even another child
+  of argonaut's, which the probe cannot tell apart. A stop then sent `SIGTERM` to it.
+- **Fixed:** every signal goes through the pidfd, and a reaped process's number is never
+  used.
+
+**The watchdog (LOW).** `init_enforce_watchdog` sent `SIGKILL` to the proc table's number with
+no probe at all.
+- **Reach:** library consumers that are not PID 1 or a subreaper, for a forking service's
+  daemon whose number was reused after it exited. kybernet is PID 1, so its daemons are
+  its own children.
+- **Found by:** this release's review (no audit report).
+- **Fixed:** with a pidfd the kill goes through it; without one, the B-7 probe runs first.
+
+**Checked:**
+- the new syscall's return is handled everywhere it decides anything;
+- pidfds are `O_CLOEXEC` and closed on every path that drops an entry;
+- the check spawn allocates nothing in the parent;
+- every `sakshi_*` literal length matches its string.
+
+**Known-CVE sweep:** 1.17.1's, the same day. Nothing new for argonaut's surface.
+
+### Tests
+
+**45 → 47 suites, 1,760 → 1,835 assertions (+75).** Every new suite was mutation-checked:
+each mutation, applied alone, fails it.
+
+| Suite | Assertions | Mutation | Fails |
+|---|---:|---|---:|
+| `pidfd` (new) | 49 | no identity gate | 6 |
+| | | signals by number, ignoring the pidfd | 1 |
+| | | the watchdog kills unprobed (1.17.x) | 1 |
+| | | insert opens no pidfd | 18 |
+| | | pidfds never closed | 3 |
+| | | `proc_table_reap` probes a gone pidfd's number | 3 |
+| `health_spawn` (new) | 26 | checks run as in 1.17.x (no definition) | 13 |
+| | | the exec kind never set | 2 |
+| | | `init_poll_health` calls the name-only form | 2 |
+| | | `init_start_simple` calls the name-only ready check | 1 |
+
+- **`pidfd`:**
+  - the wrapper, and one pidfd per entry (opened, close-on-exec, closed on remove, reap,
+    re-insert and stop-all, with no fd leaked);
+  - **a recycled pid is never signalled.** Process A is tracked, then reaped outside the
+    table, and the table's number is rewritten to B, a live child of ours. Through stop,
+    reap, stop-all, the watchdog and the ordered shutdown, B is never signalled or reaped,
+    and the process-alive check reads the service dead;
+  - the watchdog kills a non-child through its pidfd;
+  - the fallback still stops a real child, and its watchdog leaves a non-child alone.
+- **`health_spawn`:**
+  - **with a denying hook, a service's command check is refused, and never runs.** A check
+    that would create a marker file leaves none, for health and ready checks alike;
+  - the name-only form is unchanged;
+  - `argonaut_exec_kind()` separates a check from the service;
+  - the service's environment map, env file and resource limit reach the check;
+  - a limit the kernel refuses fails it closed;
+  - `init_poll_health` and `init_start_service` run checks under the hook.
+- **A mutation that survived**, and was removed rather than tested: `run_check_as` had a
+  parent-side env-file preflight. The child's refusal already fails the check, so it cost a
+  stat per poll for nothing.
+
+### Performance
+
+The gate ran `./scripts/bench-history.sh "1.18.0-closeout"` against `1.17.0-closeout` (the
+last closeout) and `1.17.1-negative-literals` (the last clean row; 1.17.2's was taken under
+load). A 24-round A/B of the 1.17.2 and 1.18.0 bench binaries, pinned to one core, ran under
+the same load (average 2–4, from unrelated processes).
+
+| bench | 1.17.0 closeout | 1.17.1 | 1.18.0 gate | A/B medians 1.17.2 → 1.18.0 |
+|---|---:|---:|---:|---|
+| init_new_desktop | 25.769 | 25.537 | 26.431 | 25.505 → 25.355 (−0.15 µs) |
+| init_new_minimal | 5.842 | 5.724 | 6.172 | 5.997 → 5.973 (−0.02 µs) |
+| init_new_edge | 4.914 | 4.854 | 5.345 | 5.149 → 5.226 (+0.08 µs) |
+| resolve_order_chain_50 ⚠ | 89.470 | 112.001 | 97.848 | 108.507 → 107.814 (−0.6 %) |
+| resolve_order_chain_100 ⚠ | 205.105 | 214.581 | 203.177 | 221.774 → 219.474 (−1.0 %) |
+| resolve_waves_chain_20 ⚠ | 32.460 | 32.076 | 34.590 | 33.357 → 32.163 (−3.6 %) |
+| mark_all_steps_complete | 48.945 | 48.093 | 50.150 | 49.448 → 49.162 (−0.29 µs) |
+| audit_log_record | 4.146 | 3.947 | 4.208 | 4.087 → 4.118 (+0.8 %) |
+
+**Verdict: neutral, no regression.**
+- **`init_new_*` is flat, after a fix.** The first gate (`1.18.0-pidfd-health-spawn`) and its
+  A/B read +0.6–0.7 µs on all three. A variant without the pidfd map in `proc_table_init`
+  measured the same as 1.17.2, so the cost was that eager `map_new()`. The map is now
+  allocated on the first insert that opens a pidfd.
+- **The rows beyond ±2 µs in the gate** are the chain series and `mark_all_steps_complete`.
+  In the A/B every one is flat or faster, with overlapping interquartile ranges. No code
+  they run changed. ⚠ Noise-bound, as at every release since 1.15.2.
+- **Every other micro** is within ±0.7 µs in the A/B. The new work is on spawn and signal
+  paths no micro runs.
+
+### Binary
+
+- **x86_64:** 770,560 → **774,768 B** (+4,208). The pidfd and check-spawn code; the shipped
+  binary reaches the spawn path through the qemu harness's L3 case.
+- **aarch64:** 2,187,512 → **2,187,640 B** (+128). aarch64 DCE NOP-fills dead code in place,
+  so most of the new code shows as NOPs, not file size.
+- **Dead-code floor:**
+  - x86_64: 2,998 unreachable fns, 1,118,648 B eliminated;
+  - aarch64: 2,998 fns, 1,324,520 B NOPed.
+- **`cyrius capacity`:** `fn_table` 3,768 / 131,072, `string_data` 382,751 / 2,097,152.
+
+### Closeout pass (CLAUDE.md, before a minor)
+
+- **Full test suite:** 47 / 47 and 1,835 assertions, on x86_64 and under qemu-aarch64.
+- **Benchmark snapshot:** above, against `1.17.0-closeout` and the last clean label,
+  `1.17.1-negative-literals`.
+- **Dead-code floor:** above.
+- **Refactor pass:** the spawn child is one function for a service and its checks
+  (`_exec_service_image`), and the bounded command wait is one (`_wait_cmd_bounded`). The two
+  remaining `0 - pid` process-group kills are `-pid`, as the new code writes it.
+- **Code review** of the whole diff turned up two things, each fixed above:
+  - a shutdown straggler whose pidfd showed it already reaped was still marked "killed",
+    and so audited as `EVT_TIMEOUT_KILLED`. It is now marked only when argonaut signals;
+  - the eager pidfd map cost every `argonaut_init_new` 0.6–0.7 µs. It is now lazy.
+- **Cleanup sweep:**
+  - **Stale docs:** `feature-gaps.md` still called the notify receivers deprecated (they were
+    removed at 1.17.0), and the security posture listed resource limits as not applied
+    (they have been since 1.17.0). Both are corrected.
+  - **Also updated:** the posture's and the feature-gap list's 1.18.0 rows.
+- **Security re-scan:** above.
+- **Downstream check:** below.
+- **Doc sync:**
+  - CHANGELOG, roadmap and `state.md`;
+  - ADR-015 and ADR-016, ADR-013's status, the ADR index;
+  - `docs/security/posture.md`, `docs/architecture/feature-gaps.md` and the quickstart's hook
+    section;
+  - CLAUDE.md: the "not enforced" paragraph now covers checks, and unary minus is noted
+    for names.
+- **Version verify:** `VERSION` reads 1.18.0; `cyrius.cyml` reads it through
+  `${file:VERSION}`.
+- **Full clean build:** `rm -rf build lib && cyrius deps && CYRIUS_DCE=1 cyrius build
+  --check-lib-sync` passes and gives the same 774,768 B binary; `cyrius.lock` is unchanged.
+
+### Verification
+
+- **Tests:** 47 / 47 and 1,835 assertions on x86_64, and under qemu-aarch64
+  (`scripts/aarch64-sweep.sh`).
+- **Gates:** lint, `fmt --check` and `cyrius vet` are clean on every file CI gates.
+  `cyrius deps --verify`: 69 verified. Both pidfd syscalls read back under `qemu -strace` on
+  both arches.
+- **qemu under KVM:** the PID-1 harness passes at `-m 256M` (`m3 ok`, `l3 ok`, `done`). Its L3
+  case spawns through the refactored `_exec_service_image`. The boot test reaches `pid1 loop
+  ready`.
+- **Not re-run:** the unprivileged pid-namespace check (idle wakeups, 300 orphans). It
+  exercises the reap loop, which 1.18.0 changes only for entries whose pidfd shows a foreign
+  reap.
+
+### Downstream: kybernet
+
+kybernet pins argonaut 1.15.6 on cyrius 6.6.20. Built from a scratch copy on 6.7.18 against
+this tree (`path` override, `CYRIUS_LOCAL=argonaut`):
+
+| Against | Result |
+|---|---|
+| argonaut 1.17.0 (at 1.17.0) | builds, 1,102,008 B, **888 / 890** |
+| this tree | builds, 1,106,216 B, **888 / 890** |
+
+- **The two failures are unchanged:** kybernet's own `test_emergency_auth` assertions, which
+  pin the open `emergency_shell_default()` that 1.16.2 closed.
+- **What kybernet will notice when it takes 1.18.0:**
+  - `kyb_pre_exec` now runs for its services' command checks. It joins the check to the
+    service's cgroup, and confines it as the service is;
+  - its watchdog kills go through pidfds.
+  - It calls none of the changed signatures.
+
+---
+
 ## [1.17.2] — 2026-10-30
 
 **The roadmap's 1.17.2: CI runs on arm64 hardware, and the aarch64 release binary is required.**

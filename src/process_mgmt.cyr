@@ -411,7 +411,14 @@ fn run_safe_cmd_timeout(cmd, timeout_ms) {
     # signal it whichever side runs first (the job-control race). EACCES
     # once the child has exec'd is expected and harmless.
     ag_sys_setpgid(pid, pid);
+    return _wait_cmd_bounded(pid, timeout_ms);
+}
 
+# Wait for command child `pid`, which leads its own process group, for up to
+# `timeout_ms`. Returns its exit code, 128+signal, or -1 on a wait failure or a
+# timeout (then the group is SIGKILLed and the child reaped, bounded). Shared by
+# run_safe_cmd_timeout and run_check_as.
+fn _wait_cmd_bounded(pid, timeout_ms) {
     var deadline = monotonic_ms() + timeout_ms;
     while (monotonic_ms() < deadline) {
         var status_buf[8];
@@ -436,7 +443,7 @@ fn run_safe_cmd_timeout(cmd, timeout_ms) {
     # direct child as a fallback should the group not exist. Orphaned
     # descendants are reaped by the subreaper sweep (proc_table_reap_orphans).
     if (pid > 1) {
-        if (sys_kill(0 - pid, SIGKILL) < 0) { process_kill(pid); }
+        if (sys_kill(-pid, SIGKILL) < 0) { process_kill(pid); }
     }
     var kill_deadline = monotonic_ms() + 500;
     var kdone = 0;
@@ -664,6 +671,10 @@ fn _append_env_map(v, env) {
 #   * Ordering is the caller's problem, but the workable order is
 #     no_new_privs -> capability/uid/gid drop -> Landlock -> seccomp, since
 #     an installed seccomp filter will otherwise kill the drop syscalls.
+#   * Since 1.18.0 it also runs for the service's command health and ready
+#     checks (run_check_as, ADR-015), with the same definition, so a check is
+#     confined as its service is. `argonaut_exec_kind()` tells the hook which
+#     image is about to exec: EXEC_SERVICE or EXEC_HEALTH_CHECK.
 var _pre_exec_hook = 0;
 
 # Register the pre-exec callback. Pass 0 to clear. Returns the previous
@@ -676,8 +687,19 @@ fn argonaut_set_pre_exec_hook(fp) {
 
 fn argonaut_pre_exec_hook() { return _pre_exec_hook; }
 
-# Fork + exec a service, returning child PID.
-# Parent returns immediately; child execs the binary.
+# What a spawn child is about to exec, for the pre-exec hook. EXEC_NONE outside
+# a spawn child: it is set in the child, after fork, so the parent never sees
+# another value.
+enum ExecKind {
+    EXEC_NONE = 0;
+    EXEC_SERVICE = 1;            # fork_exec_service: the service itself
+    EXEC_HEALTH_CHECK = 2;       # run_check_as: a command health or ready check
+}
+
+var _exec_kind = 0;
+
+fn argonaut_exec_kind() { return _exec_kind; }
+
 # One limit as both soft and hard, for the calling process. 0, or -1.
 fn _set_rlimit(resource, value) {
     var lim[16];
@@ -718,6 +740,94 @@ fn _apply_rlimits(rl) {
     return 0;
 }
 
+# In a spawn child: stdin, stdout and stderr on /dev/null, so a service's (or a
+# check's) output stops mixing into argonaut's stdio. Production wiring should
+# swap /dev/null for the journal fd.
+#
+# ⚠ open() CAN RETURN 0, 1 OR 2 ITSELF: PID 1 starts with no fds when the
+# initramfs has no /dev/console. Such an fd is already one of the three, so it
+# is never dup'd onto itself and never closed. Closing it after dup2(fd, fd)
+# left the service with stdin or stdout closed, and its next open() landed
+# there (1.16.3).
+fn _child_stdio_devnull() {
+    var devnull_r = sys_open("/dev/null", 0, 0);   # O_RDONLY
+    if (devnull_r >= 0) {
+        if (devnull_r != 0) { sys_dup2(devnull_r, 0); }
+        if (devnull_r > 2) { sys_close(devnull_r); }
+    }
+    var devnull_w = sys_open("/dev/null", 1, 0);   # O_WRONLY
+    if (devnull_w >= 0) {
+        if (devnull_w != 1) { sys_dup2(devnull_w, 1); }
+        if (devnull_w != 2) { sys_dup2(devnull_w, 2); }
+        if (devnull_w > 2) { sys_close(devnull_w); }
+    }
+    return 0;
+}
+
+# In a spawn child: exec cstr `path` with `argv_buf` as an image of service
+# `svc_def`: its environment and env files, its resource limits, and the
+# pre-exec hook, which reads `kind` through argonaut_exec_kind(). Never
+# returns: 126 when the environment, a limit or the hook refuses (fails
+# CLOSED), 127 when the exec fails. fork_exec_service and run_check_as both end
+# here, so a service and its command checks are confined alike (ADR-015).
+fn _exec_service_image(svc_def, path, argv_buf, kind) {
+    # Environment (1.6.3 audit MEDIUM-2): pass a minimal
+    # default envp containing PATH. Pre-1.6.3 passed empty
+    # envp; services lost PATH silently. The service's own
+    # map is merged in, overriding any default it defines
+    # (1.15.0; 1.16.1 audit B-10).
+    var env_vec = build_service_envp(svc_def);
+    # 1.17.0: an env file that cannot be loaded (changed since the
+    # preflight, or names an invalid variable) fails the start CLOSED,
+    # with the hook's 126: a service started without part of its
+    # configured environment is one nobody configured.
+    if (env_vec == 0) { sys_exit(126); }
+    var envc = vec_len(env_vec);
+    var envp_buf = alloc((envc + 1) * 8);
+    var enpi = 0;
+    while (enpi < envc) {
+        store64(envp_buf + enpi * 8, vec_get(env_vec, enpi));
+        enpi = enpi + 1;
+    }
+    store64(envp_buf + envc * 8, 0);
+
+    # Reset signal mask (1.6.3 audit MEDIUM-1) — drop the
+    # PID-1 supervisor loop's SIGTERM/SIGINT/SIGCHLD block
+    # before exec so the service can install its own handlers
+    # and receive shutdown signals.
+    reset_child_signal_mask();
+
+    # Resource limits (1.17.0). After argv / envp are built, so an
+    # address-space limit cannot starve those allocations; before the
+    # hook, which may drop CAP_SYS_RESOURCE (needed to raise a hard
+    # limit). Fails CLOSED with the hook's 126: a limit the kernel
+    # refuses is a service started outside the bounds it was given.
+    if (_apply_rlimits(svc_def_rlimits(svc_def)) != 0) { sys_exit(126); }
+
+    # Pre-exec hook (1.9.0) — LAST thing before execve, so anything it
+    # installs (seccomp, Landlock, dropped capabilities) is in force for
+    # the exec'd image. Deliberately after the signal reset: a hook that
+    # installs a seccomp filter would otherwise have to allowlist
+    # rt_sigprocmask purely to let the reset run.
+    #
+    # Fails CLOSED. A hook that reports failure means the sandbox could
+    # not be established, and running the service unsandboxed is the one
+    # outcome worse than not running it — exit 126 (distinct from 127,
+    # "exec failed") so the supervisor can tell the two apart.
+    _exec_kind = kind;
+    if (_pre_exec_hook != 0) {
+        if (fncall1(_pre_exec_hook, svc_def) != 0) {
+            sys_exit(126);
+        }
+    }
+
+    sys_execve(path, argv_buf, envp_buf);
+    sys_exit(127);  # exec failed
+    return 0;
+}
+
+# Fork + exec a service, returning the child's pid, or -1.
+# Parent returns immediately; child execs the binary.
 fn fork_exec_service(svc_def) {
     var sn = svc_def_name(svc_def);
     sakshi_debug(str_data(sn), str_len(sn));
@@ -738,27 +848,7 @@ fn fork_exec_service(svc_def) {
         # gets its own session. Non-fatal — already-session-leader
         # callers return EPERM and we proceed.
         sys_setsid();
-
-        # Redirect stdin to /dev/null and (L3) replace stdout / stderr
-        # so service log output stops mixing into argonaut's stdio.
-        # Production wiring should swap /dev/null for the journal fd.
-        #
-        # ⚠ open() CAN RETURN 0, 1 OR 2 ITSELF: PID 1 starts with no fds
-        # when the initramfs has no /dev/console. Such an fd is already one
-        # of the three, so it is never dup'd onto itself and never closed.
-        # Closing it after dup2(fd, fd) left the service with stdin or
-        # stdout closed, and its next open() landed there (1.16.3).
-        var devnull_r = sys_open("/dev/null", 0, 0);   # O_RDONLY
-        if (devnull_r >= 0) {
-            if (devnull_r != 0) { sys_dup2(devnull_r, 0); }
-            if (devnull_r > 2) { sys_close(devnull_r); }
-        }
-        var devnull_w = sys_open("/dev/null", 1, 0);   # O_WRONLY
-        if (devnull_w >= 0) {
-            if (devnull_w != 1) { sys_dup2(devnull_w, 1); }
-            if (devnull_w != 2) { sys_dup2(devnull_w, 2); }
-            if (devnull_w > 2) { sys_close(devnull_w); }
-        }
+        _child_stdio_devnull();
 
         # Exec the binary directly via sys_execve — we're already
         # in the forked child; calling `exec_env_str` here would
@@ -783,60 +873,58 @@ fn fork_exec_service(svc_def) {
         }
         store64(argv_buf + argc * 8, 0);
 
-        # Environment (1.6.3 audit MEDIUM-2): pass a minimal
-        # default envp containing PATH. Pre-1.6.3 passed empty
-        # envp; services lost PATH silently. The service's own
-        # map is merged in, overriding any default it defines
-        # (1.15.0; 1.16.1 audit B-10).
-        var env_vec = build_service_envp(svc_def);
-        # 1.17.0: an env file that cannot be loaded (changed since the
-        # preflight, or names an invalid variable) fails the start CLOSED,
-        # with the hook's 126: a service started without part of its
-        # configured environment is one nobody configured.
-        if (env_vec == 0) { sys_exit(126); }
-        var envc = vec_len(env_vec);
-        var envp_buf = alloc((envc + 1) * 8);
-        var enpi = 0;
-        while (enpi < envc) {
-            store64(envp_buf + enpi * 8, vec_get(env_vec, enpi));
-            enpi = enpi + 1;
-        }
-        store64(envp_buf + envc * 8, 0);
-
-        # Reset signal mask (1.6.3 audit MEDIUM-1) — drop the
-        # PID-1 supervisor loop's SIGTERM/SIGINT/SIGCHLD block
-        # before exec so the service can install its own handlers
-        # and receive shutdown signals.
-        reset_child_signal_mask();
-
-        # Resource limits (1.17.0). After argv / envp are built, so an
-        # address-space limit cannot starve those allocations; before the
-        # hook, which may drop CAP_SYS_RESOURCE (needed to raise a hard
-        # limit). Fails CLOSED with the hook's 126: a limit the kernel
-        # refuses is a service started outside the bounds it was given.
-        if (_apply_rlimits(svc_def_rlimits(svc_def)) != 0) { sys_exit(126); }
-
-        # Pre-exec hook (1.9.0) — LAST thing before execve, so anything it
-        # installs (seccomp, Landlock, dropped capabilities) is in force for
-        # the exec'd image. Deliberately after the signal reset: a hook that
-        # installs a seccomp filter would otherwise have to allowlist
-        # rt_sigprocmask purely to let the reset run.
-        #
-        # Fails CLOSED. A hook that reports failure means the sandbox could
-        # not be established, and running the service unsandboxed is the one
-        # outcome worse than not running it — exit 126 (distinct from 127,
-        # "exec failed") so the supervisor can tell the two apart.
-        if (_pre_exec_hook != 0) {
-            if (fncall1(_pre_exec_hook, svc_def) != 0) {
-                sys_exit(126);
-            }
-        }
-
-        sys_execve(str_data(binary), argv_buf, envp_buf);
-        sys_exit(127);  # exec failed
+        _exec_service_image(svc_def, str_data(binary), argv_buf, EXEC_SERVICE);
     }
 
     return pid;  # Parent returns child PID
+}
+
+# Run SafeCommand `cmd` as a command health or ready check of service
+# `svc_def`, under `timeout_ms`, spawned the way the service is (1.18.0,
+# ADR-015): its environment and env files, its resource limits, and the
+# pre-exec hook, which sees argonaut_exec_kind() == EXEC_HEALTH_CHECK. stdio
+# is /dev/null. The binary resolution, the process group, the bounded wait and
+# the timeout kill are run_safe_cmd_timeout's.
+#
+# Returns the exit code, 127 when the binary cannot be found, or -1 (a spawn
+# or wait failure, a timeout). A hook, limit or environment (an env file that
+# cannot be loaded) that refuses is 126: the check fails CLOSED and never runs
+# unconfined. There is no parent-side env-file preflight, unlike
+# fork_exec_service's: a check has no start to refuse early, and the child's
+# refusal is the same failed check.
+#
+# svc_def == 0 is run_safe_cmd_timeout: with no service there is no service
+# policy to run under.
+#
+# Allocation-free in the parent, as run_safe_cmd_timeout is (it runs every
+# health poll): argv is its static buffer, and the environment is built in the
+# child.
+fn run_check_as(svc_def, cmd, timeout_ms) {
+    if (svc_def == 0) { return run_safe_cmd_timeout(cmd, timeout_ms); }
+    var resolved = _resolve_safe_binary(safe_cmd_binary(cmd));
+    if (resolved == 0) { return 127; }
+    var cmd_args = safe_cmd_args(cmd);
+    var argc = vec_len(cmd_args);
+    if (argc > 16) { return 127; }
+
+    var argv_buf = &_RSC_ARGV;
+    store64(argv_buf, str_data(resolved));
+    for (var i = 0; i < argc; i = i + 1) {
+        store64(argv_buf + (i + 1) * 8, str_data(vec_get(cmd_args, i)));
+    }
+    store64(argv_buf + (argc + 1) * 8, 0);
+
+    var pid = sys_fork();
+    if (pid < 0) { return -1; }
+    if (pid == 0) {
+        # Its own process group, as run_safe_cmd_timeout's child (1.16.1
+        # audit A-2): a timeout kills everything the check started.
+        ag_sys_setpgid(0, 0);
+        _child_stdio_devnull();
+        _exec_service_image(svc_def, str_data(resolved), argv_buf, EXEC_HEALTH_CHECK);
+    }
+    ag_sys_setpgid(pid, pid);
+    return _wait_cmd_bounded(pid, timeout_ms);
 }
 
 # =========================================================================
@@ -845,26 +933,159 @@ fn fork_exec_service(svc_def) {
 
 # Process table is a map: service_name -> pid
 # Started-at times: separate map: service_name -> monotonic_ms
+# Process identity: separate map: service_name -> pidfd + 1 (0 = none)
 var g_proc_table = 0;
 var g_proc_times = 0;
+var g_proc_pidfds = 0;
 
-fn proc_table_init() {
-    g_proc_table = map_new();
-    g_proc_times = map_new();
+# =========================================================================
+# Process identity — a pidfd per tracked process (1.18.0)
+# =========================================================================
+#
+# ⚠ A PID IS A NUMBER, AND THE KERNEL REUSES IT ONCE THE PROCESS IS REAPED. The
+# proc table holds numbers. If anything reaps a tracked process behind
+# argonaut's back (a consumer's own waitpid(-1), or a caller of the proc_table_*
+# API), the entry keeps a number that may already name another process,
+# possibly another child of argonaut's, which a waitpid probe (B-7) cannot tell
+# apart. So each entry also holds a pidfd, opened when the entry is inserted:
+#
+#   * While a pidfd's process exists (alive, or a zombie), its number cannot be
+#     reused. `proc_pidfd_gone` asks the pidfd first; when it answers "exists",
+#     the number-based waitpid probe and the process-group kill are safe.
+#   * Every signal to a tracked process goes through its pidfd
+#     (`proc_send_signal`), and reaches that process or nothing.
+#
+# FALLBACK (the maintainer's 1.18.0 decision): with no pidfd (Linux < 5.3,
+# pidfd_open failing, or pidfds disabled), argonaut signals by number after the
+# B-7 probe, as before. That is still exact for argonaut's own children while
+# argonaut is their only reaper; it is not exact for a number reaped elsewhere.
+#
+# pidfd_open sets O_CLOEXEC, so no service inherits one. The single-threaded
+# supervisor is what makes "check the pidfd, then use the number" atomic:
+# nothing in argonaut reaps between the two.
+enum PidfdErrno {
+    AG_ESRCH = 3;            # no such process: a pidfd's process has been reaped
+    AG_ENOSYS = 38;          # the kernel has no pidfd_open (Linux < 5.3)
 }
 
+var _pidfd_enabled = 1;
+var _pidfd_absent = 0;       # 1 once pidfd_open returned ENOSYS
+
+# Turn pidfds on (1) or off (0) for entries inserted from now on. Off is the
+# probe-then-signal fallback. Returns the previous setting.
+fn argonaut_set_pidfd_enabled(on) {
+    var prev = _pidfd_enabled;
+    _pidfd_enabled = on;
+    return prev;
+}
+
+fn argonaut_pidfd_enabled() { return _pidfd_enabled; }
+
+# A pidfd for `pid`, or -1: pid <= 0, pidfds disabled, the kernel has none
+# (warned once), or pidfd_open refused (ESRCH: already gone; EMFILE).
+fn _pidfd_for(pid) {
+    if (pid <= 0) { return -1; }
+    if (_pidfd_enabled == 0) { return -1; }
+    if (_pidfd_absent == 1) { return -1; }
+    var fd = sys_pidfd_open(pid, 0);
+    if (fd == -AG_ENOSYS) {
+        _pidfd_absent = 1;
+        sakshi_warn("pidfd_open: ENOSYS; signalling by pid after a probe", 51);
+        return -1;
+    }
+    if (fd < 0) { return -1; }
+    return fd;
+}
+
+# 1 when `pidfd`'s process has been reaped: its pid number may now belong to
+# anyone, so nothing may be signalled or waited on by number. 0 while it exists
+# (alive or a zombie, so its number is still its own), or when pidfd < 0.
+fn proc_pidfd_gone(pidfd) {
+    if (pidfd < 0) { return 0; }
+    if (ag_sys_pidfd_send_signal(pidfd, 0, 0, 0) == -AG_ESRCH) { return 1; }
+    return 0;
+}
+
+# Send `sig` to a tracked process through `pidfd`, or, with no pidfd, to `pid`
+# (the caller has probed that `pid` is its running child). 0 or -errno. Never
+# kill(-1), kill(0) or init: pid <= 1 is -ESRCH.
+fn proc_send_signal(pidfd, pid, sig) {
+    if (pidfd >= 0) { return ag_sys_pidfd_send_signal(pidfd, sig, 0, 0); }
+    if (pid <= 1) { return -AG_ESRCH; }
+    return sys_kill(pid, sig);
+}
+
+# The pidfd stored under cstr key `key`, or -1.
+#
+# The pidfd map is allocated on the first insert that opens one, not by
+# proc_table_init: argonaut_init_new calls that, and an eager map_new cost every
+# init_new_* bench 0.6-0.7 µs (measured at 1.18.0) for a map most inits only
+# need once a service is spawned.
+fn _proc_pidfd_get(key) {
+    if (g_proc_pidfds == 0) { return -1; }
+    return map_get(g_proc_pidfds, key) - 1;
+}
+
+# Close and forget the pidfd stored under cstr key `key`, if any.
+fn _proc_pidfd_drop(key) {
+    if (g_proc_pidfds == 0) { return 0; }
+    var e = map_get(g_proc_pidfds, key);
+    if (e > 0) { sys_close(e - 1); }
+    map_delete(g_proc_pidfds, key);
+    return 0;
+}
+
+# Close every stored pidfd (the table is being replaced).
+fn _proc_pidfd_drop_all() {
+    if (g_proc_pidfds == 0) { return 0; }
+    var entries = map_entries(g_proc_pidfds);
+    var cap = map_cap(g_proc_pidfds);
+    for (var i = 0; i < cap; i = i + 1) {
+        var ep = entries + i * 24;
+        if (load64(ep + 16) == 1) {
+            var e = load64(ep + 8);
+            if (e > 0) { sys_close(e - 1); }
+        }
+    }
+    return 0;
+}
+
+fn proc_table_init() {
+    _proc_pidfd_drop_all();
+    g_proc_table = map_new();
+    g_proc_times = map_new();
+    g_proc_pidfds = 0;
+}
+
+# Track `pid` as service `name`, and open its pidfd. A pidfd already held for
+# the name (a previous run) is closed first.
 fn proc_table_insert(name, pid) {
-    map_set(g_proc_table, str_data(name), pid);
-    map_set(g_proc_times, str_data(name), monotonic_ms());
+    var key = str_data(name);
+    _proc_pidfd_drop(key);
+    map_set(g_proc_table, key, pid);
+    map_set(g_proc_times, key, monotonic_ms());
+    var fd = _pidfd_for(pid);
+    if (fd >= 0) {
+        if (g_proc_pidfds == 0) { g_proc_pidfds = map_new(); }
+        map_set(g_proc_pidfds, key, fd + 1);
+    }
 }
 
 fn proc_table_remove(name) {
-    map_delete(g_proc_table, str_data(name));
-    map_delete(g_proc_times, str_data(name));
+    var key = str_data(name);
+    _proc_pidfd_drop(key);
+    map_delete(g_proc_table, key);
+    map_delete(g_proc_times, key);
 }
 
 fn proc_table_pid(name) {
     return map_get(g_proc_table, str_data(name));
+}
+
+# The pidfd tracking service `name`, or -1 when it has none (the fallback, or
+# no proc table yet).
+fn proc_table_pidfd(name) {
+    return _proc_pidfd_get(str_data(name));
 }
 
 fn proc_table_has(name) {
@@ -918,15 +1139,21 @@ fn _wait_status_code(status) {
 # that as "still running": it SIGTERMed first, waited out the whole timeout,
 # then SIGKILLed whatever held the pid by then. A probe now runs before the
 # first signal and every wait failure ends the stop without signalling.
-fn process_stop(pid, timeout_ms) {
+#
+# 1.18.0: `pidfd` (or -1) is the process's identity. Its process reaped
+# elsewhere means the number may name someone else: the stop ends at once,
+# without a probe that could reap, or a signal that could reach, that someone.
+# Every signal goes through the pidfd.
+fn process_stop_fd(pid, pidfd, timeout_ms) {
     if (pid <= 0) { return -1; }
+    if (proc_pidfd_gone(pidfd) == 1) { return -1; }
     var status_buf[8];
     store64(&status_buf, 0);
     var probe = sys_waitpid(pid, &status_buf, WNOHANG);
     if (probe > 0) { return _wait_status_code(load32(&status_buf)); }
     if (probe < 0) { return -1; }
 
-    process_terminate(pid);
+    proc_send_signal(pidfd, pid, SIGTERM);
 
     var deadline = monotonic_ms() + timeout_ms;
     while (monotonic_ms() < deadline) {
@@ -939,7 +1166,7 @@ fn process_stop(pid, timeout_ms) {
 
     # Timed out — SIGKILL
     sakshi_warn("SIGKILL", 7);
-    process_kill(pid);
+    proc_send_signal(pidfd, pid, SIGKILL);
 
     # Wait up to 500ms for SIGKILL
     var kill_deadline = monotonic_ms() + 500;
@@ -952,6 +1179,11 @@ fn process_stop(pid, timeout_ms) {
     }
 
     return -1;
+}
+
+# process_stop_fd with no pidfd: the B-7 probe-then-signal alone.
+fn process_stop(pid, timeout_ms) {
+    return process_stop_fd(pid, -1, timeout_ms);
 }
 
 # (name, code) result pair for proc_table_stop_all.
@@ -972,14 +1204,18 @@ fn proc_table_stop_all(timeout_ms) {
     var keys = proc_table_keys();
     var remaining = vec_new();
 
-    # Probe, then send SIGTERM to every pid that is still our running child
+    # Probe, then send SIGTERM to every pid that is still our running child.
+    # 1.18.0: a pidfd whose process was reaped elsewhere is reported (-1) and
+    # its number is neither probed nor signalled (see process_stop_fd).
     for (var i = 0; i < vec_len(keys); i = i + 1) {
         var name = vec_get(keys, i);
         var pid = map_get(g_proc_table, name);
+        var pfd = _proc_pidfd_get(name);
         if (pid > 0) {
             var pbuf[8];
             store64(&pbuf, 0);
-            var probe = sys_waitpid(pid, &pbuf, WNOHANG);
+            var probe = -1;
+            if (proc_pidfd_gone(pfd) == 0) { probe = sys_waitpid(pid, &pbuf, WNOHANG); }
             if (probe > 0) {
                 var pcode = -1;
                 if (WIFEXITED(load32(&pbuf))) { pcode = WEXITSTATUS(load32(&pbuf)); }
@@ -987,7 +1223,7 @@ fn proc_table_stop_all(timeout_ms) {
             } elif (probe < 0) {
                 vec_push(results, _stop_result(name, -1));
             } else {
-                process_terminate(pid);
+                proc_send_signal(pfd, pid, SIGTERM);
                 vec_push(remaining, name);
             }
         }
@@ -1027,13 +1263,15 @@ fn proc_table_stop_all(timeout_ms) {
     for (var i = 0; i < vec_len(remaining); i = i + 1) {
         var name = vec_get(remaining, i);
         var pid = map_get(g_proc_table, name);
-        if (pid > 0) { process_kill(pid); }
+        if (pid > 0) { proc_send_signal(_proc_pidfd_get(name), pid, SIGKILL); }
         vec_push(results, _stop_result(name, -1));
     }
 
-    # Clear the table
+    # Clear the table, closing every pidfd
+    _proc_pidfd_drop_all();
     g_proc_table = map_new();
     g_proc_times = map_new();
+    g_proc_pidfds = 0;
 
     return results;
 }
@@ -1074,11 +1312,23 @@ fn proc_table_reap() {
             var pid = load64(ep + 8);
             if (pid > 0) {
                 var status_buf[8];
-                var ret = sys_waitpid(pid, &status_buf, WNOHANG);
+                store64(&status_buf, 0);
+                # 1.18.0: a pidfd whose process was reaped elsewhere ends the
+                # entry with its status lost (-1). Probing its number could
+                # reap a different child of ours that was given the number.
+                var gone = proc_pidfd_gone(_proc_pidfd_get(name));
+                var ret = 0;
+                if (gone == 1) {
+                    ret = pid;
+                } else {
+                    ret = sys_waitpid(pid, &status_buf, WNOHANG);
+                }
                 if (ret > 0) {
                     var status = load64(&status_buf);
                     var code = -1;
-                    if (WIFEXITED(status)) { code = WEXITSTATUS(status); }
+                    if (gone == 0) {
+                        if (WIFEXITED(status)) { code = WEXITSTATUS(status); }
+                    }
                     if (exited == 0) { exited = vec_new(); }
                     var pair = alloc(16);
                     store64(pair, str_from(name));
@@ -1091,10 +1341,11 @@ fn proc_table_reap() {
 
     if (exited == 0) { return _reap_empty_vec(); }
 
-    # Remove reaped processes
+    # Remove reaped processes, closing their pidfds
     for (var i = 0; i < vec_len(exited); i = i + 1) {
         var pair = vec_get(exited, i);
         var name = str_data(load64(pair));
+        _proc_pidfd_drop(name);
         map_delete(g_proc_table, name);
         map_delete(g_proc_times, name);
     }

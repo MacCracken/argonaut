@@ -35,5 +35,7 @@ these when you would reasonably ask *"why does it work this way?"*
 | [010](010-prlimit-over-preexec.md) | Resource limits through `prlimit(1)` | Superseded by ADR-014 |
 | [011](011-per-service-security-model.md) | Per-service seccomp, Landlock and capabilities | Superseded by ADR-013 |
 | [012](012-api-stability-pre-1.0.md) | API stability before 1.0 | Superseded: past 1.0 |
-| [013](013-policy-enforcement-in-the-consumer.md) | Service policy is enforced by the consumer, through a pre-exec hook | Accepted, narrowed by ADR-014 |
+| [013](013-policy-enforcement-in-the-consumer.md) | Service policy is enforced by the consumer, through a pre-exec hook | Accepted, narrowed by ADR-014 and ADR-015 |
 | [014](014-spawn-applies-limits-env-files-and-names.md) | argonaut applies limits and env files at spawn, and checks names at registration | Accepted |
+| [015](015-checks-run-under-the-service-spawn.md) | A service's command checks run the way the service is spawned: its environment, limits and hook | Accepted |
+| [016](016-pidfd-process-identity.md) | Tracked processes are identified by a pidfd, with probe-then-signal as the fallback | Accepted |

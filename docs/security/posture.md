@@ -28,7 +28,7 @@ the CHANGELOG.
 
 | Measure | Detail |
 |---------|--------|
-| SafeCommand | Every external command is an explicit `{binary, args}` executed by `run_safe_cmd_timeout`. It resolves the binary against a fixed PATH, puts the child in its own process group, calls `execve` directly with no shell, and waits against a deadline, killing the whole group on timeout |
+| SafeCommand | Every external command is an explicit `{binary, args}` executed by `run_safe_cmd_timeout` (or, for a service's command check, `run_check_as`, which adds the service's environment, limits and pre-exec hook: ADR-015). It resolves the binary against a fixed PATH, puts the child in its own process group, calls `execve` directly with no shell, and waits against a deadline, killing the whole group on timeout |
 | systemd unit generation | Escaping per setting: `%` doubled everywhere; `$` doubled on Exec lines; `"` and `\` escaped inside `Environment=`; a lone `;` written as `\;`; newlines folded. Keys and dependency names are validated, not escaped. A non-absolute binary is refused |
 | Device paths | `validate_device_path` requires `/dev/`, has no `..`, and allows a character whitelist only |
 | dm-verity / LUKS parameters | The root hash must be 64 hex digits (`is_hex64`). Mapper names are validated (`validate_mapper_name`; no leading `-`), and `--` precedes positional arguments |
@@ -49,7 +49,7 @@ the CHANGELOG.
 
 | Measure | Detail |
 |---------|--------|
-| Signalling the right process | argonaut never signals a pid that is not its child, or any pid ≤ 1. Timed children run in their own process group, and a timeout kills the group. The window between reading a pid and signalling it is still open; pidfd identity is roadmap 1.18.0 |
+| Signalling the right process | Every tracked process has a pidfd (1.18.0, ADR-016). Signals go through it, and a process reaped elsewhere is never probed, waited on or signalled by its old number. With no pidfd (Linux < 5.3), argonaut signals only its own running child, probed first (B-7). Never any pid ≤ 1. Timed children run in their own process group, and a timeout kills the group |
 | PID files | Read strictly: no symlinks, FIFOs or loose parsing; numeric only (`read_pid_file_safe`) |
 | Service standard fds | Every service starts with fds 0, 1 and 2 open on `/dev/null`, even when PID 1 started without them (1.16.3) |
 | Resource limits | Applied in the child before the pre-exec hook, as soft and hard limit; a refused limit fails the start closed with 126 (1.17.0, ADR-014) |
@@ -108,7 +108,7 @@ the CHANGELOG.
 | CWE-20 | Improper Input Validation | Hash, device-path and mapper-name validation; service names checked at registration (1.17.0); env-file variable names checked; strict PID-file and `MAINPID` parsing; port and URL checks; credential-record bounds |
 | CWE-190 | Integer Overflow | Saturating backoff; Argon2 `m` bounded during digit accumulation |
 | CWE-400 | Uncontrolled Resource Consumption | Restart window and limits, backoff floor, health deadlines, watchdog kills, notify drain cap, streaming audit chain |
-| CWE-362 | TOCTOU | `*at` / `O_NOFOLLOW` tmpfiles. The pid-recycling window is open (pidfd is roadmap 1.18.0) |
+| CWE-362 | TOCTOU | `*at` / `O_NOFOLLOW` tmpfiles. pidfd process identity closes the pid-recycling window (1.18.0); a forking service's pid file is still read before its pidfd is opened |
 | CWE-269 / CWE-250 | Privilege management | **Consumer**: the fail-closed pre-exec hook (ADR-013). argonaut drops nothing itself |
 | CWE-284 | Access control | Emergency-shell authentication (Argon2id, required by default); notify sender authentication |
 | CWE-835 | Infinite Loop / hang | Deadline-bounded health checks, starts and stops; SIGKILL escalation |
@@ -120,9 +120,8 @@ the CHANGELOG.
 | Gap | Severity | Status |
 |-----|----------|--------|
 | No confinement without a hook | High (by design) | A consumer that does not register the pre-exec hook runs services as root. kybernet registers it |
-| Health-check commands bypass the hook | Medium | A confined service's command check runs unconfined (roadmap 1.18.0) |
-| PID reuse between read and signal | Low | pidfd identity is roadmap 1.18.0 |
-| Resource limits and log rotation | Low | Modelled only; not applied |
+| PID reuse on a kernel without pidfd | Low | Before Linux 5.3 argonaut falls back to probe-then-signal (ADR-016), exact only while argonaut is its children's only reaper |
+| Log rotation | Low | Modelled only; not applied (`LogConfig`) |
 | Legacy emergency credential | Low | Unsalted SHA-256 is still accepted beside Argon2id; retirement is gated on kybernet |
 | SBOM / provenance | Low | No SBOM or SLSA provenance attestation |
 

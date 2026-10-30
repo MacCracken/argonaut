@@ -1,0 +1,354 @@
+# pidfd.tcyr — process identity (1.18.0, ADR-016).
+#
+# The proc table holds pid NUMBERS, and the kernel reuses a number once its
+# process is reaped. When something reaps a tracked process behind argonaut's
+# back, the entry keeps a number that may name another process, even another
+# child of argonaut's, which a waitpid probe (B-7) cannot tell apart. Each entry
+# now holds a pidfd, and every signal and liveness check asks it first.
+#
+# "Recycling" is simulated exactly: process A is tracked (its pidfd opened),
+# then reaped outside the table, and the table's number is rewritten to B, a
+# live child of ours: what the entry looks like after the kernel hands A's
+# number to B. Against the 1.17.x source every path below signals B.
+#
+# ⚠ ORDER MATTERS: argonaut_init_new enrols this process as a child subreaper
+# and resets the proc table. The non-child stray is spawned before any init
+# exists, so it is reparented away from us for good.
+include "tests/test_header.cyr"
+
+var _pf_argv[3];
+var _pf_envp[1];
+
+# Spawn `/bin/sleep 30` as our child. Returns its pid.
+fn pf_spawn_sleep() {
+    store64(&_pf_argv, "/bin/sleep");
+    store64(&_pf_argv + 8, "30");
+    store64(&_pf_argv + 16, 0);
+    store64(&_pf_envp, 0);
+    var c = sys_fork();
+    if (c == 0) {
+        sys_execve("/bin/sleep", &_pf_argv, &_pf_envp);
+        sys_exit(127);
+    }
+    return c;
+}
+
+# A live process that is NOT our child: A forks B (/bin/sleep 30) and exits,
+# so B is reparented away from us. Returns B's pid.
+fn pf_spawn_stray() {
+    store64(&_pf_argv, "/bin/sleep");
+    store64(&_pf_argv + 8, "30");
+    store64(&_pf_argv + 16, 0);
+    store64(&_pf_envp, 0);
+    var fds = alloc(8);
+    if (sys_pipe(fds) != 0) { return -1; }
+    var rfd = load32(fds);
+    var wfd = load32(fds + 4);
+    var a = sys_fork();
+    if (a == 0) {
+        var b = sys_fork();
+        if (b == 0) {
+            sys_execve("/bin/sleep", &_pf_argv, &_pf_envp);
+            sys_exit(127);
+        }
+        var wb = alloc(8);
+        store64(wb, b);
+        sys_write(wfd, wb, 8);
+        sys_exit(0);
+    }
+    sys_close(wfd);
+    var rb = alloc(8);
+    store64(rb, 0);
+    sys_read(rfd, rb, 8);
+    sys_close(rfd);
+    var ast = alloc(8);
+    sys_waitpid(a, ast, 0);
+    return load64(rb);
+}
+
+# State letter from /proc/<pid>/stat, or 0 when the pid does not exist.
+fn pf_proc_state(pid) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/proc/");
+    str_builder_add_int(sb, pid);
+    str_builder_add_cstr(sb, "/stat");
+    var p = str_builder_build(sb);
+    var buf = alloc(512);
+    var n = file_read_all(str_data(p), buf, 511);
+    if (n <= 0) { return 0; }
+    var rp = -1;
+    var i = n - 1;
+    while (rp < 0 && i >= 0) {
+        if (load8(buf + i) == 41) { rp = i; }   # the LAST ')' ends comm
+        i = i - 1;
+    }
+    if (rp < 0) { return 0; }
+    if (rp + 2 >= n) { return 0; }
+    return load8(buf + rp + 2);
+}
+
+# 1 if `pid` is a live (non-zombie) process.
+fn pf_alive(pid) {
+    var st = pf_proc_state(pid);
+    if (st == 0) { return 0; }
+    if (st == 90) { return 0; }   # 'Z'
+    return 1;
+}
+
+# Poll until `pid` is gone or a zombie, reaping it if it is ours. 1 when gone.
+fn pf_wait_gone(pid, budget_ms) {
+    var deadline = monotonic_ms() + budget_ms;
+    var gone = 0;
+    while (gone == 0 && monotonic_ms() < deadline) {
+        var st = alloc(8);
+        sys_waitpid(pid, st, WNOHANG);
+        if (pf_alive(pid) == 0) { gone = 1; } else { sleep_ms(20); }
+    }
+    return gone;
+}
+
+# Kill and reap our child `pid`.
+fn pf_kill_reap(pid) {
+    sys_kill(pid, SIGKILL);
+    var st = alloc(8);
+    sys_waitpid(pid, st, 0);
+    return 0;
+}
+
+# 1 when `fd` is an open descriptor.
+fn pf_fd_open(fd) {
+    if (fd < 0) { return 0; }
+    return sys_fcntl(fd, F_GETFD, 0) >= 0;
+}
+
+# Open descriptors among 0..1023 (fcntl F_GETFD succeeds).
+fn pf_open_fds() {
+    var n = 0;
+    for (var fd = 0; fd < 1024; fd = fd + 1) {
+        if (sys_fcntl(fd, F_GETFD, 0) >= 0) { n = n + 1; }
+    }
+    return n;
+}
+
+# Track A as `name`, reap A outside the table, and give its number to live
+# child B. Returns B; the entry's pidfd still names A.
+fn pf_recycle(name) {
+    var a = pf_spawn_sleep();
+    proc_table_insert(name, a);
+    pf_kill_reap(a);
+    var b = pf_spawn_sleep();
+    map_set(g_proc_table, str_data(name), b);
+    sleep_ms(30);
+    return b;
+}
+
+# A RUNNING service `name` with a health check that never passes, registered
+# in `cfg`. The watchdog window is 1*1+1 = 2 ms of uptime.
+fn pf_wd_service(cfg, name) {
+    var sd = svc_def_new(str_from(name), str_from("t"), str_from("/bin/sleep"));
+    svc_def_set_health_check(sd, health_check_new(HC_TCP_CONNECT, str_from("127.0.0.1"), 9, 1, 1, 1));
+    vec_push(config_services(cfg), sd);
+    return sd;
+}
+
+fn main() {
+    alloc_init();
+
+    # Before any init: strays that are not our children (see the header).
+    var stray = pf_spawn_stray();
+    var stray2 = pf_spawn_stray();
+
+    proc_table_init();
+    var probe_fd = sys_pidfd_open(sys_getpid(), 0);
+    var have = 0;
+    if (probe_fd >= 0) {
+        have = 1;
+        sys_close(probe_fd);
+    }
+    test_group("platform");
+    assert_eq(have, 1, "pidfd_open works here (Linux 5.3+, or qemu-user that passes it through)");
+
+    # =====================================================================
+    test_group("the wrapper");
+    var w = pf_spawn_sleep();
+    var wfd = sys_pidfd_open(w, 0);
+    assert(wfd >= 0, "pidfd for a live child");
+    assert_eq(ag_sys_pidfd_send_signal(wfd, 0, 0, 0), 0, "signal 0 through it: exists");
+    assert_eq(proc_pidfd_gone(wfd), 0, "proc_pidfd_gone: not gone");
+    pf_kill_reap(w);
+    assert_eq(ag_sys_pidfd_send_signal(wfd, 0, 0, 0), -AG_ESRCH, "after the reap: -ESRCH");
+    assert_eq(proc_pidfd_gone(wfd), 1, "proc_pidfd_gone: gone");
+    assert_eq(proc_pidfd_gone(-1), 0, "no pidfd is never 'gone'");
+    sys_close(wfd);
+
+    # =====================================================================
+    test_group("the proc table owns one pidfd per entry");
+    var c1 = pf_spawn_sleep();
+    var base = pf_open_fds();
+    proc_table_insert(str_from("pf-own"), c1);
+    var fd1 = proc_table_pidfd(str_from("pf-own"));
+    assert(fd1 >= 0, "insert opens a pidfd");
+    assert_eq(pf_open_fds(), base + 1, "... exactly one");
+    assert_eq(sys_fcntl(fd1, F_GETFD, 0) & FD_CLOEXEC, FD_CLOEXEC, "... close-on-exec, so no service inherits it");
+    assert_eq(proc_table_pidfd(str_from("pf-none")), -1, "an untracked name has none");
+    proc_table_insert(str_from("pf-zero"), 0);
+    assert_eq(proc_table_pidfd(str_from("pf-zero")), -1, "pid 0 gets none");
+
+    var c2 = pf_spawn_sleep();
+    var base2 = pf_open_fds();
+    proc_table_insert(str_from("pf-own"), c2);
+    assert_eq(pf_open_fds(), base2, "re-insert closes the previous run's pidfd (no leak)");
+    var fd2 = proc_table_pidfd(str_from("pf-own"));
+    assert(fd2 >= 0, "... and holds a new one");
+    assert_eq(ag_sys_pidfd_send_signal(fd2, 0, 0, 0), 0, "... for the new run");
+    pf_kill_reap(c1);
+    assert_eq(proc_pidfd_gone(fd2), 0, "... not the old one (that run is reaped; this pidfd is unaffected)");
+    proc_table_remove(str_from("pf-own"));
+    assert_eq(pf_open_fds(), base2 - 1, "proc_table_remove closes it");
+    pf_kill_reap(c2);
+
+    # Roadmap: a pidfd closes when its service is reaped.
+    var c3 = pf_spawn_sleep();
+    proc_table_insert(str_from("pf-reaped"), c3);
+    var fd3 = proc_table_pidfd(str_from("pf-reaped"));
+    sys_kill(c3, SIGKILL);
+    var reaped = 0;
+    var deadline = monotonic_ms() + 2000;
+    while (reaped == 0 && monotonic_ms() < deadline) {
+        var ex = proc_table_reap();
+        if (vec_len(ex) > 0) { reaped = 1; } else { sleep_ms(10); }
+    }
+    assert_eq(reaped, 1, "proc_table_reap reports the exit");
+    assert_eq(pf_fd_open(fd3), 0, "a pidfd closes when its service is reaped");
+
+    var c4 = pf_spawn_sleep();
+    proc_table_insert(str_from("pf-all"), c4);
+    var fd4 = proc_table_pidfd(str_from("pf-all"));
+    proc_table_stop_all(2000);
+    assert_eq(pf_fd_open(fd4), 0, "proc_table_stop_all closes every pidfd");
+    proc_table_init();
+
+    # =====================================================================
+    test_group("a recycled pid is never signalled");
+
+    # process_stop_fd: returns at once, B untouched.
+    var b1 = pf_recycle(str_from("pf-stop"));
+    var t0 = monotonic_ms();
+    var rc = process_stop_fd(b1, proc_table_pidfd(str_from("pf-stop")), 2000);
+    var spent = monotonic_ms() - t0;
+    assert_eq(rc, -1, "process_stop_fd: -1 (the tracked process is gone)");
+    assert(spent < 1000, "... at once, not after the timeout");
+    sleep_ms(30);
+    assert_eq(pf_alive(b1), 1, "process_stop_fd sends nothing to the number's new owner");
+    var bst = alloc(8);
+    assert_eq(sys_waitpid(b1, bst, WNOHANG), 0, "... and does not reap it");
+
+    # proc_table_reap: the entry ends, status lost; B is not reaped.
+    var ex2 = proc_table_reap();
+    assert_eq(vec_len(ex2), 1, "proc_table_reap ends the entry");
+    if (vec_len(ex2) == 1) {
+        assert_eq(load64(vec_get(ex2, 0) + 8), -1, "... with its status lost (-1)");
+    }
+    assert_eq(proc_table_has(str_from("pf-stop")), 0, "... and drops it");
+    assert_eq(sys_waitpid(b1, bst, WNOHANG), 0, "proc_table_reap does not reap the number's new owner");
+    pf_kill_reap(b1);
+
+    # proc_table_stop_all
+    var b2 = pf_recycle(str_from("pf-all2"));
+    var all_res = proc_table_stop_all(2000);
+    assert_eq(vec_len(all_res), 1, "proc_table_stop_all reports the entry");
+    sleep_ms(30);
+    assert_eq(pf_alive(b2), 1, "proc_table_stop_all sends nothing to the number's new owner");
+    pf_kill_reap(b2);
+    proc_table_init();
+
+    # The watchdog, the ordered shutdown and the process-alive check, through
+    # an init.
+    var cfg = argonaut_config_default();
+    var sd_wd = pf_wd_service(cfg, "pf-wd");
+    var sd_sd = pf_wd_service(cfg, "pf-down");
+    var init = argonaut_init_new(cfg);
+    assert(init != 0, "init built");
+
+    managed_svc_set_state(init_get_service(init, "pf-wd"), STATE_RUNNING);
+    var b3 = pf_recycle(str_from("pf-wd"));
+    managed_svc_set_pid(init_get_service(init, "pf-wd"), b3);
+
+    # HC_PROCESS_ALIVE for the service asks its pidfd: dead. The name-only form
+    # (no definition) still asks the number.
+    var alive_hc = health_check_new(HC_PROCESS_ALIVE, 0, 0, 1000, 1000, 1);
+    var hr = execute_service_health_check(sd_wd, alive_hc, b3);
+    assert_eq(load64(hr + 16), 0, "process-alive check for the service: dead, though its number is live");
+    var hr0 = execute_health_check(str_from("pf-wd"), alive_hc, b3);
+    assert_eq(load64(hr0 + 16), 1, "the name-only form still asks the number");
+
+    var killed = init_enforce_watchdog(init);
+    assert(vec_len(killed) >= 1, "the watchdog fired");
+    sleep_ms(30);
+    assert_eq(pf_alive(b3), 1, "the watchdog sends nothing to the number's new owner");
+    pf_kill_reap(b3);
+
+    managed_svc_set_state(init_get_service(init, "pf-down"), STATE_RUNNING);
+    var b4 = pf_recycle(str_from("pf-down"));
+    managed_svc_set_pid(init_get_service(init, "pf-down"), b4);
+    var t1 = monotonic_ms();
+    init_stop_all(init, 2000);
+    var spent2 = monotonic_ms() - t1;
+    sleep_ms(30);
+    assert_eq(pf_alive(b4), 1, "the ordered shutdown sends nothing to the number's new owner");
+    assert(spent2 < 1000, "... and does not wait out its budget on it");
+    assert_eq(managed_svc_state(init_get_service(init, "pf-down")), STATE_STOPPED,
+      "... and still ends the service STOPPED");
+    pf_kill_reap(b4);
+
+    # =====================================================================
+    test_group("pidfd identity reaches a daemon that is not our child");
+
+    # A forking service's daemon is not argonaut's child when argonaut is
+    # neither PID 1 nor a subreaper. Its pidfd pins it, so the watchdog may
+    # kill it; by number alone it may not (the fallback below).
+    assert(stray > 0, "stray fixture spawned");
+    managed_svc_set_state(init_get_service(init, "pf-wd"), STATE_RUNNING);
+    proc_table_insert(str_from("pf-wd"), stray);
+    assert(proc_table_pidfd(str_from("pf-wd")) >= 0, "a pidfd for the non-child");
+    sleep_ms(20);
+    init_enforce_watchdog(init);
+    assert_eq(pf_wait_gone(stray, 2000), 1, "the watchdog kills it through its pidfd");
+
+    # =====================================================================
+    test_group("fallback: no pidfd, probe-then-signal (B-7)");
+
+    assert_eq(argonaut_set_pidfd_enabled(0), 1, "pidfds were on; now off");
+    var c5 = pf_spawn_sleep();
+    proc_table_insert(str_from("pf-fb"), c5);
+    assert_eq(proc_table_pidfd(str_from("pf-fb")), -1, "with pidfds off, insert opens none");
+    sleep_ms(30);
+    assert_eq(process_stop_fd(c5, -1, 2000), 128 + SIGTERM, "a real child is still SIGTERMed and reaped");
+    proc_table_remove(str_from("pf-fb"));
+
+    # The watchdog's new probe: a running child is killed ...
+    managed_svc_set_state(init_get_service(init, "pf-wd"), STATE_RUNNING);
+    var c6 = pf_spawn_sleep();
+    proc_table_insert(str_from("pf-wd"), c6);
+    sleep_ms(20);
+    init_enforce_watchdog(init);
+    assert_eq(pf_wait_gone(c6, 2000), 1, "the watchdog kills a running child");
+
+    # ... and a number that is not our child is not signalled. Until 1.18.0
+    # the watchdog sent SIGKILL to it unprobed.
+    assert(stray2 > 0, "second stray fixture spawned");
+    managed_svc_set_state(init_get_service(init, "pf-wd"), STATE_RUNNING);
+    proc_table_insert(str_from("pf-wd"), stray2);
+    sleep_ms(20);
+    var killed2 = init_enforce_watchdog(init);
+    assert(vec_len(killed2) >= 1, "the watchdog fired on the non-child");
+    sleep_ms(50);
+    assert_eq(pf_alive(stray2), 1, "without a pidfd, the watchdog does not signal a non-child");
+    sys_kill(stray2, SIGKILL);
+    pf_wait_gone(stray2, 1000);
+    assert_eq(argonaut_set_pidfd_enabled(1), 0, "pidfds back on");
+
+    return assert_summary();
+}
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

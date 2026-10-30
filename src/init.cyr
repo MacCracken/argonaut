@@ -573,7 +573,7 @@ fn init_start_simple(init, name, ms, sd) {
     # Run ready check if configured
     var rc = svc_def_ready_check(sd);
     if (rc != 0) {
-        var result = execute_ready_check(svc_def_name(sd), rc, pid);
+        var result = execute_service_ready_check(sd, rc, pid);
         if (load64(result + 16) == 0) {  # not passed
             managed_svc_set_state(ms, STATE_FAILED);
             managed_svc_set_pid(ms, 0);
@@ -688,7 +688,7 @@ fn argonaut_start_timeout_ms() { return _start_timeout_ms; }
 # init_reap_services collects it later.
 fn _init_kill_start_child(pid) {
     if (pid <= 1) { return 0; }          # never kill(-1) / kill(0) from PID 1
-    sys_kill(0 - pid, SIGKILL);
+    sys_kill(-pid, SIGKILL);
     sys_kill(pid, SIGKILL);
     var deadline = monotonic_ms() + 1000;
     var st[8];
@@ -832,7 +832,7 @@ fn init_stop_service(init, name, timeout_ms) {
     var pid = proc_table_pid(svc_name);
     var code = 0;
     if (pid > 0) {
-        code = process_stop(pid, timeout_ms);
+        code = process_stop_fd(pid, proc_table_pidfd(svc_name), timeout_ms);
         proc_table_remove(svc_name);
     }
 
@@ -1046,14 +1046,15 @@ enum ShutdownKill {
 
 # One service being stopped by a wave. Fields: ms, pid, done (1 = reaped or
 # nothing to wait for), code (_wait_status_code, -1 unknown), killed (1 =
-# SIGKILLed at the deadline).
-fn _sd_member(ms, pid) {
-    var m = alloc(40);
+# SIGKILLed at the deadline), pidfd (-1 = none: the B-7 fallback).
+fn _sd_member(ms, pid, pidfd) {
+    var m = alloc(48);
     store64(m, ms);
     store64(m + 8, pid);
     store64(m + 16, 0);
     store64(m + 24, 0);
     store64(m + 32, 0);
+    store64(m + 40, pidfd);
     return m;
 }
 
@@ -1079,6 +1080,8 @@ fn _sd_wave_live(svc_map, wave) {
 }
 
 # One WNOHANG pass over the members still pending. Returns how many remain.
+# A member whose pidfd's process was reaped elsewhere is done, status lost,
+# and its number is not probed (process_stop_fd's rule, 1.18.0).
 fn _sd_reap_pass(members) {
     var pending = 0;
     var st[8];
@@ -1086,7 +1089,10 @@ fn _sd_reap_pass(members) {
         var m = vec_get(members, i);
         if (load64(m + 16) == 0) {
             store64(&st, 0);
-            var r = sys_waitpid(load64(m + 8), &st, WNOHANG);
+            var r = -10;                 # ECHILD, unless the probe below runs
+            if (proc_pidfd_gone(load64(m + 40)) == 0) {
+                r = sys_waitpid(load64(m + 8), &st, WNOHANG);
+            }
             if (r > 0) {
                 store64(m + 24, _wait_status_code(load32(&st)));
                 store64(m + 16, 1);
@@ -1133,16 +1139,23 @@ fn _sd_stop_wave(init, svc_map, wave, deadline, results) {
         # The proc table holds the pid argonaut forked; a forking service's
         # entry is its pid-file pid. The ManagedService pid is the fallback.
         var pid = proc_table_pid(sname);
-        if (pid <= 0) { pid = managed_svc_pid(ms); }
-        var m = _sd_member(ms, pid);
+        var pfd = -1;
+        if (pid > 0) {
+            pfd = proc_table_pidfd(sname);
+        } else {
+            pid = managed_svc_pid(ms);
+        }
+        var m = _sd_member(ms, pid, pfd);
         vec_push(members, m);
         if (pid <= 1) {
             store64(m + 16, 1);              # nothing to signal; never kill(-1) / init
         } else {
             # 1.16.1 audit B-7, as process_stop: probe before the first signal.
             # A pid whose waitpid fails is not our child and is never signalled.
+            # 1.18.0: nor is one whose pidfd's process was reaped elsewhere.
             store64(&st, 0);
-            var probe = sys_waitpid(pid, &st, WNOHANG);
+            var probe = -10;
+            if (proc_pidfd_gone(pfd) == 0) { probe = sys_waitpid(pid, &st, WNOHANG); }
             if (probe > 0) {
                 store64(m + 24, _wait_status_code(load32(&st)));
                 store64(m + 16, 1);
@@ -1150,7 +1163,7 @@ fn _sd_stop_wave(init, svc_map, wave, deadline, results) {
                 store64(m + 24, -1);
                 store64(m + 16, 1);
             } else {
-                sys_kill(pid, SIGTERM);
+                proc_send_signal(pfd, pid, SIGTERM);
             }
         }
     }
@@ -1159,15 +1172,18 @@ fn _sd_stop_wave(init, svc_map, wave, deadline, results) {
 
     if (_sd_reap_until(members, deadline) > 0) {
         # Stragglers. The group id cannot belong to anyone else while `pid` is
-        # unreaped (see _init_kill_start_child).
+        # unreaped (see _init_kill_start_child), which its pidfd confirms.
         for (var k = 0; k < n; k = k + 1) {
             var km = vec_get(members, k);
             if (load64(km + 16) == 0) {
                 var kp = load64(km + 8);
-                sys_kill(0 - kp, SIGKILL);
-                sys_kill(kp, SIGKILL);
+                var kfd = load64(km + 40);
+                if (proc_pidfd_gone(kfd) == 0) {
+                    sys_kill(-kp, SIGKILL);
+                    proc_send_signal(kfd, kp, SIGKILL);
+                    store64(km + 32, 1);
+                }
                 store64(km + 24, -1);     # until the reap below says otherwise
-                store64(km + 32, 1);
             }
         }
         # A child in uninterruptible sleep can outlive this window; the orphan
@@ -1454,6 +1470,29 @@ fn init_check_watchdog(init) {
     return timed_out;
 }
 
+# SIGKILL a watchdog-expired service, only when the number provably still names
+# it (1.18.0). Until 1.18.0 this was a bare kill(pid, SIGKILL): no probe, so a
+# service reaped behind argonaut's back left a number the watchdog then sent
+# SIGKILL to, whoever held it by then.
+#   * With a pidfd: the signal goes through it, and reaches the service or
+#     nothing (-ESRCH once it has been reaped). Its identity is pinned, so a
+#     forking service's daemon that is not argonaut's child is killed too.
+#   * Without one (the fallback): the B-7 probe. Only a running child of ours
+#     is signalled; one that has exited is reaped here, its status going to
+#     this kill rather than to init_reap_services.
+fn _init_watchdog_kill(pid, pidfd) {
+    if (pidfd >= 0) {
+        proc_send_signal(pidfd, pid, SIGKILL);
+        return 0;
+    }
+    var st[8];
+    store64(&st, 0);
+    if (sys_waitpid(pid, &st, WNOHANG) == 0) {
+        proc_send_signal(-1, pid, SIGKILL);
+    }
+    return 0;
+}
+
 fn init_enforce_watchdog(init) {
     var timed_out = init_check_watchdog(init);
 
@@ -1485,7 +1524,7 @@ fn init_enforce_watchdog(init) {
         # at 1.6.1 and hit this on the first tick that recorded a failure.
         var pid = proc_table_pid(name_s);
         if (pid > 0) {
-            process_kill(pid);
+            _init_watchdog_kill(pid, proc_table_pidfd(name_s));
             proc_table_remove(name_s);
         }
         if (ms != 0) {
@@ -1633,7 +1672,7 @@ fn init_poll_health(init, tracker) {
             if (hc != 0) { due = _hc_is_due_at(ms, hc, now); }
             if (due == 1) {
                 var pid = managed_svc_pid(ms);
-                var result = execute_health_check(svc_def_name(sd), hc, pid);
+                var result = execute_service_health_check(sd, hc, pid);
                 var threshold = load64(hc + 40);
                 var hc_passed = load64(result + 16);
                 health_tracker_record(tracker, name, hc_passed, threshold);

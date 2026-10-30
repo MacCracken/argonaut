@@ -1,0 +1,221 @@
+# health_spawn.tcyr — a service's command checks run the way the service is
+# spawned (1.18.0, ADR-015).
+#
+# Until 1.18.0 an HC_COMMAND health or ready check ran through
+# run_safe_cmd_timeout: no service definition, no pre-exec hook, PATH as its
+# whole environment. kybernet confines services in that hook (cgroup, caps,
+# uid, Landlock, seccomp), so a confined service's check command ran
+# unconfined, as PID 1's root, and without the limits and env files the
+# service itself gets. Now run_check_as spawns it through the service's own
+# image setup, and the hook sees argonaut_exec_kind() == EXEC_HEALTH_CHECK.
+#
+# The roadmap's test: with a denying hook, a service's command check is
+# refused, never run unconfined. A check whose command would create a marker
+# file proves which: the marker must not exist.
+#
+# The name-only entry points (execute_health_check, check_command) keep their
+# pre-1.18.0 behaviour on purpose: with no definition there is no service
+# policy to apply. That is pinned below too.
+include "tests/test_header.cyr"
+
+var _hs_pid = 0;
+
+fn hs_path(suffix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/argonaut-hs-");
+    str_builder_add_int(sb, _hs_pid);
+    str_builder_add_cstr(sb, "-");
+    str_builder_add_cstr(sb, suffix);
+    return str_builder_build(sb);
+}
+
+# "cmd arg" as a Str.
+fn hs_cmd(cmd, arg) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, cmd);
+    str_builder_add_cstr(sb, " ");
+    str_builder_add(sb, arg);
+    return str_builder_build(sb);
+}
+
+fn hs_exists(path) {
+    var fd = sys_open(str_data(path), 0, 0);
+    if (fd < 0) { return 0; }
+    sys_close(fd);
+    return 1;
+}
+
+fn hs_write(path, cstr) {
+    sys_unlink(str_data(path));
+    var fd = sys_open(str_data(path), 193, 420);   # O_WRONLY|O_CREAT|O_EXCL, 0644
+    if (fd < 0) { return -1; }
+    sys_write(fd, cstr, strlen(cstr));
+    sys_close(fd);
+    return 0;
+}
+
+# A command health check of `cmd` with a 2 s budget.
+fn hs_hc(cmd) {
+    return health_check_new(HC_COMMAND, cmd, 0, 1000, 2000, 1);
+}
+
+fn hs_passed(sd, cmd) {
+    return load64(execute_service_health_check(sd, hs_hc(cmd), 0) + 16);
+}
+
+fn hs_svc(name) {
+    return svc_def_new(str_from(name), str_from("t"), str_from("/bin/sleep"));
+}
+
+# --- hooks (they run in the spawn child) ---
+fn hs_deny(sd) { return 1; }
+
+fn hs_only_check(sd) {
+    if (argonaut_exec_kind() == EXEC_HEALTH_CHECK) { return 0; }
+    return 1;
+}
+
+fn hs_only_service(sd) {
+    if (argonaut_exec_kind() == EXEC_SERVICE) { return 0; }
+    return 1;
+}
+
+# Allows the exec only when RLIMIT_NOFILE is 64 (the service's limit).
+fn hs_nofile_64(sd) {
+    var got[16];
+    if (ag_sys_prlimit64(0, AG_RLIMIT_NOFILE, 0, &got) < 0) { return 1; }
+    if (load64(&got) != 64) { return 1; }
+    return 0;
+}
+
+# Exit code of service `sd` spawned with fork_exec_service and reaped.
+fn hs_spawn_code(sd) {
+    var pid = fork_exec_service(sd);
+    if (pid <= 0) { return 251; }
+    var wb[8];
+    store64(&wb, 0);
+    if (sys_waitpid(pid, &wb, 0) != pid) { return 252; }
+    var st = load64(&wb);
+    if (WIFEXITED(st)) { return WEXITSTATUS(st); }
+    return 250;
+}
+
+fn main() {
+    alloc_init();
+    _hs_pid = sys_getpid();
+
+    # =====================================================================
+    test_group("a denying hook refuses the check; it never runs unconfined");
+    var m1 = hs_path("m1");
+    sys_unlink(str_data(m1));
+    var sd = hs_svc("hs-deny");
+    var touch1 = hs_cmd("/usr/bin/touch", m1);
+
+    assert_eq(hs_passed(sd, touch1), 1, "no hook: the check runs and passes");
+    assert_eq(hs_exists(m1), 1, "... and its command ran");
+    sys_unlink(str_data(m1));
+
+    argonaut_set_pre_exec_hook(&hs_deny);
+    assert_eq(hs_passed(sd, touch1), 0, "denying hook: the check fails");
+    assert_eq(hs_exists(m1), 0, "... and its command never ran");
+    var rc = ready_check_new(HC_COMMAND, touch1, 0, 1000, 0, 0);
+    assert_eq(load64(execute_service_ready_check(sd, rc, 0) + 16), 0, "denying hook: a command ready check fails too");
+    assert_eq(hs_exists(m1), 0, "... without running");
+
+    # The name-only form has no definition, so no hook (pre-1.18.0 behaviour).
+    var r0 = execute_health_check(str_from("hs-deny"), hs_hc(touch1), 0);
+    assert_eq(load64(r0 + 16), 1, "name-only execute_health_check: no service, no hook");
+    assert_eq(hs_exists(m1), 1, "... and the command ran");
+    sys_unlink(str_data(m1));
+    argonaut_set_pre_exec_hook(0);
+
+    # =====================================================================
+    test_group("argonaut_exec_kind tells the hook which image");
+    assert_eq(argonaut_exec_kind(), EXEC_NONE, "EXEC_NONE in the parent");
+    var tru = str_from("/usr/bin/true");
+    argonaut_set_pre_exec_hook(&hs_only_check);
+    assert_eq(hs_passed(sd, tru), 1, "a check is EXEC_HEALTH_CHECK");
+    var svc_true = svc_def_new(str_from("hs-kind"), str_from("t"), str_from("/usr/bin/true"));
+    assert_eq(hs_spawn_code(svc_true), 126, "... so a check-only hook refuses the service (126)");
+    argonaut_set_pre_exec_hook(&hs_only_service);
+    assert_eq(hs_spawn_code(svc_true), 0, "the service is EXEC_SERVICE");
+    assert_eq(hs_passed(sd, tru), 0, "... so a service-only hook refuses the check");
+    assert_eq(argonaut_exec_kind(), EXEC_NONE, "still EXEC_NONE in the parent");
+    argonaut_set_pre_exec_hook(0);
+
+    # =====================================================================
+    test_group("the check gets the service's environment and env files");
+    var sd_env = hs_svc("hs-env");
+    assert_eq(hs_passed(sd_env, hs_cmd("/usr/bin/printenv", str_from("HS_FOO"))), 0, "unset variable: printenv fails");
+    map_set(svc_def_env(sd_env), "HS_FOO", str_from("bar"));
+    assert_eq(hs_passed(sd_env, hs_cmd("/usr/bin/printenv", str_from("HS_FOO"))), 1,
+      "the service's environment map reaches the check");
+
+    var ef = hs_path("envfile");
+    hs_write(ef, "HS_FROM_FILE=1\n");
+    var files = vec_new();
+    vec_push(files, ef);
+    svc_def_set_env_files(sd_env, files);
+    assert_eq(hs_passed(sd_env, hs_cmd("/usr/bin/printenv", str_from("HS_FROM_FILE"))), 1,
+      "the service's env file reaches the check");
+    sys_unlink(str_data(ef));
+    assert_eq(hs_passed(sd_env, tru), 0, "a missing env file fails the check (the preflight refuses)");
+    vec_truncate(files, 0);
+
+    # =====================================================================
+    test_group("the check gets the service's resource limits");
+    var sd_rl = hs_svc("hs-rl");
+    argonaut_set_pre_exec_hook(&hs_nofile_64);
+    assert_eq(hs_passed(sd_rl, tru), 0, "no limit set: the probe hook refuses");
+    svc_def_set_rlimits(sd_rl, svc_rlimits_new(64, 0, 0, -1));
+    assert_eq(hs_passed(sd_rl, tru), 1, "nofile 64 is applied before the hook");
+    argonaut_set_pre_exec_hook(0);
+    svc_def_set_rlimits(sd_rl, svc_rlimits_new(1099511627776, 0, 0, -1));
+    assert_eq(hs_passed(sd_rl, tru), 0, "a limit the kernel refuses fails the check closed");
+
+    # =====================================================================
+    test_group("through init: health poll and start-time ready check");
+    var cfg = argonaut_config_default();
+    var sd_poll = hs_svc("hs-poll");
+    var m2 = hs_path("m2");
+    sys_unlink(str_data(m2));
+    svc_def_set_health_check(sd_poll, hs_hc(hs_cmd("/usr/bin/touch", m2)));
+    vec_push(config_services(cfg), sd_poll);
+
+    var sd_ready = svc_def_new(str_from("hs-ready"), str_from("t"), str_from("/bin/sleep"));
+    vec_push(svc_def_args(sd_ready), str_from("30"));
+    vec_push(svc_def_modes(sd_ready), BOOT_MINIMAL);
+    svc_def_set_ready_check(sd_ready, ready_check_new(HC_COMMAND, tru, 0, 2000, 0, 0));
+    vec_push(config_services(cfg), sd_ready);
+
+    var init = argonaut_init_new(cfg);
+    assert(init != 0, "init built");
+    managed_svc_set_state(init_get_service(init, "hs-poll"), STATE_RUNNING);
+
+    argonaut_set_pre_exec_hook(&hs_deny);
+    var results = init_poll_health(init, health_tracker_new());
+    var seen = 0;
+    var poll_passed = -1;
+    for (var i = 0; i < vec_len(results); i = i + 1) {
+        var res = vec_get(results, i);
+        if (str_eq_cstr(load64(res), "hs-poll") == 1) {
+            seen = 1;
+            poll_passed = load64(res + 16);
+        }
+    }
+    assert_eq(seen, 1, "init_poll_health ran the service's check");
+    assert_eq(poll_passed, 0, "... under the service's hook: refused");
+    assert_eq(hs_exists(m2), 0, "... and its command never ran");
+
+    # The service itself may start; its ready check may not.
+    argonaut_set_pre_exec_hook(&hs_only_service);
+    init_start_service(init, "hs-ready");
+    assert_eq(managed_svc_state(init_get_service(init, "hs-ready")), STATE_FAILED,
+      "init_start_service runs the ready check under the hook: refused, start fails");
+    argonaut_set_pre_exec_hook(0);
+    init_stop_all(init, 1000);
+
+    return assert_summary();
+}
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

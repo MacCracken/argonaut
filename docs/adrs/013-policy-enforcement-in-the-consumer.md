@@ -2,7 +2,8 @@
 
 **Status**: Accepted (decided at 1.9.0, 2026-08-24; recorded 2026-10-14). Supersedes the
 enforcement parts of ADR-010 and ADR-011. Narrowed by ADR-014 (1.17.0): argonaut now applies
-resource limits and env files itself; security policy stays the consumer's.
+resource limits and env files itself; security policy stays the consumer's. Narrowed by
+ADR-015 (1.18.0): the hook also runs for a service's command health and ready checks.
 **Date**: 2026-10-14
 
 ## Context
@@ -54,9 +55,9 @@ seccomp, in that order, opt-in per service.
 - **Negative**: **with no hook registered, a service runs with PID 1's full root
   privileges.** argonaut's own binary starts no services, so this bites only a consumer
   that skips the hook. Never describe argonaut itself as sandboxing services.
-- **Negative**: other argonaut exec paths do not run the hook. A command health check
-  (`check_command` → `run_safe_cmd_timeout`) for a confined service runs unconfined; the
-  roadmap pins this at 1.18.0.
+- **Negative**: other argonaut exec paths do not run the hook. Edge boot's commands
+  (`run_safe_cmd_timeout`) run on behalf of no service. Until 1.18.0 a service's command
+  health check did not run it either; ADR-015 closed that.
 - **Negative**: the policy fields have no layout argonaut can check. A consumer that
   stores the wrong type finds out in its own hook.
 

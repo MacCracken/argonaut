@@ -12,9 +12,8 @@ that gate opens.
 
 ## Release plan
 
-| Release | Theme | Can start |
-|---|---|---|
-| [1.18.0](#1180--process-identity-and-the-exec-paths) | pidfd process identity; health-check commands under the pre-exec hook | Now |
+**No release is pinned after 1.18.0.** The work left is [Gated](#gated--1x-pinned-when-the-gate-opens):
+each item takes the next free number when its gate opens.
 
 **Every release:**
 - the security-hardening pass and the benchmark gate (CLAUDE.md);
@@ -23,38 +22,6 @@ that gate opens.
 **The next cyrius pin has no release number.** 1.16.3 moved to 6.7.18, the latest release,
 with every dependency at its latest tag. The next move takes the next free number when a
 newer cyrius is wanted; [its checklist](#every-cyrius-pin-move) is below.
-
----
-
-## 1.18.0 — process identity, and the exec paths
-
-**pidfd.** The 2026-10-14 audit's B-1 closed the PID-file hole (symlinks, FIFOs, loose
-parsing). The window between reading a pid and signalling it is still open: a pid can be
-recycled in that gap.
-
-- [ ] **Open a pidfd for every spawned service.** Use `pidfd_open`, which the stdlib wraps
-      as `sys_pidfd_open` (Linux 5.3+).
-- [ ] **Signal through the pidfd** in the stop, kill and watchdog paths. Use
-      `pidfd_send_signal`, which the stdlib does not wrap, so it is an `ag_sys_` entry.
-      Verify its number under `qemu -strace` on both arches (the ESYSXLAT rule in that
-      file's header).
-- [ ] **Decide the fallback** for a kernel without pidfd: refuse, or today's B-7
-      probe-then-signal.
-- [ ] **Tests:** a recycled pid is never signalled, and a pidfd closes when its service is
-      reaped.
-
-**Health-check commands bypass the pre-exec hook.** `fork_exec_service` runs the
-consumer's pre-exec hook (1.9.0), which is where kybernet confines a service. A
-`HC_COMMAND` check runs through `check_command` → `run_safe_cmd_timeout` instead. That
-path has no service definition and no hook, so a confined service's health-check
-command runs unconfined, with PID 1's root privileges. Since 1.17.0 it also runs without
-the service's resource limits and env files, which `fork_exec_service` applies.
-
-- [ ] **Run the check under the service's hook** (pass the definition through), or make
-      the unconfined run an explicit, documented choice. Decide the limits and env files
-      in the same change.
-- [ ] **Tests:** with a denying hook, a service's command check runs confined or is
-      refused. It must not run unconfined.
 
 ---
 
@@ -95,8 +62,8 @@ release is next.
 - [ ] State the consumer floor: the oldest toolchain argonaut's own calls need (≥ 6.7.9
       today, for `sys_ppoll`). Measure it: build the tree on that toolchain.
 - [ ] **Attribute any binary-size change** by building the old pins under the new toolchain.
-- [ ] Run the full gates, plus the bench gate against the previous release's label
-      (`1.16.3-cyrius-6.7.18` today).
+- [ ] Run the full gates, plus the bench gate against the baseline `state.md`'s Bench
+      snapshot names.
 
 ---
 
@@ -123,9 +90,15 @@ release is next.
 [kybernet](https://github.com/MacCracken/kybernet) consumes argonaut's `src/` as a
 library. These items are kybernet's to do; each touches argonaut's surface.
 
-- [ ] **Take 1.16.x and 1.17.0.** They need cyrius ≥ 6.7.9 (`sys_ppoll`, since 1.16.1;
+- [ ] **Take 1.16.x through 1.18.0.** They need cyrius ≥ 6.7.9 (`sys_ppoll`, since 1.16.1;
       1.16.1–1.16.3 said 6.6.8 in error). On 6.7.18 a scratch kybernet passes 888 / 890
-      against 1.17.0, the two being the `test_emergency_auth` assertions below.
+      against 1.18.0, as against 1.17.0, the two being the `test_emergency_auth` assertions
+      below.
+      - **CHANGELOG [1.18.0] Breaking:** `kyb_pre_exec` now also runs for its services'
+        `HC_COMMAND` health and ready checks, so each check runs in the service's cgroup, as
+        its uid, under its Landlock and seccomp policy. A check the policy does not allow
+        now fails. `argonaut_exec_kind()` lets the hook treat a check differently. The
+        watchdog kills through pidfds.
       - **CHANGELOG [1.17.0] Breaking:** the removed notify receivers and `spawn_service`
         (kybernet calls none of them), names refused at registration (`a..b` is, though
         kybernet accepts it), and the 126 exit's two new causes.
