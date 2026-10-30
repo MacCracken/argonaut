@@ -507,16 +507,22 @@ fn fork_exec_service(svc_def) {
         # Redirect stdin to /dev/null and (L3) replace stdout / stderr
         # so service log output stops mixing into argonaut's stdio.
         # Production wiring should swap /dev/null for the journal fd.
+        #
+        # ⚠ open() CAN RETURN 0, 1 OR 2 ITSELF: PID 1 starts with no fds
+        # when the initramfs has no /dev/console. Such an fd is already one
+        # of the three, so it is never dup'd onto itself and never closed.
+        # Closing it after dup2(fd, fd) left the service with stdin or
+        # stdout closed, and its next open() landed there (1.16.3).
         var devnull_r = sys_open("/dev/null", 0, 0);   # O_RDONLY
         if (devnull_r >= 0) {
-            sys_dup2(devnull_r, 0);
-            sys_close(devnull_r);
+            if (devnull_r != 0) { sys_dup2(devnull_r, 0); }
+            if (devnull_r > 2) { sys_close(devnull_r); }
         }
         var devnull_w = sys_open("/dev/null", 1, 0);   # O_WRONLY
         if (devnull_w >= 0) {
-            sys_dup2(devnull_w, 1);
-            sys_dup2(devnull_w, 2);
-            sys_close(devnull_w);
+            if (devnull_w != 1) { sys_dup2(devnull_w, 1); }
+            if (devnull_w != 2) { sys_dup2(devnull_w, 2); }
+            if (devnull_w > 2) { sys_close(devnull_w); }
         }
 
         # Exec the binary directly via sys_execve — we're already

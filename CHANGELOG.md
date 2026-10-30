@@ -7,17 +7,253 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [1.16.3] — 2026-10-29
+
+**Toolchain cyrius 6.7.9 → 6.7.18, libro 2.11.0 → 2.11.3 and sigil 3.13.12 → 3.13.15. Every
+dependency is now at its latest published tag.** The bump itself needed no `src/` change, and one
+test file moves off two names bayan 1.11 deprecated. The review of the bump found one older bug,
+fixed here: **`fork_exec_service` could start a service with stdin or stdout closed** (MEDIUM,
+see Security). 42 suites / 1,670 assertions, 0 failures, on x86_64 and under qemu-aarch64. Bench
+gate neutral. ⚠ **The x86_64 binary grows 448,448 → 761,960 B (+70 %).**
+Nearly all of it is read-only Unicode data that bayan, reaching every build through
+sigil-mldsa, now carries and DCE cannot remove (see Binary). This release also ships the
+documentation sweep below.
+
+| | 1.16.2 | 1.16.3 | via |
+|---|---|---|---|
+| cyrius | 6.7.9 | **6.7.18** | `[package].cyrius` |
+| libro | 2.11.0 | **2.11.3** | `[deps.libro]` |
+| sigil | 3.13.12 | **3.13.15** | `[deps.sigil]`, at libro's pin |
+| patra | 1.16.0 | **1.16.6** | stdlib fold (and libro's pin) |
+| sakshi | 2.5.8 | **2.5.10** | stdlib fold |
+| bayan | 1.5.13 | **1.11.1** | stdlib fold |
+
+No Breaking section. argonaut's own calls still need cyrius 6.6.8 or later, so the consumer floor
+is unchanged.
+
+### Changed
+
+- **`[package].cyrius` `6.7.9` → `6.7.18`** in `cyrius.cyml` and `qemu/helpers/cyrius.cyml`.
+- **`[deps.libro]` `2.11.0` → `2.11.3`; `[deps.sigil]` `3.13.12` → `3.13.15`**, the sigil tag
+  libro 2.11.3 pins. Every resolved library equals its upstream release byte for byte:
+  - `lib/libro.cyr` is libro 2.11.3's `dist/libro.cyr`.
+  - The five `lib/sigil*.cyr` files are sigil 3.13.15's.
+  - `lib/patra.cyr` is patra 1.16.6's `dist/`, and also the 6.7.18 fold.
+  - `lib/sakshi.cyr` is sakshi 2.5.10's.
+  - Every stdlib leaf equals the 6.7.18 install's.
+- **`cyrius.lock`, regenerated from scratch:** both it and `lib/` were deleted before `cyrius deps`.
+  - **61 → 69 entries.** The new leaves are `lib/math.cyr` and the seven `lib/unicode/` files,
+    which bayan now includes. 40 leaves change content.
+  - **Commit pins:** libro 2.11.3, patra 1.16.6 and sigil 3.13.15. The lock ends with
+    `cyrius 6.7.18`.
+  - **Reproducible:** a fresh copy of the tree resolves the same lock and builds a
+    byte-identical binary.
+- **Duplicate-fn warnings in the main build: 14 → 23.**
+  - **The new nine:** sigil 3.13.14's lane pool (CYRIUS-2026-0040) adds nine scaffolding fns that
+    `sigil-argon2` and `sigil-mldsa` both define: `_crypto_slot_get`, `_crypto_lane_claim`,
+    `_crypto_lane_release`, `crypto_lane_enter`, `crypto_lane_leave`, `_crypto_lane_held`,
+    `_crypto_lane`, `_crypto_lane_refuse` and `_crypto_lane_alias`.
+  - **Harmless:** re-diffed body by body at 3.13.15, all 23 are identical, so last-definition
+    binding changes nothing.
+- **`tests/tcyr/serde.tcyr`:** `json_get_int` / `json_get` → `bayan_json_get_int_by_cstr` /
+  `bayan_json_get_by_cstr` (21 calls).
+  - **Why:** bayan 1.11.0 deprecated the old names, which took a Str key without saying so, and
+    every call warned.
+  - **Same lookups:** the keys are literals, so the C-string form fits. Still 39 / 39.
+- **The two stdlib layouts argonaut reads directly are unchanged.**
+  - `lib/hashmap.cyr` is byte-identical to 6.7.9's.
+  - `str_builder` keeps its length at +8. `lib/str.cyr` only gains JSON helpers and types the
+    `Str_*` methods' parameters, and argonaut makes no method calls.
+- **`src/syscall_compat.cyr` is unchanged.** 6.7.18 still wraps none of `getsockopt`, `poll`,
+  `clock_gettime`, `setpgid`, `symlinkat` or `getsid`.
+- **The qemu L3 helper is re-cut under 6.7.18**, with `CYRIUS_DCE=1` as `qemu/build-initramfs.sh`
+  builds it. It stays 15,080 B with different bytes. Eleven vendored files in `qemu/helpers/lib/`
+  change; the file set is the same.
+
+### Audited — the 6.7.10–6.7.18 changes that alter what already-compiling code computes
+
+cyrius's migration notes for 6.7.10 through 6.7.18 were read in full. `src/`, `tests/tcyr/`,
+`tests/bcyr/`, `tests/test_header.cyr` and `qemu/helpers/` were scanned for every affected shape,
+with comments and string literals stripped. Nearly every silent change in the range needs a type
+annotation: narrow or typed fields, struct-typed values, `Str` methods, generics, closures,
+vectors, `: stack` pairs. argonaut's only annotations are `: i64` returns, on the six `ag_sys_*`
+wrappers and `_svc_name_cmp`.
+
+| Change | Before | argonaut |
+|---|---|---|
+| Narrow struct fields packed at their width (6.7.10); narrow params, locals, globals and derefs narrowed (6.7.13, 6.7.16) | Every field and value a word | No narrow or typed annotation; every struct field is an untyped 8-byte field |
+| `Str` methods on a literal operand (6.7.14) | `x.eq("lit")` read garbage | No method-call syntax |
+| A constant-initialized global no longer re-stored at startup after an earlier `var r = f();` (6.7.14) | `f` could overwrite it | `var r = main();` is always a file's last declaration |
+| Redeclared top-level `var`s: warn (6.7.12), fold to the last (6.7.16) | Silent | No duplicates in any unit |
+| A value builtin as a statement is an error (6.7.17) | `load8(p);` compiled | None |
+| Multi-value binds checked for arity (6.7.11) | — | The 2-name binds in `enum_parse.tcyr` and `notify_semantics.tcyr` compile unchanged |
+| A redefined fn is typed by its last definition (6.7.16) | First definition | The `sakshi_*` test stubs and the sigil scaffolding are `: i64` on both sides |
+| aarch64 `sys_dup2(fd, fd)` returns `fd` (6.7.15) | `-EINVAL` | `fork_exec_service` ignored the return value, and since the std-fd fix (Security) it never dup's an fd onto itself |
+| bayan 1.11.1 refuses duplicate JSON keys and leading-zero numbers (6.7.18) | Accepted | Only `serde.tcyr` parses JSON, and its inputs have neither |
+
+The DCE fixes (6.7.14, and 6.7.18's past 512 rounds) and the restored tail call (6.7.17) change code
+layout only. Built under 6.7.9 and under 6.7.18, the suite gives identical per-suite counts on both
+architectures, and `cyrius lint` and `cyrius fmt --check` print identical output.
+
+### Security
+
+| Finding | Severity | Fix |
+|---|---|---|
+| `fork_exec_service` closed a service's own std fd | MEDIUM | Found by this release's migration review (no audit report). Detail below |
+
+**`fork_exec_service` closed the fd it had just set up.**
+- **What it did:** the child redirects 0, 1 and 2 to `/dev/null` with `open`, `dup2`, `close`.
+  When argonaut starts without one of those fds, as PID 1 does when the initramfs has no
+  `/dev/console`, `open("/dev/null")` returns that fd itself. `dup2(fd, fd)` changed nothing, and
+  the `close` that followed closed it.
+- **What a service got:** with fd 0 closed, it started with no stdin; with fd 1 or 2 closed, no
+  stdout or stderr. Its next `open()` then landed on that number, so a service that wrote to
+  stdout wrote into whatever file it had just opened.
+- **Fixed** (`src/process_mgmt.cyr`): an fd that is already 0, 1 or 2 is never dup'd onto itself
+  and never closed. Every combination of closed std fds now leaves the service with all three on
+  `/dev/null`, stdin read-only and stdout and stderr write-only.
+- **Reach:**
+  - **The shipped binary** spawns through this path only in the qemu harness's L3 case.
+  - **kybernet** spawns every service through it, from PID 1.
+  - **The condition:** the bug needs PID 1 to start without a std fd. The rating is MEDIUM
+    (specific conditions) because the consequence is a service's output written into its own
+    files.
+- **Not affected:** `run_safe_cmd_timeout` (health-check commands) does no redirect; its child
+  inherits PID 1's fds as they are.
+
+No fix in the dependency advance crosses a security boundary in argonaut:
+- **cyrius 6.7.10–6.7.18 (ledger `CYRIUS-2026-0036`–`0050`):** none is in code argonaut calls.
+  - **Unused modules:** the native TLS server, async DNS, the libssl backend, `ws_server`, HPACK,
+    `http_get`, PAM, `lib/regression.cyr`'s captures and `file_write_atomic`.
+  - **bayan's PDF Flate guard (0045):** argonaut calls no bayan function, so DCE drops it.
+  - **Not argonaut's binary:** 0039 (cyrius's CI runner), 0046 (the cyrius CLI's predictable build
+    temp; it reaches a shared build host, not the binary) and 0048 (Windows).
+- **sigil 3.13.13–3.13.15:** crypto lanes are a pool (CYRIUS-2026-0040).
+  - **How argonaut reaches it:** argonaut is single-threaded and touches the pool only through
+    `cbank()` inside Argon2, Ed25519, ML-DSA and SHA-256. `cbank()` answers the lane the thread
+    holds, or 0.
+  - **The new fail-stop is unreachable:** a direct EC arithmetic call with every lane held now ends
+    the process with exit 70, and for PID 1 that would panic the kernel. argonaut calls no ECDSA,
+    no Poly1305 stream and no EC arithmetic, so it cannot reach that path.
+  - **Checked:** the `emergency_kdf` suite (125 assertions, the Argon2id path) passes.
+  - **Out of the thin set:** the X.509 nameConstraints fix (CYRIUS-2026-0042).
+- **patra 1.16.1–1.16.6:** failed `fdatasync`s and refused writes are now reported, and malformed
+  chains and negative lengths are refused.
+  - This reaches argonaut only on the `audit_persist` path, which is off by default.
+  - `patra_open` now refuses before `patra_init`. `audit_ext_init` already calls `patra_init()`
+    first.
+- **libro 2.11.1–2.11.3:** a JSONL record that does not parse now fails verification and
+  `chain_import`. argonaut calls neither the file-store readers nor `chain_import`.
+
+### Tests
+
+- **New: `tests/tcyr/spawn_std_fds.tcyr`** (8 assertions), the regression test for the std-fd fix.
+  - **How it works:** each case forks a child, closes some of fds 0–2 in it, and spawns a service
+    from there. The pre-exec hook runs in the service's process after the redirect. It checks
+    that each of 0, 1 and 2 is open on `/dev/null` (same `st_dev` and `st_ino`) in the right
+    mode, then exits with a code that names any bad fd.
+  - **Coverage:** all eight combinations, from none closed to all three.
+  - **Written first:** against the unfixed code it failed 7 / 8, each case leaving one fd closed.
+- **`serde.tcyr`:** the getter migration (Changed). 42 suites / **1,670** assertions.
+
+### Performance
+
+The gate ran `./scripts/bench-history.sh "1.16.3-cyrius-6.7.18"` at load ~0.5. Its baseline,
+**`1.16.2-baseline`, is a new label:** the same tree on 6.7.9, run on the same host minutes
+before the pin moved. A 24-round A/B interleaved the two bench binaries pinned to one core.
+
+| bench | 1.16.2 gate | 1.16.2-baseline | 1.16.3 gate | A/B medians, 6.7.9 → 6.7.18 |
+|---|---:|---:|---:|---|
+| resolve_order_chain_100 ⚠ | 222.046 | 210.370 | 230.147 | 227.573 → 220.561 (−3.1 %) |
+| resolve_waves_chain_20 | 40.584 | 32.914 | 36.200 | 34.444 → 32.962 (−4.3 %) |
+| resolve_waves_wide_20 | 15.508 | 12.358 | 15.173 | 13.855 → 13.559 (−2.1 %) |
+| resolve_order_desktop | 12.249 | 11.488 | 11.152 | 12.891 → 12.328 (−4.4 %) |
+| plan_shutdown_reboot | 14.280 | 13.864 | 13.862 | 15.015 → 14.486 (−3.5 %) |
+| init_new_desktop | 24.837 | 24.969 | 25.086 | 25.206 → 25.270 (+0.3 %) |
+| mark_all_steps_complete | 48.791 | 46.892 | 47.385 | 49.384 → 49.290 (−0.2 %) |
+| audit_log_record | 4.191 | 3.947 | 3.962 | 4.200 → 4.202 (0.0 %) |
+| build_boot_seq_edge | 0.600 | 0.541 | 0.717 | 0.621 → 0.669 (+0.05 µs) |
+
+**Verdict: neutral, no regression.**
+- **The A/B clears the three gate rows beyond ±2 µs:** `resolve_order_chain_100`,
+  `resolve_waves_chain_20` and `resolve_waves_wide_20`. All three read faster in the A/B, and
+  every A/B range overlaps. None of their paths changed. ⚠ The chain micros are noise-bound, as
+  at every release since 1.15.2.
+- **Sub-µs rows:** the four `build_boot_seq_*` read +0.03 to +0.06 µs (+3–8 %) in the A/B, with
+  overlapping ranges. That is far inside the ±2 µs band.
+- **Every other micro** is within ±0.6 µs in the A/B.
+- **The std-fd fix is on no benched path.** The bench binary rebuilt with it differs from the
+  gated one in 3 bytes: its segment-size fields (`.text` is 8 B shorter) and one byte at the
+  end. Every instruction byte of the benched code is identical, so the gate stands as measured.
+
+### Binary
+
+**x86_64 448,448 → 761,960 B (+313,512).** Measured by moving one pin at a time:
+
+| Step | Binary | `.text` | `.rodata` |
+|---|---:|---:|---:|
+| 1.16.2, cyrius 6.7.9 | 448,448 | 318,792 | 39,778 |
+| 1.16.2 pins, cyrius 6.7.18 | 756,992 | 341,248 | 382,016 |
+| + libro 2.11.3, sigil 3.13.15 | 761,960 | 344,232 | 382,342 |
+| + the std-fd fix (= 1.16.3) | 761,960 | 344,384 | 382,342 |
+
+- **+308,544 B is the 6.7.18 toolchain, and +342 KB of it is read-only data.** bayan 1.9.0, folded
+  at 6.7.13, added a markdown parser. bayan's `# Requires` block now includes all seven
+  `lib/unicode/` files, whose tables are top-level string `var`s (about 307 KB). DCE removes
+  unreachable fns, not global initializers.
+- **bayan reaches the build twice:** through argonaut's own `[deps] stdlib` entry, and through
+  `sigil-mldsa`'s `include "lib/bayan.cyr"`, so dropping the stdlib entry would not help.
+  argonaut's `src/` calls no bayan function.
+- **Code is +25,592 B:** the toolchain's stdlib, including patra 1.16.1–1.16.6's failure-path
+  checks, plus +2,984 B from the two dependency bumps and +152 B from the std-fd fix. The fix
+  lands inside the page padding, so the file size does not move.
+- **`.bss` (not in the file) shrinks 88,824 → 31,104 B.** Not attributed.
+- **What it costs:** on disk the tables are never read. Inside an initramfs, though, the file
+  itself sits in RAM. The qemu boot test still boots at `-m 128M`, and at `-m 96M` too.
+- **The fix is upstream.** Either `sigil-mldsa` stops pulling the whole of bayan, or DCE drops
+  unread global initializers. libro 2.11.1 measured the same growth (+283,624 B), and every
+  consumer of `sigil-mldsa` carries it, kybernet included.
+- **aarch64:** 1,570,488 → **2,183,024 B** (+612,536).
+- **Dead-code floor:** 2,987 unreachable fns and 1,118,796 B eliminated on x86_64 (was 2,620 and
+  887,483 B). On aarch64, 2,987 fns and 1,325,172 B are NOPed.
+- **`cyrius capacity`:** `fn_table` 3,736 / 131,072; `string_data` 382,342 / 2,097,152.
+
+### Verification
+
+- **Tests:** 42 / 42 and 1,670 assertions on x86_64, and under qemu-aarch64
+  (`scripts/aarch64-sweep.sh`).
+- **Gates:** lint, `fmt --check` and `cyrius vet` are clean on every file CI gates. CI's
+  security-pattern scan and required-files check pass locally.
+- **Build:** `CYRIUS_DCE=1 cyrius build --check-lib-sync` gives 761,960 B with ELF magic intact.
+  The smoke run prints `all systems nominal` on x86_64 and under qemu-aarch64.
+- **qemu under KVM**, with the re-cut L3 helper:
+  - the PID-1 harness passes at `-m 256M` (`m3 ok`, `l3 ok`, `done`); its L3 case spawns
+    through the fixed `fork_exec_service`, and it was re-run with the fix;
+  - the boot test reaches `pid1 loop ready` at `-m 256M`, `128M` and `96M`.
+- **PID 1 of an unprivileged pid namespace** (`unshare -Urpf`): 0 idle wakeups in 3 s, all 300
+  orphans reaped with 0 zombies left, and a clean SIGTERM shutdown. The 1.16.2 binary measures
+  the same.
+
+### Downstream: kybernet
+
+Not rebuilt for this release. kybernet takes 1.16.3 on the same terms as 1.16.2, and the floor is
+still cyrius 6.6.8.
+- **The one `src/` change** is the std-fd fix in `fork_exec_service`, which kybernet spawns every
+  service through. The API and the arguments are unchanged.
+- **What it changes for kybernet:** a service started while kybernet's PID 1 lacks a std fd now
+  gets all three on `/dev/null`.
+- **When kybernet moves its own pin to 6.7.18,** it gets the bayan growth through its own
+  `sigil-mldsa`, whatever argonaut version it pins.
 
 ### Documentation
 
-A full sweep for stale information, plus a roadmap reorganised into pinned releases. No
-code changes: the only `src/` and `tests/` edits are comments, and the DCE binary is
-byte-identical to 1.16.2's (448,448 B). 41 suites and 1,662 assertions pass.
+A full sweep for stale information, plus a roadmap reorganised into pinned releases. The sweep
+changes no code: its only `src/` and `tests/` edits are comments. Under 6.7.9 the DCE binary was
+byte-identical to 1.16.2's (448,448 B).
 
 **Roadmap** (`docs/development/roadmap.md`): remaining work is pinned to releases.
-- **1.17.0:** the next cyrius pin (target open), the announced removals, and a
-  remove-or-wire decision on inert helpers.
+- **1.17.0:** the announced removals, and a remove-or-wire decision on inert helpers. The sweep
+  also planned the next cyrius pin there; this release took it instead.
 - **1.17.1:** `0 - N` → `-N`, alone.
 - **1.17.2:** CI and doc-tree conformance.
 - **1.18.0:** pidfd identity, and health-check commands under the pre-exec hook.

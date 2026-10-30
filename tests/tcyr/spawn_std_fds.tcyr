@@ -1,0 +1,101 @@
+# spawn_std_fds.tcyr — fork_exec_service gives a service fds 0, 1 and 2 on
+# /dev/null, whichever of them argonaut itself started without (1.16.3).
+#
+# PID 1 starts with no fds at all when the initramfs has no /dev/console.
+# open("/dev/null") then returns 0, 1 or 2 itself, and the redirect used to
+# close that same fd after dup2(fd, fd): the service started with stdin, or
+# stdout, closed, and its next open() landed there.
+#
+# Each case forks a child, closes the chosen fds in it, and spawns a service
+# from it. The pre-exec hook runs in the service's process after the redirect,
+# inspects 0, 1 and 2, and exits before exec with 64 plus one bit per bad fd:
+#   1 / 2 / 4    fd 0 / 1 / 2 is closed
+#   8 / 16 / 32  fd 0 / 1 / 2 is open, but not /dev/null in the right mode
+# 64 alone means all three are good. It also proves the hook ran, since
+# /bin/true would exit 0. The worst code is 120, clear of 126 and 127.
+include "tests/test_header.cyr"
+
+# 0 when fd is open on the same file as `ref` (a stat of /dev/null, compared
+# by st_dev and st_ino, at +0 and +8 on both arches) with an access mode
+# (F_GETFL & O_ACCMODE) of `mode` or O_RDWR. 1 when it is closed, 2 when it
+# is something else.
+fn _fd_check(fd, ref, mode) {
+    var st[256];
+    if (sys_fstat(fd, &st) < 0) { return 1; }
+    if (load64(&st) != load64(ref)) { return 2; }
+    if (load64(&st + 8) != load64(ref + 8)) { return 2; }
+    var acc = sys_fcntl(fd, 3, 0) & 3;
+    if (acc == mode) { return 0; }
+    if (acc == 2) { return 0; }
+    return 2;
+}
+
+fn _probe_hook(sd) {
+    var dn[256];
+    if (sys_stat("/dev/null", &dn) < 0) { sys_exit(125); }
+    var code = 64;
+    var c0 = _fd_check(0, &dn, 0);
+    var c1 = _fd_check(1, &dn, 1);
+    var c2 = _fd_check(2, &dn, 1);
+    if (c0 == 1) { code = code + 1; }
+    if (c1 == 1) { code = code + 2; }
+    if (c2 == 1) { code = code + 4; }
+    if (c0 == 2) { code = code + 8; }
+    if (c1 == 2) { code = code + 16; }
+    if (c2 == 2) { code = code + 32; }
+    sys_exit(code);
+    return 0;
+}
+
+# Close the fds in `closed` (bit n = fd n) in a child, spawn a service from
+# that child, and return the service's exit code (250+ = harness failure).
+fn _spawn_with_closed(closed) {
+    var c = sys_fork();
+    if (c < 0) { return 254; }
+    if (c == 0) {
+        if ((closed & 1) != 0) { sys_close(0); }
+        if ((closed & 2) != 0) { sys_close(1); }
+        if ((closed & 4) != 0) { sys_close(2); }
+        argonaut_set_pre_exec_hook(&_probe_hook);
+        var sd = svc_def_new(str_from("std-fds"), str_from("t"), str_from("/bin/true"));
+        var g = fork_exec_service(sd);
+        if (g < 0) { sys_exit(251); }
+        var gbuf[8];
+        store64(&gbuf, 0);
+        if (sys_waitpid(g, &gbuf, 0) != g) { sys_exit(252); }
+        var gs = load64(&gbuf);
+        if (WIFEXITED(gs)) { sys_exit(WEXITSTATUS(gs)); }
+        sys_exit(250);
+    }
+    var cbuf[8];
+    store64(&cbuf, 0);
+    if (sys_waitpid(c, &cbuf, 0) != c) { return 253; }
+    var cs = load64(&cbuf);
+    if (WIFEXITED(cs)) { return WEXITSTATUS(cs); }
+    return 250;
+}
+
+fn main() {
+    alloc_init();
+    test_group("spawn-std-fds");
+
+    # Control: argonaut started with all three open.
+    assert_eq(_spawn_with_closed(0), 64, "none closed: 0/1/2 on /dev/null");
+
+    # One closed. Before the fix each left exactly that fd closed (65 / 66 / 68).
+    assert_eq(_spawn_with_closed(1), 64, "fd 0 closed: service still gets stdin");
+    assert_eq(_spawn_with_closed(2), 64, "fd 1 closed: service still gets stdout");
+    assert_eq(_spawn_with_closed(4), 64, "fd 2 closed: service still gets stderr");
+
+    # Two closed.
+    assert_eq(_spawn_with_closed(3), 64, "fds 0+1 closed");
+    assert_eq(_spawn_with_closed(6), 64, "fds 1+2 closed");
+    assert_eq(_spawn_with_closed(5), 64, "fds 0+2 closed");
+
+    # All three: PID 1 with no /dev/console.
+    assert_eq(_spawn_with_closed(7), 64, "fds 0+1+2 closed (no /dev/console)");
+
+    return assert_summary();
+}
+var r = main();
+syscall(SYS_EXIT, r);

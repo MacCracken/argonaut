@@ -14,7 +14,7 @@ that gate opens.
 
 | Release | Theme | Can start |
 |---|---|---|
-| [1.17.0](#1170--next-cyrius-pin-and-the-announced-removals) | Next cyrius pin; remove the deprecated APIs; remove or wire the inert helpers | When the pin target is chosen |
+| [1.17.0](#1170--the-announced-removals) | Remove the deprecated APIs; remove or wire the inert helpers | Now |
 | [1.17.1](#1171--negative-literals-mechanical) | `0 - N` → `-N`, no functional change | Any time after 1.17.0 |
 | [1.17.2](#1172--ci-native-aarch64-and-the-state-file) | Native aarch64 CI; `state.md` automation; CI bench fix; doc-tree conformance | Once a runner is chosen |
 | [1.18.0](#1180--process-identity-and-the-exec-paths) | pidfd process identity; health-check commands under the pre-exec hook | Now |
@@ -23,45 +23,16 @@ that gate opens.
 - the security-hardening pass and the benchmark gate (CLAUDE.md);
 - a closeout pass before each `X.Y.0`.
 
+**The next cyrius pin has no release number.** 1.16.3 moved to 6.7.18, the latest release,
+with every dependency at its latest tag. The next move takes the next free number when a
+newer cyrius is wanted; [its checklist](#every-cyrius-pin-move) is below.
+
 ---
 
-## 1.17.0 — next cyrius pin, and the announced removals
+## 1.17.0 — the announced removals
 
-**The pin target is open.** The tree holds at cyrius 6.7.9 with libro 2.11.0. 6.7.10 and
-6.7.11 are out, but the target (6.7.11 or a later release) is chosen when this work
-starts. Start from cyrius's `docs/development/ecosystem-migration.md`, at the first section
-after 6.7.9, and from the libro release that matches the new fold.
-
-The removals do not depend on the pin. The deprecation messages name 1.17.0. If the pin
-is still waiting when the removals are wanted, ship them alone as 1.17.0, and the pin
-takes the next free release number.
-
-Before tagging, run the 1.16.x closeout pass (CLAUDE.md).
-
-**Toolchain move:**
-- [ ] Read the migration notes for every release in range. List the changes that alter
-      what already-compiling code computes. Scan `src/` and `tests/` for each shape, with
-      comments and strings stripped. A green suite proves nothing about them; the method
-      is in CHANGELOG [1.16.0] Audited.
-- [ ] Move `cyrius` in `cyrius.cyml` and `qemu/helpers/cyrius.cyml`, and move `[deps.libro]`.
-      Set `[deps.sigil]` to the sigil tag the new libro pins.
-- [ ] **Re-diff the scaffolding fns that `sigil-argon2` and `sigil-mldsa` both define.**
-      There are 14 at 3.13.12 (`state.md` Toolchain). They must stay identical for
-      last-definition binding to be harmless.
-- [ ] **Delete `cyrius.lock` and `lib/` before `cyrius deps`.** Otherwise old commit pins,
-      and leaves the new toolchain no longer needs, survive into the lock.
-- [ ] Check every resolved library against its upstream tag byte for byte.
-- [ ] Re-cut the qemu L3 helper (`qemu/helpers/`), then delete the `cyrius.lock` its
-      resolve writes.
-- [ ] **Re-check the two stdlib layouts argonaut reads directly** (`state.md` Toolchain):
-      - the hashmap entry slots walked in `src/init.cyr`;
-      - the `str_builder` length that `src/health.cyr` resets.
-- [ ] **Re-check `src/syscall_compat.cyr`.** Where the stdlib now wraps `getsockopt`,
-      `getsid`, `setpgid`, `symlinkat` or `clock_gettime`, move to the wrapper. Check each
-      move with a before/after `qemu -strace` trace.
-- [ ] State the consumer floor: the oldest toolchain argonaut's own calls need (≥ 6.6.8
-      today).
-- [ ] Run the full gates, plus the bench gate against `1.16.2-deferred-fixes`.
+The deprecation messages name 1.17.0. Before tagging, run the 1.16.x closeout pass
+(CLAUDE.md).
 
 **Removals (breaking):**
 - [ ] **`notify_try_recv` / `notify_drain`.** They skip sender authentication.
@@ -149,6 +120,41 @@ command runs unconfined, with PID 1's root privileges.
 
 ---
 
+## Every cyrius pin move
+
+The procedure 1.16.0 and 1.16.3 followed. It ships as its own release, or with whatever
+release is next.
+
+- [ ] Read cyrius's `docs/development/ecosystem-migration.md` for every release in range.
+      List the changes that alter what already-compiling code computes. Scan `src/`,
+      `tests/` and `qemu/helpers/` for each shape, with comments and strings stripped. A green
+      suite proves nothing about them; the method is in CHANGELOG [1.16.0] and [1.16.3]
+      Audited.
+- [ ] Move `cyrius` in `cyrius.cyml` and `qemu/helpers/cyrius.cyml`, and move `[deps.libro]`
+      to the libro release that matches the new fold. Set `[deps.sigil]` to the sigil tag that
+      libro pins.
+- [ ] **Re-diff the scaffolding fns that `sigil-argon2` and `sigil-mldsa` both define.**
+      There are 23 at 3.13.15 (`state.md` Toolchain). They must stay identical for
+      last-definition binding to be harmless.
+- [ ] **Delete `cyrius.lock` and `lib/` before `cyrius deps`.** Otherwise old commit pins,
+      and leaves the new toolchain no longer needs, survive into the lock.
+- [ ] Check every resolved library against its upstream tag byte for byte.
+- [ ] Re-cut the qemu L3 helper (`qemu/helpers/`) with `CYRIUS_DCE=1`, as
+      `qemu/build-initramfs.sh` builds it. Then delete the `cyrius.lock` its resolve writes.
+- [ ] **Re-check the two stdlib layouts argonaut reads directly** (`state.md` Toolchain):
+      - the hashmap entry slots walked in `src/init.cyr`;
+      - the `str_builder` length that `src/health.cyr` resets.
+- [ ] **Re-check `src/syscall_compat.cyr`.** Where the stdlib now wraps `getsockopt`,
+      `getsid`, `setpgid`, `symlinkat` or `clock_gettime`, move to the wrapper. Check each
+      move with a before/after `qemu -strace` trace. As of 6.7.18 it wraps none of them.
+- [ ] State the consumer floor: the oldest toolchain argonaut's own calls need (≥ 6.6.8
+      today).
+- [ ] **Attribute any binary-size change** by building the old pins under the new toolchain.
+- [ ] Run the full gates, plus the bench gate against the previous release's label
+      (`1.16.3-cyrius-6.7.18` today).
+
+---
+
 ## Gated — 1.x, pinned when the gate opens
 
 | Item | Gate | What lands |
@@ -160,6 +166,7 @@ command runs unconfined, with PID 1's root privileges.
 | **Abstract-namespace notify socket** | A consumer that needs it | `notify_bind` on an abstract address |
 | **dm-verity FEC** (`--fec-device`) | Edge storage that needs error correction | An optional FEC device in `verify_rootfs_integrity` |
 | **sd_notify `MAINPID=` / `STATUS=` / `RELOADING=1` / `STOPPING=1`** | A service that relies on them | These are parsed today, but only `READY=1` and `WATCHDOG=1` change state |
+| **Shed bayan's Unicode tables** (~307 KB of the binary since 1.16.3) | Upstream: `sigil-mldsa` stops including the whole of bayan, or cyrius DCE drops unread global initializers | A pin move that takes the fix. Measure it with the binary-size attribution step above |
 
 ---
 

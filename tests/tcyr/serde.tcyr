@@ -2,7 +2,7 @@
 # `#derive(Serialize)` under cyrius 5.10+ emits a 2-arg
 # `_to_json(ptr, sb)` that writes into a caller-supplied str_builder
 # (pre-5.8 was the 1-arg form returning Str). Wrap via `to_json` helper.
-# Deserialize tested via manual json_parse + json_get (derive(Deserialize)
+# Deserialize tested via manual json_parse + bayan_json_get_*_by_cstr (derive(Deserialize)
 # has duplicate-variable conflict when combined with Serialize).
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -55,12 +55,12 @@ fn main() {
 
     # --- TStats round-trip via json_parse ---
     var p1 = json_parse(json);
-    assert_eq(json_get_int(p1, str_from("boot_mode")), 1, "st rt mode");
-    assert_eq(json_get_int(p1, str_from("dur_ms")), 1234, "st rt dur");
-    assert_eq(json_get_int(p1, str_from("running")), 3, "st rt run");
-    assert_eq(json_get_int(p1, str_from("failed")), 1, "st rt fail");
-    assert_eq(json_get_int(p1, str_from("restarts")), 7, "st rt rest");
-    assert_eq(json_get_int(p1, str_from("complete")), 1, "st rt done");
+    assert_eq(bayan_json_get_int_by_cstr(p1, "boot_mode"), 1, "st rt mode");
+    assert_eq(bayan_json_get_int_by_cstr(p1, "dur_ms"), 1234, "st rt dur");
+    assert_eq(bayan_json_get_int_by_cstr(p1, "running"), 3, "st rt run");
+    assert_eq(bayan_json_get_int_by_cstr(p1, "failed"), 1, "st rt fail");
+    assert_eq(bayan_json_get_int_by_cstr(p1, "restarts"), 7, "st rt rest");
+    assert_eq(bayan_json_get_int_by_cstr(p1, "complete"), 1, "st rt done");
 
     # --- TRestart serialize + round-trip ---
     var rc = alloc(sizeof(TRestart));
@@ -73,9 +73,9 @@ fn main() {
     assert(str_contains(rcj, str_from("max_restarts")), "rc has max");
     assert(str_contains(rcj, str_from("base_delay")), "rc has base");
     var p2 = json_parse(rcj);
-    assert_eq(json_get_int(p2, str_from("max_restarts")), 5, "rc rt max");
-    assert_eq(json_get_int(p2, str_from("base_delay")), 1000, "rc rt base");
-    assert_eq(json_get_int(p2, str_from("max_delay")), 30000, "rc rt maxd");
+    assert_eq(bayan_json_get_int_by_cstr(p2, "max_restarts"), 5, "rc rt max");
+    assert_eq(bayan_json_get_int_by_cstr(p2, "base_delay"), 1000, "rc rt base");
+    assert_eq(bayan_json_get_int_by_cstr(p2, "max_delay"), 30000, "rc rt maxd");
 
     # --- TEdgeCfg serialize + round-trip ---
     var ec = alloc(sizeof(TEdgeCfg));
@@ -91,9 +91,9 @@ fn main() {
     assert(str_contains(ecj, str_from("luks")), "ec has luks");
     assert(str_contains(ecj, str_from("3000")), "ec has 3k");
     var p3 = json_parse(ecj);
-    assert_eq(json_get_int(p3, str_from("readonly")), 1, "ec rt ro");
-    assert_eq(json_get_int(p3, str_from("luks")), 1, "ec rt luks");
-    assert_eq(json_get_int(p3, str_from("max_boot_ms")), 3000, "ec rt boot");
+    assert_eq(bayan_json_get_int_by_cstr(p3, "readonly"), 1, "ec rt ro");
+    assert_eq(bayan_json_get_int_by_cstr(p3, "luks"), 1, "ec rt luks");
+    assert_eq(bayan_json_get_int_by_cstr(p3, "max_boot_ms"), 3000, "ec rt boot");
 
     # --- TFleet serialize + round-trip ---
     var fr = alloc(sizeof(TFleet));
@@ -111,8 +111,8 @@ fn main() {
     assert(str_contains(frj, str_from("hostname")), "fr has host");
     assert(str_contains(frj, str_from("128")), "fr has 128");
     var p4 = json_parse(frj);
-    assert_eq(json_get_int(p4, str_from("verity")), 1, "fr rt verity");
-    assert_eq(json_get_int(p4, str_from("mem_mb")), 128, "fr rt mem");
+    assert_eq(bayan_json_get_int_by_cstr(p4, "verity"), 1, "fr rt verity");
+    assert_eq(bayan_json_get_int_by_cstr(p4, "mem_mb"), 128, "fr rt mem");
 
     # --- Enum values survive round-trip ---
     var edge_s = alloc(sizeof(TStats));
@@ -121,7 +121,7 @@ fn main() {
     TStats_to_json(edge_s, sb);
     var ej = str_builder_build(sb);
     var p5 = json_parse(ej);
-    assert_eq(json_get_int(p5, str_from("boot_mode")), 3, "enum edge rt");
+    assert_eq(bayan_json_get_int_by_cstr(p5, "boot_mode"), 3, "enum edge rt");
 
     var rec_s = alloc(sizeof(TStats));
     store64(rec_s, 4);
@@ -129,7 +129,7 @@ fn main() {
     TStats_to_json(rec_s, sb);
     var rj = str_builder_build(sb);
     var p6 = json_parse(rj);
-    assert_eq(json_get_int(p6, str_from("boot_mode")), 4, "enum rec rt");
+    assert_eq(bayan_json_get_int_by_cstr(p6, "boot_mode"), 4, "enum rec rt");
 
     # --- Zero values survive ---
     var zero = alloc(sizeof(TStats));
@@ -138,14 +138,14 @@ fn main() {
     TStats_to_json(zero, sb);
     var zj = str_builder_build(sb);
     var p7 = json_parse(zj);
-    assert_eq(json_get_int(p7, str_from("boot_mode")), 0, "zero mode rt");
-    assert_eq(json_get_int(p7, str_from("dur_ms")), 0, "zero dur rt");
-    assert_eq(json_get_int(p7, str_from("complete")), 0, "zero done rt");
+    assert_eq(bayan_json_get_int_by_cstr(p7, "boot_mode"), 0, "zero mode rt");
+    assert_eq(bayan_json_get_int_by_cstr(p7, "dur_ms"), 0, "zero dur rt");
+    assert_eq(bayan_json_get_int_by_cstr(p7, "complete"), 0, "zero done rt");
 
     # --- JSON parse/build ---
     var bp = json_parse(str_from("{\"name\":\"test\",\"value\":\"42\"}"));
-    assert(json_get(bp, str_from("name")) != 0, "json get name");
-    assert_eq(json_get_int(bp, str_from("value")), 42, "json get int");
+    assert(bayan_json_get_by_cstr(bp, "name") != 0, "json get name");
+    assert_eq(bayan_json_get_int_by_cstr(bp, "value"), 42, "json get int");
 
     # Manual str_builder build. (The old patra `json_build/6` collision is
     # gone as of 1.8.5 — patra namespaced it to `patra_json_build` at 1.9.0.
