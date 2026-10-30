@@ -70,7 +70,9 @@ assertions. Bench gate neutral.
     compiler does.
 - **`qemu-pid1`** (`ubuntu-26.04`): the boot test and the M3 + L3 harness, against the CI
   build of the x86_64 binary.
-  - It boots the runner's own kernel, and opens `/dev/kvm` to the runner user with a udev rule.
+  - It boots the runner's own kernel, and opens `/dev/kvm` to the runner user with `chmod`.
+    A udev rule, the first cut, failed its first CI run: `udevadm trigger` returns before udev
+    applies the mode, and the check 80 ms later still saw the old one.
   - It installs `qemu-system-x86`, `busybox-static` and `libarchive-tools` (for `bsdcpio`).
   - **Skipped with a warning** where the runner has no `/dev/kvm`, or its CPU reports no
     invariant TSC (`nonstop_tsc`). The harness needs both (arch note 002). Anywhere else, a
@@ -165,11 +167,14 @@ dead-code floor is 1.17.1's.
 - **The installer:** run here for both arches, it verifies and installs 6.7.18. The aarch64
   `cycc` it installs is the one shown to match the cross compiler. A wrong pinned key is
   refused.
-- **Not verified here: the new CI jobs themselves.** `aarch64-native` and `qemu-pid1` have not
-  run on GitHub yet. The first push to `main` runs them, before any tag.
-  - **`aarch64-native` is required:** a failure there blocks the release.
-  - **`qemu-pid1`** depends on what the runner exposes (KVM, an invariant TSC, the kernel's
-    serial console). Its first run settles that.
+- **The first CI run on GitHub** (run 41093406250, commit `d690852`):
+  - **`aarch64-native` passed every step on its first run.** The native build was
+    byte-identical to the cross-build, and the smoke test and every suite passed on arm64
+    hardware. Build & Test (bench step included), Security Scan and Documentation passed too.
+  - **`qemu-pid1` failed in its preparation step,** before qemu ran. The runner has
+    `/dev/kvm`, but the udev rule had not applied when the job checked it (fixed above,
+    under Added). The harness itself has not run in CI yet. Whether the runner's CPU reports
+    an invariant TSC, and its kernel boots the harness, is settled by the next run.
 
 ---
 

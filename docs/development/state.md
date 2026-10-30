@@ -18,7 +18,9 @@
   conforms to the first-party standard.
 
 No change to `src/`: both binaries are 1.17.1's bytes. 45 suites / 1,760 assertions. Bench gate:
-neutral. **The new CI jobs have not run on GitHub yet;** the first push to `main` runs them.)
+neutral. On GitHub, `aarch64-native` passed its first run. `qemu-pid1` failed its first run
+before qemu started, on a udev race; the fix is in the tree, and the harness has not yet run in
+CI.)
 
 1.17.0 is the last release that changed behaviour; see CHANGELOG [1.17.0] Breaking.
 
@@ -143,8 +145,8 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
   identical to x86_64. Run on the dev host at 1.17.1; 1.17.2 changes no source or test.
 - **aarch64 on hardware (CI):** from 1.17.2, `ci.yml`'s `aarch64-native` job runs every suite on
   a GitHub-hosted `ubuntu-26.04-arm` runner, after `cmp`-ing its native build with the
-  cross-build. ⚠ **It has not run yet;** the first push to `main` after 1.17.2 is its first
-  run.
+  cross-build. **It passed every step on its first run** (`d690852`): native = cross, the smoke
+  test, and every suite.
 - **PID 1 in a pid namespace** (`unshare -Urpf --mount-proc ./build/argonaut`, no
   root needed): the quick check for the supervisor loop. At 1.17.0 it shows 0 idle
   wakeups in 3 s, reaps 300 simultaneous orphans with 0 zombies left, and shuts down
@@ -155,8 +157,10 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
   the first release built with a `MAP_NORESERVE` heap (cyrius 6.6.8+). At 1.16.3 the
   boot test also boots at `-m 128M` and `-m 96M`.
   - **In CI from 1.17.2:** the `qemu-pid1` job runs both on `ubuntu-26.04`, skipped with a
-    warning where the runner lacks KVM or an invariant TSC. ⚠ **It has not run yet;** whether
-    the runner exposes both is settled by its first run.
+    warning where the runner lacks KVM or an invariant TSC. ⚠ **The harness has not run in CI
+    yet.** The first run (`d690852`) failed in its preparation step: a udev rule had not yet
+    opened `/dev/kvm`. The fix (`chmod`) is in the tree; the next run settles whether the
+    runner's CPU and kernel carry the harness.
 - **Benches**: `src/bench_main.cyr` — 29 micros, the release gate
   (`scripts/bench-history.sh`); `tests/bcyr/argonaut.bcyr` carries the same 29,
   `tests/bcyr/api.bcyr` 8 more. History in `bench-history.csv`.
@@ -242,7 +246,8 @@ Earlier snapshots are in the CHANGELOG's Performance sections; every row is in
 Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 - **The next cyrius pin** has no release number; its target is open.
-- **The first CI run of 1.17.2's new jobs** (`aarch64-native`, `qemu-pid1`) on GitHub.
+- **`qemu-pid1`'s first full CI run** on GitHub, with the `/dev/kvm` fix. `aarch64-native`
+  is green.
 - **1.18.0:**
   - **pidfd process identity.** The window between reading a pid and signalling it is
     still open; the 2026-10-14 audit's B-1 closed only the PID-file side.
@@ -284,7 +289,8 @@ Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 ## Pending release
 
-None after 1.17.2, which is ready to tag once a push to `main` shows its new CI jobs green.
+None after 1.17.2, which is ready to tag once a push to `main` shows `qemu-pid1` green
+(`aarch64-native` already is).
 The next release is 1.18.0 ([roadmap.md](roadmap.md)).
 
 ## Recent shipped
@@ -332,7 +338,7 @@ Everything else is in [CHANGELOG.md](../../CHANGELOG.md).
 ## Verification
 
 - Linux x86_64 (Arch, kernel 7.2, AMD Ryzen 7 5800H, HPET clocksource) — primary dev host; CI on GitHub-hosted `ubuntu-26.04`
-- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **45 / 45, 1,760 assertions at 1.17.1** (cyrius 6.7.18), identical to x86_64; 1.17.2 changes no source. From 1.17.2, CI builds natively and runs every suite on a GitHub-hosted `ubuntu-26.04-arm` runner (not yet run). Other hardware (RPi4, Apple Silicon, Graviton / Ampere) is checked by hand with `scripts/aarch64-pi-smoke.sh`. See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
+- aarch64 — cross-build + full `.tcyr` sweep under `qemu-aarch64` on the dev host: **45 / 45, 1,760 assertions at 1.17.1** (cyrius 6.7.18), identical to x86_64; 1.17.2 changes no source. From 1.17.2, CI builds natively and runs every suite on a GitHub-hosted `ubuntu-26.04-arm` runner: green on its first run. Other hardware (RPi4, Apple Silicon, Graviton / Ampere) is checked by hand with `scripts/aarch64-pi-smoke.sh`. See `docs/architecture/001-cross-arch-aarch64.md` for the surface.
 - qemu PID-1 harness under KVM — passes at 1.17.1 at the scripts' committed `-m 256M` (1.17.2's binary is the same bytes); at 1.16.3 the boot test also booted at `-m 128M` and `-m 96M`. In CI from 1.17.2 (`qemu-pid1`, not yet run).
 - PID 1 of an unprivileged pid namespace (`unshare -Urpf`) — idle wakeups, orphan reaping and SIGTERM shutdown, at 1.17.0.
 

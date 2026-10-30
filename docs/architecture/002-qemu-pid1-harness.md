@@ -95,7 +95,8 @@ through from the host CPU. Practical consequence:
   invariant-TSC panic.
 - **CI:** the `qemu-pid1` job in `.github/workflows/ci.yml` runs the boot test and the
   harness on a GitHub-hosted `ubuntu-26.04` runner. It boots the runner's own kernel and
-  opens `/dev/kvm` to the runner user with a udev rule.
+  opens `/dev/kvm` to the runner user with `chmod 0666`. Not a udev rule: `udevadm trigger`
+  returns before the mode changes, so a check right after it races.
   - **Skipped, with a warning on the run,** where the runner has no `/dev/kvm` or its CPU
     reports no invariant TSC (`nonstop_tsc`). Anywhere else, a failure fails CI.
   - It stays a local gate at every release too.
