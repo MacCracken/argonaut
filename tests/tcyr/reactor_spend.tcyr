@@ -1,0 +1,293 @@
+# reactor_spend.tcyr — what PID 1's reactor spends per event. (1.19.0)
+#
+# The idle ticks were fixed long ago. What was left cost the arena on every event:
+# 48 bytes per health probe, pass or fail, 384 per exit, and a builder per state
+# change. kybernet's PID 1 never resets that arena, so a healthy service probed
+# every 5 s cost 830 KB a day. These drive the real paths with real processes and
+# require exactly 0 once the lazy caches exist, on a count of events, because the
+# paths run for the life of the system.
+#
+# The results are reused until the next call, so the other half of each test is
+# that reuse did not mix them up: two exits in one sweep are two results, and the
+# fields of a reused action are the ones this event set.
+include "tests/test_header.cyr"
+
+var RS_WARM = 3;
+var RS_CYCLES = 20;
+
+fn rs_svc(cfg, name, binary, arg) {
+    var sd = svc_def_new(str_from(name), str_from("reactor spend"), str_from(binary));
+    if (arg != 0) { vec_push(svc_def_args(sd), str_from(arg)); }
+    svc_def_set_restart_policy(sd, RESTART_ALWAYS);
+    var rc = restart_config_default();
+    store64(rc, 0);    # max_restarts: unlimited
+    svc_def_set_restart_config(sd, rc);
+    vec_push(config_services(cfg), sd);
+    return sd;
+}
+
+# Reap until something is reported, or 2 s pass. Returns the results, or 0.
+fn rs_reap(init) {
+    var deadline = monotonic_ms() + 2000;
+    var i = 0;
+    while (monotonic_ms() < deadline) {
+        var r = init_reap_services(init);
+        if (vec_len(r) > 0) { return r; }
+        sleep_ms(2);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# A crash and its restart, the cycle a crash-looping service runs for ever.
+fn rs_crash_cycle(init) {
+    if (init_restart_service(init, "rs-crash", 1000) <= 0) { return 0; }
+    var r = rs_reap(init);
+    if (r == 0) { return 0; }
+    return vec_len(r);
+}
+
+fn rs_watchdog_cycle(init) {
+    if (init_restart_service(init, "rs-wd", 1000) <= 0) { return 0; }
+    sleep_ms(3);
+    var killed = init_enforce_watchdog(init);
+    init_reap_services(init);
+    return vec_len(killed);
+}
+
+fn rs_stop_cycle(init) {
+    # init_stop_service returns the process's status, 143 for SIGTERM.
+    init_stop_service(init, "rs-stop", 1000);
+    if (managed_svc_state(init_get_service(init, "rs-stop")) != STATE_STOPPED) { return 0; }
+    if (init_start_service(init, "rs-stop") <= 0) { return 0; }
+    return 1;
+}
+
+# Both due: a start stamps last_hc, so a 60 s interval would keep them out.
+fn rs_health_tick(init, tracker, pass_ms, fail_ms) {
+    managed_svc_set_last_hc(pass_ms, 0);
+    managed_svc_set_last_hc(fail_ms, 0);
+    return init_poll_health(init, tracker);
+}
+
+fn main() {
+    alloc_init();
+    proc_table_init();
+
+    var cfg = config_set_boot_mode(argonaut_config_default(), BOOT_RECOVERY);
+    rs_svc(cfg, "rs-crash", "/bin/false", 0);
+    rs_svc(cfg, "rs-twin-a", "/bin/false", 0);
+    rs_svc(cfg, "rs-twin-b", "/bin/true", 0);
+    var wd = rs_svc(cfg, "rs-wd", "/bin/sleep", "600");
+    svc_def_set_watchdog_ms(wd, 1);
+    rs_svc(cfg, "rs-stop", "/bin/sleep", "600");
+    var hp = rs_svc(cfg, "rs-pass", "/bin/sleep", "600");
+    svc_def_set_health_check(hp, health_check_new(HC_PROCESS_ALIVE, 0, 0, 60000, 200, 3));
+    var gu = rs_svc(cfg, "rs-giveup", "/bin/false", 0);
+    store64(svc_def_restart_config(gu), 1);    # max_restarts: one, then CRASH_GIVE_UP
+    rs_svc(cfg, "rs-direct", "/bin/false", 0);
+    svc_def_set_restart_policy(rs_svc(cfg, "rs-ignore", "/bin/false", 0), RESTART_NEVER);
+    var hf = rs_svc(cfg, "rs-fail", "/bin/sleep", "600");
+    svc_def_set_health_check(hf, health_check_new(HC_TCP_CONNECT, str_from("127.0.0.1"), 1, 60000, 200, 3));
+    # Past 16: vec_new starts with room for that many, so with fewer the reservation
+    # would have nothing to do and these tests could not see it missing.
+    for (var pi = 0; pi < 8; pi = pi + 1) {
+        var pn = str_cat(str_from("rs-pad-"), str_from_int(pi));
+        vec_push(config_services(cfg), svc_def_new(pn, str_from("pad"), str_from("/bin/true")));
+    }
+    var init = argonaut_init_new(cfg);
+
+    test_group("reserved-at-init");
+    # Sized here, not by whichever tick first has the most probes due: a pool that grows
+    # with timing cannot be told from a leak by a consumer watching its arena.
+    var nsvc = map_count(load64(init + 16));
+    assert_eq(nsvc, 18, "reserve: the services are registered, past vec_new's 16");
+    assert_eq(vec_len(_hc_pool), nsvc, "reserve: one probe result per service");
+    assert_eq(vec_len(_reap_pool), nsvc, "reserve: one reap record per service");
+    assert_eq(vec_len(_rr_pool), nsvc, "reserve: one reap result per service");
+    assert(vec_cap(_rr_out) >= nsvc, "reserve: the reap vec has room for every service");
+    assert(vec_cap(_reap_out) >= nsvc, "reserve: and the proc table's");
+    assert(vec_cap(_wd_out) >= nsvc, "reserve: and the watchdog's");
+    assert(vec_cap(_ph_results) >= nsvc, "reserve: and the tick's");
+    assert(vec_cap(_ph_expected) >= nsvc, "reserve: and the notify drain's");
+    assert_eq(vec_len(_rr_out), 0, "reserve: every vec is left empty");
+    assert_eq(vec_len(_wd_out), 0, "reserve: the watchdog's too");
+
+    test_group("crash-and-restart");
+    assert(init_start_service(init, "rs-crash") > 0, "crash: first start");
+    var first = rs_reap(init);
+    assert(first != 0, "crash: first exit reaped");
+    for (var w = 0; w < RS_WARM; w = w + 1) { rs_crash_cycle(init); }
+    var b = alloc_used();
+    var ok = 1;
+    for (var c = 0; c < RS_CYCLES; c = c + 1) {
+        if (rs_crash_cycle(init) != 1) { ok = 0; }
+    }
+    assert_eq(ok, 1, "crash: every cycle reaped one exit");
+    assert_eq(alloc_used() - b, 0, "crash: an exit and a restart spend nothing");
+
+    # A reused record carries this event's fields, not the last one's.
+    assert(init_restart_service(init, "rs-crash", 1000) > 0, "crash: restart for the fields");
+    var r1 = rs_reap(init);
+    assert(r1 != 0, "crash: reaped for the fields");
+    var e1 = vec_get(r1, 0);
+    assert_eq(str_eq_cstr(load64(e1), "rs-crash"), 1, "crash: the result names the service");
+    assert_eq(load64(e1 + 8), 1, "crash: its exit code");
+    assert_eq(load64(load64(e1 + 16)), CRASH_RESTART, "crash: the action");
+    assert(load64(load64(e1 + 16) + 8) > 0, "crash: the action carries its backoff");
+    assert_eq(load64(load64(e1 + 16) + 16), 0, "crash: no reason on a restart");
+    assert_eq(load64(e1), svc_def_name(managed_svc_def(init_get_service(init, "rs-crash"))),
+      "crash: the name is the definition's own Str, safe to keep");
+
+    test_group("a-reused-action");
+    # A give-up writes `reason`. The next event to use that record must not keep it,
+    # or a restart reads as a give-up with a reason.
+    assert(init_start_service(init, "rs-giveup") > 0, "giveup: first start");
+    assert(rs_reap(init) != 0, "giveup: first exit");
+    assert(init_restart_service(init, "rs-giveup", 1000) > 0, "giveup: its one restart");
+    var g1 = rs_reap(init);
+    assert(g1 != 0, "giveup: second exit");
+    assert_eq(load64(load64(vec_get(g1, 0) + 16)), CRASH_GIVE_UP, "giveup: it gives up");
+    assert(load64(load64(vec_get(g1, 0) + 16) + 16) != 0, "giveup: with a reason");
+    assert(init_restart_service(init, "rs-crash", 1000) > 0, "giveup: another service restarts");
+    var g2 = rs_reap(init);
+    assert(g2 != 0, "giveup: and exits");
+    assert_eq(load64(load64(vec_get(g2, 0) + 16)), CRASH_RESTART, "giveup: the same record now restarts");
+    assert_eq(load64(load64(vec_get(g2, 0) + 16) + 16), 0, "giveup: and carries no stale reason");
+    # CRASH_IGNORE writes only the type, so it is the arm that would show either field
+    # left over: the delay from the restart above, the reason from a give-up before it.
+    assert(init_start_service(init, "rs-ignore") > 0, "ignore: started after a restart");
+    var i1 = rs_reap(init);
+    assert(i1 != 0, "ignore: reaped");
+    assert_eq(load64(load64(vec_get(i1, 0) + 16)), CRASH_IGNORE, "ignore: the action");
+    assert_eq(load64(load64(vec_get(i1, 0) + 16) + 8), 0, "ignore: no delay left from the restart");
+    assert(init_restart_service(init, "rs-giveup", 1000) < 0, "ignore: the limit refuses another restart");
+    managed_svc_set_restarts(init_get_service(init, "rs-giveup"), 1);
+    assert(init_start_service(init, "rs-giveup") > 0, "ignore: a start needs no restart budget");
+    var g3 = rs_reap(init);
+    assert(g3 != 0, "ignore: give-up reaped");
+    assert(load64(load64(vec_get(g3, 0) + 16) + 16) != 0, "ignore: a reason in the record");
+    assert(init_start_service(init, "rs-ignore") > 0, "ignore: started after a give-up");
+    var i2 = rs_reap(init);
+    assert(i2 != 0, "ignore: reaped again");
+    assert_eq(load64(load64(vec_get(i2, 0) + 16) + 16), 0, "ignore: no reason left from the give-up");
+
+    test_group("proc-table-reap");
+    assert(init_start_service(init, "rs-direct") > 0, "direct: started");
+    sleep_ms(100);
+    var pr = proc_table_reap();
+    assert_eq(vec_len(pr), 1, "direct: the sweep reports it");
+    assert_eq(str_eq_cstr(load64(vec_get(pr, 0)), "rs-direct"), 1,
+      "direct: the pair's Str has the right bytes and length");
+    assert_eq(load64(vec_get(pr, 0) + 8), 1, "direct: its exit code");
+    assert_eq(vec_len(proc_table_reap()), 0, "direct: the next sweep finds nothing");
+
+    test_group("state-trace");
+    _init_trace_state("rs-trace", STATE_RUNNING);
+    assert_eq(memeq(&_TRACE_MSG, "rs-trace -> ", 12), 1, "trace: the name and the arrow");
+    var tl = strlen(service_state_str(STATE_RUNNING));
+    assert_eq(memeq(&_TRACE_MSG + 12, service_state_str(STATE_RUNNING), tl), 1, "trace: then the state");
+    # A name past the cap cannot run off the buffer: [64] is 512 bytes.
+    var longname = alloc(1001);
+    memset(longname, 120, 1000);
+    store8(longname + 1000, 0);
+    var canary = &_TRACE_MSG + 512 - 1;
+    store8(canary, 77);
+    _init_trace_state(longname, STATE_RUNNING);
+    assert_eq(load8(canary), 77, "trace: a 1,000-byte name stays inside the buffer");
+    assert_eq(load8(&_TRACE_MSG + 399), 120, "trace: the name is kept to the cap");
+    assert_eq(load8(&_TRACE_MSG + 400), 32, "trace: and stops there");
+    var tb0 = alloc_used();
+    for (var tr = 0; tr < 20; tr = tr + 1) { _init_trace_state("rs-trace", STATE_RUNNING); }
+    assert_eq(alloc_used() - tb0, 0, "trace: composing the line spends nothing");
+
+    test_group("two-exits-in-one-sweep");
+    assert(init_start_service(init, "rs-twin-a") > 0, "twins: a started");
+    assert(init_start_service(init, "rs-twin-b") > 0, "twins: b started");
+    sleep_ms(100);
+    var both = init_reap_services(init);
+    assert_eq(vec_len(both), 2, "twins: one sweep reports both");
+    var ta = vec_get(both, 0);
+    var tb = vec_get(both, 1);
+    assert(ta != tb, "twins: two records");
+    assert(load64(ta + 16) != load64(tb + 16), "twins: two actions");
+    assert_eq(str_eq(load64(ta), load64(tb)), 0, "twins: two names");
+    # /bin/false exits 1, /bin/true exits 0, and each result keeps its own.
+    var ca = load64(ta + 8);
+    var cb = load64(tb + 8);
+    if (str_eq_cstr(load64(ta), "rs-twin-b") == 1) {
+        ca = load64(tb + 8);
+        cb = load64(ta + 8);
+    }
+    assert_eq(ca, 1, "twins: /bin/false's code");
+    assert_eq(cb, 0, "twins: /bin/true's code");
+    assert_eq(vec_len(init_reap_services(init)), 0, "twins: the next sweep finds nothing");
+
+    test_group("watchdog-kill");
+    assert(init_start_service(init, "rs-wd") > 0, "wd: first start");
+    sleep_ms(3);
+    var k0 = init_enforce_watchdog(init);
+    assert_eq(vec_len(k0), 1, "wd: the watchdog fired");
+    assert_eq(str_eq_cstr(vec_get(k0, 0), "rs-wd"), 1, "wd: it names the service");
+    init_reap_services(init);
+    for (var ww = 0; ww < RS_WARM; ww = ww + 1) { rs_watchdog_cycle(init); }
+    b = alloc_used();
+    ok = 1;
+    for (var wc = 0; wc < RS_CYCLES; wc = wc + 1) {
+        if (rs_watchdog_cycle(init) != 1) { ok = 0; }
+    }
+    assert_eq(ok, 1, "wd: every cycle killed one service");
+    assert_eq(alloc_used() - b, 0, "wd: a watchdog kill and its restart spend nothing");
+
+    test_group("stop-and-start");
+    assert(init_start_service(init, "rs-stop") > 0, "stop: first start");
+    for (var sw = 0; sw < RS_WARM; sw = sw + 1) { rs_stop_cycle(init); }
+    b = alloc_used();
+    ok = 1;
+    for (var sc = 0; sc < RS_CYCLES; sc = sc + 1) {
+        if (rs_stop_cycle(init) != 1) { ok = 0; }
+    }
+    assert_eq(ok, 1, "stop: every cycle stopped and started");
+    assert_eq(alloc_used() - b, 0, "stop: a stop and a start spend nothing");
+
+    test_group("health-ticks");
+    assert(init_start_service(init, "rs-pass") > 0, "health: passing service started");
+    assert(init_start_service(init, "rs-fail") > 0, "health: failing service started");
+    var tracker = health_tracker_new();
+    var pass_ms = init_get_service(init, "rs-pass");
+    var fail_ms = init_get_service(init, "rs-fail");
+    for (var hw = 0; hw < RS_WARM; hw = hw + 1) { rs_health_tick(init, tracker, pass_ms, fail_ms); }
+    b = alloc_used();
+    ok = 1;
+    for (var ht = 0; ht < 100; ht = ht + 1) {
+        if (vec_len(rs_health_tick(init, tracker, pass_ms, fail_ms)) != 2) { ok = 0; }
+    }
+    assert_eq(ok, 1, "health: every tick probed both services");
+    assert_eq(alloc_used() - b, 0, "health: a hundred ticks, a pass and a failure each, spend nothing");
+    assert_eq(vec_len(_hc_pool), nsvc, "health: and the pool never grew");
+
+    var res = rs_health_tick(init, tracker, pass_ms, fail_ms);
+    assert_eq(vec_len(res), 2, "health: two results");
+    var h0 = vec_get(res, 0);
+    var h1 = vec_get(res, 1);
+    assert(h0 != h1, "health: two structs in one tick");
+    assert(load64(h0 + 16) != load64(h1 + 16), "health: one passed and one failed");
+    var hpass = h0;
+    if (load64(h1 + 16) == 1) { hpass = h1; }
+    assert_eq(str_eq_cstr(load64(hpass), "rs-pass"), 1, "health: the pass is the passing service's");
+
+    # Outside a tick a result is the caller's to keep.
+    var keep_a = execute_health_check(str_from("rs-keep"), svc_def_health_check(hp), sys_getpid());
+    var keep_b = execute_health_check(str_from("rs-keep"), svc_def_health_check(hp), sys_getpid());
+    assert(keep_a != keep_b, "health: outside a tick each result is fresh");
+    rs_health_tick(init, tracker, pass_ms, fail_ms);
+    assert_eq(str_eq_cstr(load64(keep_a), "rs-keep"), 1, "health: and a later tick leaves it alone");
+    # The kept result is safe only because the pool is off between ticks. With it left
+    # on, a result lands in a slot that a tick with more probes due would overwrite.
+    assert_eq(_hc_pool_on, 0, "health: the pool is off between ticks");
+
+    init_stop_service(init, "rs-stop", 1000);
+    init_stop_service(init, "rs-pass", 1000);
+    init_stop_service(init, "rs-fail", 1000);
+    return assert_summary();
+}

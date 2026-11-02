@@ -6,6 +6,14 @@
 
 ## Version
 
+**1.19.0** (the reactor spends nothing. kybernet's PID 1 never resets its arena, and every
+event still took from it: 48 bytes per health probe, pass or fail, 384 per exit, and a builder
+per state change. Past the first event of each kind, a health tick, an exit, a watchdog kill, a
+stop and a restart now allocate nothing, and `reactor_spend.tcyr` requires exactly 0.
+`proc_table_reap`, `init_reap_services`, `init_check_watchdog`, `init_enforce_watchdog` and
+`init_poll_health`'s results are valid until the next call; see CHANGELOG [1.19.0] Breaking.
+48 suites / 1,922 assertions on x86_64 and under qemu-aarch64.)
+
 **1.18.0** (the roadmap's 1.18.0: process identity, and the exec paths.
 - **pidfd identity (ADR-016):** every tracked process has a pidfd, and every signal goes
   through it, so a process reaped behind argonaut's back is never signalled by its old number.
@@ -99,9 +107,9 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
 
 ## Binary
 
-- **x86_64: 774,768 B**, a statically linked ELF, at 1.18.0
+- **x86_64: 775,352 B**, a statically linked ELF, at 1.19.0
   (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`).
-  2,998 fns are unreachable and 1,118,648 B of dead code is eliminated.
+  3,001 fns are unreachable and 1,119,120 B of dead code is eliminated.
   - **+4,208 over 1.17.2's 770,560 B:** the pidfd and check-spawn code. The shipped binary
     reaches the spawn path through the qemu harness's L3 path.
   - **1.17.0 was +8,600 over 1.16.3's 761,960 B:** the limits, env-file and name-check code.
@@ -114,7 +122,7 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
     dropped from argonaut's side.
   - **The fix is upstream** (sigil or cyrius). Inside an initramfs the file sits in RAM, and the
     qemu boot test still boots at `-m 96M`.
-- **aarch64: 2,187,640 B** at 1.18.0 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`),
+- **aarch64: 2,188,200 B** at 1.19.0 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`),
   +128 over 1.17.2. The native compiler (the aarch64-linux tarball's `cycc`) emits the same
   bytes as this cross-build, which CI requires. 2,998 fns are unreachable and 1,324,520 B is
   NOPed. aarch64 DCE fills dead code with NOPs instead of compacting, so the size moves only
@@ -123,18 +131,18 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
 - **L3 helper: 15,080 B**, a static ELF (`qemu/helpers/l3-helper`), re-cut under
   6.7.18 at 1.16.3 with `CYRIUS_DCE=1`. It is bundled into the qemu harness
   initramfs as `/bin/l3-helper`. Its build is warning-free.
-- **`cyrius capacity`** at 1.18.0: `fn_table` 3,768 / 131,072, `string_data`
+- **`cyrius capacity`** at 1.19.0: `fn_table` 3,781 / 131,072, `string_data`
   382,751 / 2,097,152.
 
 ## Suites
 
-- **x86_64: 47 `.tcyr` suites / 1,835 assertions**, 0 failures (cyrius 6.7.18). +75 at 1.18.0:
-  `pidfd` (49) and `health_spawn` (26), both mutation-checked (CHANGELOG [1.18.0] Tests).
+- **x86_64: 48 `.tcyr` suites / 1,922 assertions**, 0 failures (cyrius 6.7.18). +87 at 1.19.0:
+  `reactor_spend` (84) and `spawn_env_files` (+3), mutation-checked (CHANGELOG [1.19.0] Tests).
 - **qemu-user caveats the suites handle:** qemu drops a guest's `RLIMIT_AS`, and reports no
   `MSG_CTRUNC` for SCM_RIGHTS on a SO_PASSCRED socket. `spawn_rlimits` and `deferred_fixes`
   probe the platform for each and assert what it does.
-- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 47 / 47, 1,835 assertions**,
-  identical to x86_64, at 1.18.0. qemu-user 11.1 passes `pidfd_open` and `pidfd_send_signal`
+- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 48 / 48, 1,922 assertions**,
+  identical to x86_64, at 1.19.0. qemu-user 11.1 passes `pidfd_open` and `pidfd_send_signal`
   through, so the sweep runs the pidfd path, not the fallback.
 - **aarch64 on hardware (CI):** `ci.yml`'s `aarch64-native` job runs every suite on a
   GitHub-hosted `ubuntu-26.04-arm` runner, after `cmp`-ing its native build with the
@@ -144,7 +152,7 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
   wakeups in 3 s, reaps 300 simultaneous orphans with 0 zombies left, and shuts down
   cleanly on SIGTERM.
 - **qemu PID-1 harness** (`qemu/pid1-harness-test.sh`, `qemu/boot-test.sh`,
-  KVM + `+invtsc`): at 1.18.0, M3 + L3 end-to-end and the supervisor-loop smoke
+  KVM + `+invtsc`): at 1.19.0, M3 + L3 end-to-end and the supervisor-loop smoke
   pass at the scripts' committed `-m 256M`. They have passed there since 1.15.5,
   the first release built with a `MAP_NORESERVE` heap (cyrius 6.6.8+). At 1.16.3 the
   boot test also boots at `-m 128M` and `-m 96M`.
@@ -154,6 +162,17 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
 - **Benches**: `src/bench_main.cyr` — 29 micros, the release gate
   (`scripts/bench-history.sh`); `tests/bcyr/argonaut.bcyr` carries the same 29,
   `tests/bcyr/api.bcyr` 8 more. History in `bench-history.csv`.
+
+### Bench snapshot (1.19.0-closeout, 2026-11-02)
+
+**Verdict: neutral.** The host carried load 15 from unrelated work throughout, so the label row
+is contention. A 30-round A/B of the 1.18.0 and 1.19.0 bench binaries, pinned to one core, gave
+identical medians within noise (`on_service_crash` 0.152 → 0.152 µs, `audit_log_record` 6.984 →
+7.037, `mark_all_steps_complete` 79.087 → 79.405) and every interquartile range overlaps. 16
+rounds were not enough on this host: sub-µs micros read −33 % on one run and +196 % on the next.
+No micro drives the reap or watchdog paths; what changed there is bytes, not time, and
+`reactor_spend.tcyr` measures that. **Next baseline:** take a fresh one on a quiet host, because
+the `1.19.0-closeout` row is not one.
 
 ### Bench snapshot (1.18.0-closeout, 2026-10-30)
 
@@ -245,6 +264,8 @@ Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 ### Closed recently
 
+- **1.19.0:** the reactor's per-event allocations, found by kybernet 1.10.0's reload gate;
+  `reactor_spend.tcyr` holds them at 0.
 - **1.18.0:**
   - pidfd process identity, with probe-then-signal as the fallback (ADR-016);
   - a service's command health and ready checks run under its spawn and hook (ADR-015);
@@ -274,13 +295,14 @@ Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 ## Pending release
 
-None after 1.18.0, which is ready to tag. No release is pinned after it; the work left is
-Gated ([roadmap.md](roadmap.md)).
+1.19.0 is ready to tag, and kybernet 1.10.1 waits on that tag. No release is pinned after it;
+the work left is Gated ([roadmap.md](roadmap.md)).
 
 ## Recent shipped
 
 | Releases | Date | Headline |
 |---|---|---|
+| 1.19.0 | 2026-11-02 | The reactor spends nothing: health ticks, exits, watchdog kills, stops and restarts allocate 0 past their first event |
 | 1.18.0 | 2026-10-30 | pidfd process identity (ADR-016); command health and ready checks under the service's spawn and hook (ADR-015); the watchdog's unprobed SIGKILL fixed (LOW) |
 | 1.17.2 | 2026-10-30 | Native aarch64 CI and a required aarch64 artifact; qemu PID-1 harness in CI; Ubuntu 26.04, SHA-pinned actions, a verified toolchain install; doc-tree conformance |
 | 1.17.1 | 2026-10-30 | `0 - N` → `-N` at 101 sites in `src/`; no functional change, proven instruction by instruction |
@@ -300,6 +322,9 @@ Everything else is in [CHANGELOG.md](../../CHANGELOG.md).
   orchestration. At its 1.7.11 it pins argonaut **1.15.6** on cyrius 6.6.20.
   - **Taking 1.16.1 or later needs cyrius ≥ 6.7.9** (`sys_ppoll`). On its 6.6.20 pin the
     build fails with `undefined function 'sys_ppoll'` (measured at 1.17.0).
+  - **Against 1.19.0 on 6.7.18:** its 1.10.0 tree plus its 1.10.1 work builds in a scratch copy
+    with `CYRIUS_LOCAL=argonaut`, and its unit suite and both boot gates pass: CHANGELOG [1.19.0]
+    Downstream. Each of its reactor handlers spends 0 past its first event.
   - **Against 1.18.0 on 6.7.18** (scratch copy, `CYRIUS_LOCAL=argonaut`): it builds
     (1,106,216 B) and passes **888 / 890**, as against 1.17.0 (1,102,008 B). The two failures
     are its `test_emergency_auth` assertions (`src/test.cyr:1391-1393`), which pin the open

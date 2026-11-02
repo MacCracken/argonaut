@@ -113,6 +113,20 @@ fn main() {
     file_write_all(str_data(fbig), big, 8192);
     sys_unlink(str_data(fmiss));
 
+    # --- a NUL in a value (1.19.0) ---
+    var fnul = ef_path("nul.env");
+    var nb = alloc(16);
+    memcpy(nb, "KYB=ab", 6);
+    store8(nb + 6, 0);
+    memcpy(nb + 7, "cd\n", 3);
+    file_write_all(str_data(fnul), nb, 10);
+    var vnul = vec_new();
+    vec_push(vnul, fnul);
+    assert_eq(load_env_files(vnul), 0, "a value holding a NUL fails the load, not cut short");
+    var mnul = map_new();
+    assert_eq(_env_files_merge(vnul, mnul), -3, "a NUL is refused as -3");
+    assert_eq(map_count(mnul), 0, "a refused file leaves nothing in the map");
+
     # --- env_name_is_valid ---
     assert_eq(env_name_is_valid("A"), 1, "name: A");
     assert_eq(env_name_is_valid("_x9"), 1, "name: _x9");

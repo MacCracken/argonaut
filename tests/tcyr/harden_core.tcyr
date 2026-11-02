@@ -506,16 +506,12 @@ fn test_c6() {
     init_poll_health(init, tracker);
     init_poll_health(init, tracker);
 
-    var b0 = alloc_used();
-    execute_health_check(svc_def_name(sd), hc, p);
-    var probe_cost = alloc_used() - b0;
-
     var b1 = alloc_used();
     var res = init_poll_health(init, tracker);
     var tick_cost = alloc_used() - b1;
     assert_eq(vec_len(res), 1, "c6: the tick returned its one probe result");
     assert_eq(load64(vec_get(res, 0) + 16), 1, "c6: and it passed");
-    assert_eq(tick_cost - probe_cost, 0, "c6: a due-probe tick allocates nothing beyond the probe's own result");
+    assert_eq(tick_cost, 0, "c6: a due-probe tick allocates nothing (1.19.0: its result comes from the pool)");
 
     # With a notify socket bound and nothing queued.
     var npath = _tmp_path("c6.sock");
@@ -525,7 +521,7 @@ fn test_c6() {
     var b2 = alloc_used();
     init_poll_health(init, tracker);
     var drain_cost = alloc_used() - b2;
-    assert_eq(drain_cost - probe_cost, 0, "c6: the notify drain allocates no per-tick pid set");
+    assert_eq(drain_cost, 0, "c6: the notify drain allocates no per-tick pid set");
     sys_close(nfd);
     store64(init + 48, 0 - 1);
     sys_unlink(str_data(npath));

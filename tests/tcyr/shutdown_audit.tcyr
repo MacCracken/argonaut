@@ -423,18 +423,14 @@ fn test_health_alloc() {
     init_poll_health(init, tracker);
     init_poll_health(init, tracker);
 
-    var b0 = alloc_used();
-    execute_health_check(svc_def_name(sd), hc, p);
-    var probe_cost = alloc_used() - b0;
-
     var b1 = alloc_used();
     init_poll_health(init, tracker);
-    assert_eq(alloc_used() - b1 - probe_cost, 0, "hca: an unrecorded passing tick allocates nothing extra");
+    assert_eq(alloc_used() - b1, 0, "hca: an unrecorded passing tick allocates nothing");
 
     managed_svc_set_health_rec_at(ms, managed_svc_health_rec_at(ms) - HEALTH_AUDIT_HEARTBEAT_MS);
     var b2 = alloc_used();
     init_poll_health(init, tracker);
-    assert_eq(alloc_used() - b2 - probe_cost, 0, "hca: a heartbeat-recorded tick allocates nothing extra");
+    assert_eq(alloc_used() - b2, 0, "hca: a heartbeat-recorded tick allocates nothing");
     init_stop_service(init, "sa-hca", 2000);
     if (_exists(p) == 1) { _kill_reap(p); }
     return 0;

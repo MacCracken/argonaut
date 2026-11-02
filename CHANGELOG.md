@@ -7,6 +7,137 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.19.0] — 2026-11-02
+
+**The reactor spends nothing.** kybernet's PID 1 never resets its arena, and the idle ticks were
+fixed long ago, but every event still took from it: 48 bytes per health probe, pass or fail, 384 per
+exit, and a builder per state change. A healthy service probed every 5 s cost 830 KB a day, and a
+flapping one more. Past the first event of each kind, a health tick, an exit, a watchdog kill, a stop
+and a restart now allocate nothing.
+
+48 suites / 1,922 assertions, 0 failures, on x86_64 and under qemu-aarch64. Bench gate: neutral, by a
+30-round A/B; see Performance.
+
+### Breaking
+
+- **Behaviour: more results are reused until the next call.** `proc_table_reap`,
+  `init_reap_services`, `init_check_watchdog` and `init_enforce_watchdog` now follow the rule
+  `init_poll_health`'s vec has had since 1.16.1, and `init_poll_health`'s results now do too: the vec
+  and the records in it are refilled in place. **Migration:** read a result before the next call of
+  the same function, and copy anything you keep. Two things stay safe to keep: a `ReapResult`'s
+  `name` and a watchdog vec's entries are the service definition's own `Str`, and a
+  `CRASH_GIVE_UP` reason is built per give-up. `execute_health_check`, `on_service_crash` and every
+  other entry point still return a value that is the caller's. kybernet needs no change: it consumes
+  each result at once and keeps only name cstrs, which live in the definitions.
+
+### Changed
+
+- **A health tick reuses its results.** `init_poll_health` draws `HealthCheckResult`s from a pool
+  (`_hc_pool_*`, `src/health.cyr`) that holds one per probe in a tick. Outside a tick a result is
+  allocated as before, so `health_history_record` keeps what it is given.
+- **A reap reuses its records.** `proc_table_reap` and `init_reap_services` keep one vec each and a
+  pool of records, one per exit in a sweep. `on_service_crash_into` fills a `CrashAction` the caller
+  owns. It clears `delay_ms` and `reason` first, because `CRASH_IGNORE` writes only the type.
+- **The watchdog pushes the definition's name.** It boxed a new `Str` per kill.
+- **`argonaut_init_new` sizes all of it** (`_reactor_reserve`), from the service count: a service
+  exits once per sweep and is probed once per tick, so `n` services can never need more. Grown on
+  demand, a pool settled on whichever tick first had the most probes due, which is timing, and a
+  consumer could not tell that from a leak: kybernet's aarch64 gate read 48 bytes on a last failed
+  probe under TCG. The reactor also cannot fail on memory for any of it now. ⚠ These are global
+  pointers, so a test or bench that rewinds the arena must call `_reactor_reserve` before it marks.
+  `bench_main` does.
+- **The idle paths lost their special case.** `_reap_empty_vec` and `_wd_empty_vec` are gone: an idle
+  sweep returns the same reused vec, truncated, so there is one vec per function and not two.
+- **A state change composes its trace line in one fixed buffer** (`_init_trace_state`) and not a
+  builder. A name past 400 bytes is cut short there; the audit chain carries it whole.
+- **An env file value holding a NUL is refused.** `_env_files_merge` returns -3, as it does for a bad
+  name, so `load_env_files` returns 0 and a spawn exits 126. execve stops at a NUL, so the child got
+  part of a value it was configured with, and nothing said so. kybernet refused this until its
+  1.10.0 moved the read here.
+
+### Tests
+
+- **1,835 → 1,922 assertions (+87).** `reactor_spend.tcyr` (84, new) and `spawn_env_files` (+3).
+- **`reactor_spend` drives the real paths with real processes** and requires
+  exactly 0 bytes past the lazy caches, over 20 crash-and-restart cycles, 20 watchdog kills, 20 stops
+  and starts, and 100 ticks of a pass and a failure each. The other half checks that reuse did not mix
+  results up: two exits in one sweep stay two, and a reused action holds this event's fields.
+- **Mutation-checked.** 32 defects put back one at a time, and all 32 now fail. Six survived on the
+  way there: a stale `reason` and a stale `delay_ms`, which only `CRASH_IGNORE` can show; the pool
+  left on after a tick, which clobbers a kept result only on a later, busier tick; and three in the
+  reservation, because `vec_new` starts with room for 16 and the suite had 10 services, so it now has
+  18.
+- **Four assertions got stricter.** `harden_core` and `shutdown_audit` subtracted the probe's own 48
+  bytes from a tick's cost. A tick now costs 0, and they assert that.
+
+### Performance
+
+What changed is bytes, not time. Past the first event of each kind, on a real PID 1 (kybernet's
+reactor pass, per handler) and in `reactor_spend`:
+
+| Event | 1.18.0 | 1.19.0 |
+|---|---:|---:|
+| A health probe, pass or fail | 48 B | 0 |
+| An exit (`proc_table_reap` + `init_reap_services`) | 384 B | 0 |
+| A state change | a `str_builder` | 0 |
+| A watchdog kill | 168 B | 0 |
+
+A service probed every 5 s cost 830 KB a day, and it now costs nothing. A restart-looping service
+paid for both its exit and its restart, for as long as it looped.
+
+**The bench gate: neutral.** The host carried load 15 from unrelated work throughout, so
+`1.19.0-closeout` against `1.18.0-closeout` is contention: `state_transition_check`, which this release
+did not touch, read +430 %. A 30-round A/B of the two bench binaries, pinned to one core, settled it:
+
+| Bench (µs, median) | 1.18.0 | 1.19.0 |
+|---|---:|---:|
+| on_service_crash | 0.152 | 0.152 |
+| state_transition_check | 0.112 | 0.113 |
+| health_history_record | 0.116 | 0.107 |
+| backoff_delay_compute | 0.204 | 0.199 |
+| health_tracker_record | 0.317 | 0.331 |
+| audit_log_record | 6.984 | 7.037 |
+| mark_all_steps_complete | 79.087 | 79.405 |
+
+Every interquartile range overlaps. ⚠ 16 rounds were not enough on this host: those same sub-µs micros
+read −33 % on one run and +196 % on the next, on code this release did not touch. No micro drives the
+reap or watchdog paths. `bench_main` reserves ahead of its first mark, so `init_new_*` measures what
+it did. Take the next baseline on a quiet host: this row is not one.
+
+### Binary
+
+- **x86_64:** 774,768 → **775,352 B** (+584).
+- **aarch64:** 2,187,640 → **2,188,200 B** (+560).
+- **Dead-code floor:** 3,001 unreachable fns on both arches; 1,119,120 B eliminated on x86_64, 1,325,136
+  B NOPed on aarch64.
+- **`cyrius capacity`:** `fn_table` 3,781 / 131,072, `string_data` 382,751 / 2,097,152.
+
+### Closeout pass (CLAUDE.md, before a minor)
+
+- **Full test suite:** 48 / 48 and 1,922 assertions, on x86_64 and under qemu-aarch64.
+- **Benchmark snapshot:** above.
+- **Dead-code floor:** above.
+- **Refactor pass:** one reused vec per reactor function, so the memoized empties are gone.
+- **Code review:** reading the first version of the test against the diff found three defects it
+  could not see, each now asserted: a stale `reason`, the view `Str`'s length, and the trace buffer's
+  contents and bound. kybernet's aarch64 boot gate then showed the pools growing with timing, which
+  is what `_reactor_reserve` removes.
+- **Cleanup sweep:** the comments that said a tick's results were fresh, and one line over 120.
+- **Security re-scan:** no new syscall or input surface. `_TRACE_MSG` is bounded and tested with a
+  1,000-byte name, and `reactor_spend` keeps a canary on its last byte.
+- **Clean build:** `rm -rf build lib && cyrius deps && CYRIUS_DCE=1 cyrius build --check-lib-sync`.
+  `qemu/boot-test.sh` and `qemu/pid1-harness-test.sh` pass.
+
+### Downstream: kybernet
+
+kybernet consumes each result at once, and the name cstrs it keeps live in the definitions, so it
+needs no change for Breaking. Against this tree with `CYRIUS_LOCAL=argonaut`, its unit suite and both
+boot gates pass, and those gates now require that the last exit, failed probe and restart of a reactor
+pass each spend nothing. Reactor bytes were the last item that reload gate turned up: 1.10.0 measured
+what a SIGHUP spends, and what it had left over pointed here.
+
+---
+
 ## [1.18.0] — 2026-10-30
 
 **The roadmap's 1.18.0: process identity, and the exec paths.**

@@ -339,8 +339,48 @@ fn check_command_as(svc_def, cmd_str, timeout_ms) {
 # timestamp. Consolidates the 6-store64 layout that was open-coded at
 # every check exit (1.8.0 closeout refactor — behavior-preserving).
 # Pass check_type_str=0 for results that don't carry a type label.
+#
+# ⚠ INSIDE init_poll_health A RESULT COMES FROM A POOL AND IS REUSED NEXT TICK
+# (1.19.0). A fresh one cost 48 bytes per probe, pass or fail, for the life of
+# PID 1: 830 KB a day for one service probed every 5 s, in an arena that is never
+# reset. Everywhere else a result is the caller's to keep, so health_history_record
+# and the name-only entry points are unchanged. argonaut_init_new sizes the pool, so
+# a tick never grows it.
+var _hc_pool = 0;        # vec of HealthCheckResult, kept for the life of the process
+var _hc_pool_on = 0;
+var _hc_pool_used = 0;
+
+# One result per probe in a tick, from argonaut_init_new (`_reactor_reserve`).
+fn _hc_pool_reserve(n) {
+    if (_hc_pool == 0) { _hc_pool = vec_new(); }
+    while (vec_len(_hc_pool) < n) { vec_push(_hc_pool, alloc(sizeof(HealthCheckResult))); }
+    return 0;
+}
+
+fn _hc_pool_begin() {
+    if (_hc_pool == 0) { _hc_pool = vec_new(); }
+    _hc_pool_on = 1;
+    _hc_pool_used = 0;
+    return 0;
+}
+
+fn _hc_pool_end() {
+    _hc_pool_on = 0;
+    return 0;
+}
+
+fn _hc_result_slot() {
+    if (_hc_pool_on == 0) { return alloc(sizeof(HealthCheckResult)); }
+    if (_hc_pool_used == vec_len(_hc_pool)) {
+        vec_push(_hc_pool, alloc(sizeof(HealthCheckResult)));
+    }
+    var r = vec_get(_hc_pool, _hc_pool_used);
+    _hc_pool_used = _hc_pool_used + 1;
+    return r;
+}
+
 fn health_result_new(service, check_type_str, passed, latency, message) {
-    var result = alloc(sizeof(HealthCheckResult));
+    var result = _hc_result_slot();
     store64(result, service);
     store64(result + 8, check_type_str);
     store64(result + 16, passed);
@@ -356,8 +396,8 @@ fn health_result_new(service, check_type_str, passed, latency, message) {
 # call: 32 of the 80 bytes a TCP tick allocated, once per health poll per
 # service on PID 1's reactor path, in an arena init never resets. A Str over a
 # string literal is immutable, so each one is boxed on first use and shared by
-# every result after it. The result struct itself is still fresh per call — the
-# health history ring keeps it.
+# every result after it. The result struct itself is fresh per call outside a
+# tick (the health history ring keeps it) and pooled inside one, see above.
 var _HC_CONST[32];
 
 enum HcConst {

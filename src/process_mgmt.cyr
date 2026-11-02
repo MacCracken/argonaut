@@ -182,10 +182,21 @@ fn env_name_is_valid(k) {
     return 0;
 }
 
+# 1 if Str value `v` holds a NUL. execve stops at the first one, so the child would
+# get part of the value it was configured with, and nothing would say so (1.19.0).
+fn _env_value_has_nul(v) {
+    var d = str_data(v);
+    var n = str_len(v);
+    for (var i = 0; i < n; i = i + 1) {
+        if (load8(d + i) == 0) { return 1; }
+    }
+    return 0;
+}
+
 # Load each file in `paths` (vec of Str) into `into`, in order. Each file is
-# read into its own map first and its names checked, so a bad file leaves
-# `into` without any of its entries. Returns 0, or the first error: -1 / -2 as
-# load_env_file, -3 for an invalid variable name.
+# read into its own map first and its names and values checked, so a bad file
+# leaves `into` without any of its entries. Returns 0, or the first error: -1 / -2
+# as load_env_file, -3 for an invalid variable name or a value holding a NUL.
 fn _env_files_merge(paths, into) {
     if (paths == 0) { return 0; }
     for (var i = 0; i < vec_len(paths); i = i + 1) {
@@ -199,7 +210,9 @@ fn _env_files_merge(paths, into) {
         for (var j = 0; j < vec_len(keys); j = j + 1) {
             var k = vec_get(keys, j);
             if (env_name_is_valid(k) == 0) { return -3; }
-            map_set(into, k, map_get(one, k));
+            var v = map_get(one, k);
+            if (_env_value_has_nul(v) == 1) { return -3; }
+            map_set(into, k, v);
         }
     }
     return 0;
@@ -1286,22 +1299,59 @@ fn proc_table_stop_all(timeout_ms) {
 # PID 1 cannot be restarted, so that ends in an allocation failure and a
 # kernel panic. The idle path now allocates nothing.
 #
-# This vec is handed to callers as an empty result and is NEVER mutated —
-# `proc_table_reap` swaps to a freshly allocated vec the moment there is an
-# actual exit to report. Do not push into it.
-var _reap_empty = 0;
+# ⚠ A REAP THAT FINDS AN EXIT ALLOCATES NOTHING EITHER (1.19.0). The idle path was
+# fixed first. An exit still cost 184 bytes here and 200 more in
+# init_reap_services, forever, so a service that crashes and is restarted paid
+# 384 bytes per cycle in an arena PID 1 never resets.
+#
+# ⚠ CONTRACT: the returned vec and its pairs are valid until the NEXT call, the
+# same rule as init_poll_health. A pair is 32 bytes: { name Str, exit code }, then
+# the Str itself ({ data, len }, str.cyr), which views the proc table's key. One
+# record per exit in a sweep, kept for the life of the process.
+var _reap_out = 0;
+var _reap_pool = 0;
 
-fn _reap_empty_vec() {
-    if (_reap_empty == 0) { _reap_empty = vec_new(); }
-    return _reap_empty;
+fn _reap_out_vec() {
+    if (_reap_out == 0) { _reap_out = vec_new(); }
+    vec_truncate(_reap_out, 0);
+    return _reap_out;
+}
+
+# Make room in `v` for `n` entries, so pushing them later cannot allocate, and leave
+# it empty.
+fn _vec_room(v, n) {
+    if (vec_cap(v) >= n) { return 0; }
+    for (var i = 0; i < n; i = i + 1) { vec_push(v, 0); }
+    vec_truncate(v, 0);
+    return 0;
+}
+
+# Room for `n` exits in one sweep, from argonaut_init_new (`_reactor_reserve`).
+fn _reap_reserve(n) {
+    if (_reap_pool == 0) { _reap_pool = vec_new(); }
+    while (vec_len(_reap_pool) < n) { vec_push(_reap_pool, alloc(32)); }
+    _vec_room(_reap_out_vec(), n);
+    return 0;
+}
+
+fn _reap_pair(out, name, code) {
+    if (_reap_pool == 0) { _reap_pool = vec_new(); }
+    var i = vec_len(out);
+    if (i == vec_len(_reap_pool)) { vec_push(_reap_pool, alloc(32)); }
+    var pair = vec_get(_reap_pool, i);
+    store64(pair, pair + 16);
+    store64(pair + 8, code);
+    store64(pair + 16, name);
+    store64(pair + 24, strlen(name));
+    vec_push(out, pair);
+    return pair;
 }
 
 fn proc_table_reap() {
     # Iterate the proc table IN PLACE (entries stride 24: key, value,
     # occupied) rather than via map_keys(), which allocated a fresh vec on
-    # every tick. `exited` is allocated lazily, only once something has
-    # actually exited.
-    var exited = 0;
+    # every tick.
+    var exited = _reap_out_vec();
     var entries = map_entries(g_proc_table);
     var cap = map_cap(g_proc_table);
 
@@ -1329,17 +1379,11 @@ fn proc_table_reap() {
                     if (gone == 0) {
                         if (WIFEXITED(status)) { code = WEXITSTATUS(status); }
                     }
-                    if (exited == 0) { exited = vec_new(); }
-                    var pair = alloc(16);
-                    store64(pair, str_from(name));
-                    store64(pair + 8, code);
-                    vec_push(exited, pair);
+                    _reap_pair(exited, name, code);
                 }
             }
         }
     }
-
-    if (exited == 0) { return _reap_empty_vec(); }
 
     # Remove reaped processes, closing their pidfds
     for (var i = 0; i < vec_len(exited); i = i + 1) {

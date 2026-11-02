@@ -90,6 +90,9 @@ fn main() {
     # hook pointer is 0. Keeps span tracing from flooding the bench output and
     # inflating the timed init sections — zero per-call overhead.
     sakshi_set_emit_hook(0);
+    # Ahead of every mark below: each iteration rewinds the arena, and argonaut_init_new
+    # would otherwise reserve these inside an iteration, under a global that outlives it.
+    _reactor_reserve(64);
     println("=== Argonaut Benchmarks ===\n");
 
     var iters = 10000;

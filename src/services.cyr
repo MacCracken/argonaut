@@ -409,12 +409,19 @@ fn resolve_service_waves(svc_defs) {
 # =========================================================================
 
 fn on_service_crash(ms, exit_code) {
+    return on_service_crash_into(ms, exit_code, alloc(sizeof(CrashAction)));
+}
+
+# on_service_crash into a CrashAction the caller owns, and returns it, so
+# init_reap_services does not pay for one per exit (1.19.0).
+fn on_service_crash_into(ms, exit_code, action) {
     var sd = managed_svc_def(ms);
     var policy = svc_def_restart_policy(sd);
     var rc = svc_def_restart_config(sd);
     var restarts = managed_svc_restarts(ms);
 
-    var action = alloc(sizeof(CrashAction));
+    store64(action + 8, 0);
+    store64(action + 16, 0);
 
     if (policy == RESTART_NEVER) {
         store64(action, CRASH_IGNORE);

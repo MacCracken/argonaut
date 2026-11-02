@@ -69,6 +69,7 @@ fn argonaut_init_new(config) {
     }
 
     store64(init + 16, svc_map);
+    _reactor_reserve(map_count(svc_map));
     store64(init + 24, 0);  # boot_started
     store64(init + 32, 0);  # boot_completed
 
@@ -477,20 +478,33 @@ fn init_set_service_state(init, name, state) {
     }
 
     managed_svc_set_state(ms, state);
-
-    # Trace state transition
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, name);
-    str_builder_add_cstr(sb, " -> ");
-    str_builder_add_cstr(sb, service_state_str(state));
-    var tmsg = str_builder_build(sb);
-    if (state == STATE_FAILED) {
-        sakshi_warn(str_data(tmsg), str_len(tmsg));
-    } else {
-        sakshi_info(str_data(tmsg), str_len(tmsg));
-    }
-
+    _init_trace_state(name, state);
     return 1;
+}
+
+# Trace a state transition. Runs on every service start and restart, so the line
+# is composed in one fixed buffer, not a builder that cost the arena on each one
+# (1.19.0). Global scope: [64] is 64 SLOTS = 512 bytes, and sakshi has finished
+# with the bytes when it returns. A name past 400 bytes is cut short: this is a
+# trace, and the audit chain carries the name whole.
+var _TRACE_MSG[64];
+
+fn _init_trace_state(name, state) {
+    var n = strlen(name);
+    if (n > 400) { n = 400; }
+    memcpy(&_TRACE_MSG, name, n);
+    memcpy(&_TRACE_MSG + n, " -> ", 4);
+    n = n + 4;
+    var st = service_state_str(state);
+    var sl = strlen(st);
+    memcpy(&_TRACE_MSG + n, st, sl);
+    n = n + sl;
+    if (state == STATE_FAILED) {
+        sakshi_warn(&_TRACE_MSG, n);
+    } else {
+        sakshi_info(&_TRACE_MSG, n);
+    }
+    return 0;
 }
 
 # =========================================================================
@@ -951,6 +965,47 @@ fn _init_clear_reaped_pids(init, pids, n) {
     return cleared;
 }
 
+# What init_reap_services returns (1.19.0). ⚠ CONTRACT: the vec and its results are
+# valid until the NEXT call, the same rule as init_poll_health. One record per exit
+# in a sweep: a ReapResult, then the CrashAction its `action` points at. `name` is
+# the service definition's own Str, so a consumer can keep that past the next call.
+# A CRASH_GIVE_UP reason is still built per give-up, which ends the service's run.
+var _rr_out = 0;
+var _rr_pool = 0;
+
+fn _rr_out_vec() {
+    if (_rr_out == 0) { _rr_out = vec_new(); }
+    vec_truncate(_rr_out, 0);
+    return _rr_out;
+}
+
+fn _rr_slot(i) {
+    if (_rr_pool == 0) { _rr_pool = vec_new(); }
+    if (i == vec_len(_rr_pool)) {
+        vec_push(_rr_pool, alloc(sizeof(ReapResult) + sizeof(CrashAction)));
+    }
+    return vec_get(_rr_pool, i);
+}
+
+# ⚠ EVERYTHING THE REACTOR REUSES IS SIZED WHEN THE SERVICES ARE KNOWN (1.19.0). Grown on
+# demand, the pools settled on whichever tick first had the most probes due, which is
+# timing, so a consumer could not tell a pool growing from a leak. A service exits once
+# per sweep and is probed once per tick, so `n` services can never need more, and the
+# reactor cannot fail on memory for any of it. Unit tests and benches that rewind the
+# arena must call this before they mark: these are global pointers.
+fn _reactor_reserve(n) {
+    _reap_reserve(n);
+    _hc_pool_reserve(n);
+    for (var i = 0; i < n; i = i + 1) { _rr_slot(i); }
+    _vec_room(_rr_out_vec(), n);
+    _vec_room(_wd_out_vec(), n);
+    if (_ph_results == 0) { _ph_results = vec_new(); }
+    _vec_room(_ph_results, n);
+    if (_ph_expected == 0) { _ph_expected = vec_new(); }
+    _vec_room(_ph_expected, n);
+    return 0;
+}
+
 fn init_reap_services(init) {
     var exited = proc_table_reap();
     # M3: drain orphans whose original parents exited (services that
@@ -970,11 +1025,11 @@ fn init_reap_services(init) {
     _init_last_orphans = on;
     if (on > 0) { _init_clear_reaped_pids(init, &orphans, on); }
 
-    # 2026-08-24 audit HIGH-2: allocate the results vec LAZILY. The PID-1
-    # supervisor loop calls this every 100 ms and discards the return, so an
-    # unconditional vec_new() here was pure bump-arena growth in a process
-    # that never exits. Idle ticks now allocate nothing.
-    var results = 0;
+    # 2026-08-24 audit HIGH-2: the PID-1 supervisor loop calls this every 100 ms
+    # and discards the return, so an unconditional vec_new() here was pure
+    # bump-arena growth in a process that never exits. The vec is reused now,
+    # so no tick allocates, idle or not.
+    var results = _rr_out_vec();
 
     for (var i = 0; i < vec_len(exited); i = i + 1) {
         var pair = vec_get(exited, i);
@@ -997,17 +1052,15 @@ fn init_reap_services(init) {
                 sakshi_warn(name, strlen(name));
             }
 
-            var action = on_service_crash(ms, code);
-            var result = alloc(sizeof(ReapResult));
-            store64(result, load64(pair));
+            var result = _rr_slot(vec_len(results));
+            var action = on_service_crash_into(ms, code, result + sizeof(ReapResult));
+            store64(result, svc_def_name(sd));
             store64(result + 8, code);
             store64(result + 16, action);
-            if (results == 0) { results = vec_new(); }
             vec_push(results, result);
         }
     }
 
-    if (results == 0) { return _reap_empty_vec(); }
     return results;
 }
 
@@ -1359,13 +1412,15 @@ fn init_should_drop_to_emergency(init) {
 # Watchdog
 # =========================================================================
 
-# Memoized empty vec for the idle path — the same treatment proc_table_reap
-# already carries. Never mutated; callers only read it.
-var _wd_empty = 0;
+# What a tick returns (1.19.0). ⚠ CONTRACT: valid until the NEXT
+# init_check_watchdog, the same rule as init_poll_health. It holds each service
+# definition's own name Str, so a kill costs the arena nothing.
+var _wd_out = 0;
 
-fn _wd_empty_vec() {
-    if (_wd_empty == 0) { _wd_empty = vec_new(); }
-    return _wd_empty;
+fn _wd_out_vec() {
+    if (_wd_out == 0) { _wd_out = vec_new(); }
+    vec_truncate(_wd_out, 0);
+    return _wd_out;
 }
 
 # ⚠ ALLOCATES NOTHING ON THE IDLE PATH, AND THAT IS A LEAK FIX.
@@ -1379,9 +1434,10 @@ fn _wd_empty_vec() {
 # Two changes, both mirroring proc_table_reap (process_mgmt.cyr:643):
 #   - iterate the proc table IN PLACE (entries stride 24: key, value,
 #     occupied) instead of materialising a key vec;
-#   - allocate `timed_out` lazily, only once something has actually timed out.
+#   - reuse `timed_out`, since 1.19.0, so a tick with a verdict allocates nothing
+#     either.
 fn init_check_watchdog(init) {
-    var timed_out = 0;
+    var timed_out = _wd_out_vec();
     var entries = map_entries(g_proc_table);
     var cap = map_cap(g_proc_table);
     # 1.16.1 audit P-4 / C-3: ONE monotonic read per tick. This read
@@ -1461,12 +1517,10 @@ fn init_check_watchdog(init) {
         }
 
         if (fire == 1) {
-            if (timed_out == 0) { timed_out = vec_new(); }
-            vec_push(timed_out, str_from(name));
+            vec_push(timed_out, svc_def_name(sd));
         }
     }
 
-    if (timed_out == 0) { return _wd_empty_vec(); }
     return timed_out;
 }
 
@@ -1497,8 +1551,8 @@ fn init_enforce_watchdog(init) {
     var timed_out = init_check_watchdog(init);
 
     for (var i = 0; i < vec_len(timed_out); i = i + 1) {
-        # `timed_out` holds boxed Str (init_check_watchdog pushes
-        # `str_from(name)`); `name` below is the CSTR view of it. Keep both,
+        # `timed_out` holds boxed Str (init_check_watchdog pushes the
+        # definition's name); `name` below is the CSTR view of it. Keep both,
         # because this loop calls into two different conventions.
         var name_s = vec_get(timed_out, i);
         var name = str_data(name_s);
@@ -1541,19 +1595,19 @@ fn init_enforce_watchdog(init) {
 # Health polling
 # =========================================================================
 
-# ⚠ A HEALTH TICK ALLOCATES NOTHING BUT THE PROBES' OWN RESULTS. 1.16.1 audit
-# C-6. This runs on kybernet's health timer for the life of PID 1, in an arena
-# that is never reset. The idle path was fixed first (no map_keys walk, no
+# ⚠ A HEALTH TICK ALLOCATES NOTHING. 1.16.1 audit C-6, finished at 1.19.0, when the
+# probes' own results moved into a pool (health.cyr). This runs on kybernet's
+# health timer for the life of PID 1, in an arena that is never reset. The idle
+# path was fixed first (no map_keys walk, no
 # eager vec); a tick with a due probe still allocated a fresh results vec (152
 # B), a 16-byte audit `details` box per record, and — with a notify socket
 # bound — a fresh expected-pid vec (152 B) for the drain: ~320 B a tick. The
 # results vec and the pid set are now module-level and reused, and the audit
 # record borrows the service's own name Str.
 #
-# ⚠ CONTRACT: the returned vec is valid until the NEXT call — the same rule as
-# init_last_orphan_count. It is cleared and refilled in place, so a caller that
-# keeps it across ticks sees it change. The HealthCheckResult structs inside it
-# are the probes' own allocations (execute_health_check) and stay valid.
+# ⚠ CONTRACT: the returned vec AND THE RESULTS IN IT are valid until the NEXT call,
+# the same rule as init_last_orphan_count. Both are refilled in place, so a caller
+# that keeps either across ticks sees it change. To keep a result, copy it.
 var _ph_results = 0;
 var _ph_expected = 0;
 
@@ -1660,6 +1714,7 @@ fn init_poll_health(init, tracker) {
     var cap = map_cap(svc_map);
     var now = _init_mono_ms();               # P-4: one clock read per tick
 
+    _hc_pool_begin();
     for (var i = 0; i < cap; i = i + 1) {
         var ep = entries + i * 24;
         if (load64(ep + 16) != 1) { continue; }
@@ -1691,6 +1746,7 @@ fn init_poll_health(init, tracker) {
             }
         }
     }
+    _hc_pool_end();
 
     # M1: drain authenticated sd_notify messages. SCM_CREDENTIALS (SO_PASSCRED)
     # drops any datagram whose sender pid is not a live service's.
