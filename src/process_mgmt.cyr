@@ -684,6 +684,10 @@ fn _append_env_map(v, env) {
 #   * Ordering is the caller's problem, but the workable order is
 #     no_new_privs -> capability/uid/gid drop -> Landlock -> seccomp, since
 #     an installed seccomp filter will otherwise kill the drop syscalls.
+#   * Since 1.20.0 a registered hook OWNS the definition's identity:
+#     svc_def_uid / svc_def_gid / svc_def_groups. argonaut applies them itself
+#     only when no hook is registered (_apply_identity), so a hook that ignores
+#     them runs a service declared non-root as root.
 #   * Since 1.18.0 it also runs for the service's command health and ready
 #     checks (run_check_as, ADR-015), with the same definition, so a check is
 #     confined as its service is. `argonaut_exec_kind()` tells the hook which
@@ -749,6 +753,49 @@ fn _apply_rlimits(rl) {
     }
     if (core >= 0) {
         if (_set_rlimit(AG_RLIMIT_CORE, core) != 0) { return -1; }
+    }
+    return 0;
+}
+
+# Supplementary gids for setgroups(2), which takes 32-bit gid_t. GLOBAL scope:
+# 32 slots = 256 bytes, room for AG_MAX_GROUPS of them.
+var _ag_groups_buf[32];
+var AG_MAX_GROUPS = 64;
+
+# Apply a definition's identity to the calling process: fork_exec_service's and
+# run_check_as's child, when NO pre-exec hook is registered (1.20.0). With a hook,
+# the hook applies it in its own order (see the contract above): a seccomp filter
+# installed first would refuse these calls, and capabilities kept across a uid
+# change need steps only the hook knows. Returns 0, or -1, and the caller exits 126.
+#
+# groups -> gid -> uid, gid first because a process that has left root cannot change
+# its gid. The supplementary list is replaced whenever any id is set: a service
+# never keeps PID 1's. A uid without a gid is refused: it would leave the service
+# with gid 0, group-class access to every root-group file.
+fn _apply_identity(svc_def) {
+    var uid = svc_def_uid(svc_def);
+    var gid = svc_def_gid(svc_def);
+    var gv = svc_def_groups(svc_def);
+    var ng = 0;
+    if (gv != 0) { ng = vec_len(gv); }
+    if (uid == -1 && gid == -1 && ng == 0) { return 0; }
+    if (uid != -1 && gid == -1) { return -1; }
+    if (ng > AG_MAX_GROUPS) { return -1; }
+    var i = 0;
+    while (i < ng) {
+        var g = vec_get(gv, i);
+        if (g < 0 || g > 4294967294) { return -1; }
+        store32(&_ag_groups_buf + i * 4, g);
+        i = i + 1;
+    }
+    if (sys_setgroups(ng, &_ag_groups_buf) != 0) { return -1; }
+    if (gid != -1) {
+        if (sys_setgid(gid) != 0) { return -1; }
+        if (sys_getgid() != gid) { return -1; }
+    }
+    if (uid != -1) {
+        if (sys_setuid(uid) != 0) { return -1; }
+        if (sys_getuid() != uid) { return -1; }
     }
     return 0;
 }
@@ -832,6 +879,10 @@ fn _exec_service_image(svc_def, path, argv_buf, kind) {
         if (fncall1(_pre_exec_hook, svc_def) != 0) {
             sys_exit(126);
         }
+    } else {
+        # Identity (1.20.0). The hook owns it when there is one; without one a
+        # definition's uid would otherwise be ignored and the service run as root.
+        if (_apply_identity(svc_def) != 0) { sys_exit(126); }
     }
 
     sys_execve(path, argv_buf, envp_buf);

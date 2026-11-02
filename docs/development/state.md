@@ -6,6 +6,13 @@
 
 ## Version
 
+**1.20.0** (service identity. A `ServiceDefinition` carries a uid, a gid, supplementary groups and
+cgroup delegation, and the default services use them: daimon 900:900 delegated, llm-gateway
+901:901, aethersafha 900:900 with video and input, agnoshi 1000:1000. A registered pre-exec hook
+applies them; with no hook the spawn child does, failing closed. `generate_unit` writes them.
+49 suites / 1,964 assertions on x86_64 and under qemu-aarch64, and `identity.tcyr` as root.
+See CHANGELOG [1.20.0] Breaking.)
+
 **1.19.0** (the reactor spends nothing. kybernet's PID 1 never resets its arena, and every
 event still took from it: 48 bytes per health probe, pass or fail, 384 per exit, and a builder
 per state change. Past the first event of each kind, a health tick, an exit, a watchdog kill, a
@@ -107,9 +114,11 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
 
 ## Binary
 
-- **x86_64: 775,352 B**, a statically linked ELF, at 1.19.0
+- **x86_64: 779,800 B**, a statically linked ELF, at 1.20.0
   (`CYRIUS_DCE=1 cyrius build --check-lib-sync src/main.cyr build/argonaut`).
-  3,001 fns are unreachable and 1,119,120 B of dead code is eliminated.
+  2,997 fns are unreachable and 1,119,504 B of dead code is eliminated.
+  - **+4,448 over 1.19.0's 775,352 B:** the identity drop in the spawn child, the unit lines and
+    the defaults' ids.
   - **+4,208 over 1.17.2's 770,560 B:** the pidfd and check-spawn code. The shipped binary
     reaches the spawn path through the qemu harness's L3 path.
   - **1.17.0 was +8,600 over 1.16.3's 761,960 B:** the limits, env-file and name-check code.
@@ -122,8 +131,8 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
     dropped from argonaut's side.
   - **The fix is upstream** (sigil or cyrius). Inside an initramfs the file sits in RAM, and the
     qemu boot test still boots at `-m 96M`.
-- **aarch64: 2,188,200 B** at 1.19.0 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`),
-  +128 over 1.17.2. The native compiler (the aarch64-linux tarball's `cycc`) emits the same
+- **aarch64: 2,188,552 B** at 1.20.0 (`CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr`),
+  +352 over 1.19.0, which was +128 over 1.17.2. The native compiler (the aarch64-linux tarball's `cycc`) emits the same
   bytes as this cross-build, which CI requires. 2,998 fns are unreachable and 1,324,520 B is
   NOPed. aarch64 DCE fills dead code with NOPs instead of compacting, so the size moves only
   when the text crosses a page: 1.17.0 was +4,488 over 1.16.3, and 1.16.3 +612,536 (the
@@ -136,13 +145,14 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
 
 ## Suites
 
-- **x86_64: 48 `.tcyr` suites / 1,922 assertions**, 0 failures (cyrius 6.7.18). +87 at 1.19.0:
-  `reactor_spend` (84) and `spawn_env_files` (+3), mutation-checked (CHANGELOG [1.19.0] Tests).
+- **x86_64: 49 `.tcyr` suites / 1,964 assertions**, 0 failures (cyrius 6.7.18). +42 at 1.20.0:
+  `identity` (42, new), which CI also runs as root, where the drop really happens (CHANGELOG
+  [1.20.0] Tests).
 - **qemu-user caveats the suites handle:** qemu drops a guest's `RLIMIT_AS`, and reports no
   `MSG_CTRUNC` for SCM_RIGHTS on a SO_PASSCRED socket. `spawn_rlimits` and `deferred_fixes`
   probe the platform for each and assert what it does.
-- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 48 / 48, 1,922 assertions**,
-  identical to x86_64, at 1.19.0. qemu-user 11.1 passes `pidfd_open` and `pidfd_send_signal`
+- **aarch64 (qemu-user, `scripts/aarch64-sweep.sh`): 49 / 49, 1,964 assertions**,
+  identical to x86_64, at 1.20.0. qemu-user 11.1 passes `pidfd_open` and `pidfd_send_signal`
   through, so the sweep runs the pidfd path, not the fallback.
 - **aarch64 on hardware (CI):** `ci.yml`'s `aarch64-native` job runs every suite on a
   GitHub-hosted `ubuntu-26.04-arm` runner, after `cmp`-ing its native build with the
@@ -153,7 +163,7 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
   cleanly on SIGTERM.
 - **qemu PID-1 harness** (`qemu/pid1-harness-test.sh`, `qemu/boot-test.sh`,
   KVM + `+invtsc`): at 1.19.0, M3 + L3 end-to-end and the supervisor-loop smoke
-  pass at the scripts' committed `-m 256M`. They have passed there since 1.15.5,
+  pass at the scripts' committed `-m 256M` (and at 1.20.0). They have passed there since 1.15.5,
   the first release built with a `MAP_NORESERVE` heap (cyrius 6.6.8+). At 1.16.3 the
   boot test also boots at `-m 128M` and `-m 96M`.
   - **In CI:** the `qemu-pid1` job runs both on `ubuntu-26.04`, skipped with a warning where
@@ -162,6 +172,14 @@ from 1.17.0 on is in [roadmap.md](roadmap.md).
 - **Benches**: `src/bench_main.cyr` — 29 micros, the release gate
   (`scripts/bench-history.sh`); `tests/bcyr/argonaut.bcyr` carries the same 29,
   `tests/bcyr/api.bcyr` 8 more. History in `bench-history.csv`.
+
+### Bench snapshot (1.20.0-identity, 2026-11-02)
+
+**Verdict: neutral.** The label row was taken at load 20 from unrelated work, so it is contention.
+A 30-round A/B of the 1.19.0 and 1.20.0 bench binaries, pinned to one core, overlapped on every
+interquartile range (`init_new_desktop` 71.0 → 66.0 µs, `init_new_minimal` 14.3 → 16.4,
+`generate_unit` 8.97 → 8.90, `audit_log_record` 7.43 → 7.73). **Next baseline:** still a quiet
+host; neither this row nor 1.19.0's is one.
 
 ### Bench snapshot (1.19.0-closeout, 2026-11-02)
 
@@ -253,7 +271,7 @@ Earlier snapshots are in the CHANGELOG's Performance sections; every row is in
 Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 - **The next cyrius pin** has no release number; its target is open.
-- **No release is pinned after 1.18.0.** The work left is Gated.
+- **No release is pinned after 1.20.0.** The work left is Gated.
 - **Gated:**
   - the legacy SHA-256 emergency credential (still accepted beside v1 Argon2id), until
     kybernet migrates operators;
@@ -264,6 +282,8 @@ Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 ### Closed recently
 
+- **1.20.0:** service identity (uid, gid, groups, delegation) on the definition and on the four
+  AGNOS default services, for kybernet 1.12.0's non-root defaults.
 - **1.19.0:** the reactor's per-event allocations, found by kybernet 1.10.0's reload gate;
   `reactor_spend.tcyr` holds them at 0.
 - **1.18.0:**
@@ -295,13 +315,14 @@ Each item is pinned to a release in [roadmap.md](roadmap.md).
 
 ## Pending release
 
-1.19.0 is ready to tag, and kybernet 1.10.1 waits on that tag. No release is pinned after it;
+1.20.0 is ready to tag, and kybernet 1.12.0 waits on that tag. No release is pinned after it;
 the work left is Gated ([roadmap.md](roadmap.md)).
 
 ## Recent shipped
 
 | Releases | Date | Headline |
 |---|---|---|
+| 1.20.0 | 2026-11-02 | Service identity: uid, gid, groups and cgroup delegation on the definition; daimon, llm-gateway, aethersafha and agnoshi drop root |
 | 1.19.0 | 2026-11-02 | The reactor spends nothing: health ticks, exits, watchdog kills, stops and restarts allocate 0 past their first event |
 | 1.18.0 | 2026-10-30 | pidfd process identity (ADR-016); command health and ready checks under the service's spawn and hook (ADR-015); the watchdog's unprobed SIGKILL fixed (LOW) |
 | 1.17.2 | 2026-10-30 | Native aarch64 CI and a required aarch64 artifact; qemu PID-1 harness in CI; Ubuntu 26.04, SHA-pinned actions, a verified toolchain install; doc-tree conformance |

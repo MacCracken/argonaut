@@ -249,6 +249,34 @@ fn generate_unit(svc) {
         }
     }
 
+    # Identity (1.20.0), numeric: systemd takes a uid or gid in User=, Group= and
+    # SupplementaryGroups=. A unit without them runs the service as root, which is
+    # the one translation of a non-root definition that must not happen silently.
+    var unit_uid = svc_def_uid(svc);
+    var unit_gid = svc_def_gid(svc);
+    if (unit_uid != -1) {
+        str_builder_add_cstr(sb, "User=");
+        str_builder_add_int(sb, unit_uid);
+        str_builder_add_cstr(sb, "\n");
+    }
+    if (unit_gid != -1) {
+        str_builder_add_cstr(sb, "Group=");
+        str_builder_add_int(sb, unit_gid);
+        str_builder_add_cstr(sb, "\n");
+    }
+    var unit_groups = svc_def_groups(svc);
+    if (unit_groups != 0 && vec_len(unit_groups) > 0) {
+        str_builder_add_cstr(sb, "SupplementaryGroups=");
+        for (var gi = 0; gi < vec_len(unit_groups); gi = gi + 1) {
+            if (gi > 0) { str_builder_add_cstr(sb, " "); }
+            str_builder_add_int(sb, vec_get(unit_groups, gi));
+        }
+        str_builder_add_cstr(sb, "\n");
+    }
+    if (svc_def_delegate(svc) == 1) {
+        str_builder_add_cstr(sb, "Delegate=yes\n");
+    }
+
     # Restart policy
     var policy = svc_def_restart_policy(svc);
     str_builder_add_cstr(sb, "Restart=");

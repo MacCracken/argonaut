@@ -163,6 +163,18 @@ jobs:
           echo "suites: $pass pass, $fail fail | assertions: $asserts"
           test $fail -eq 0
 
+      - name: Test the identity drop as root
+        # identity.tcyr can only see a refused drop as the runner user. As root the
+        # spawn child really changes ids, and the suite checks the child is exactly
+        # the uid, gid and groups it was given, and that a uid without a gid is
+        # refused before any id changes. Two injected defects in _apply_identity
+        # pass as a user and fail only here.
+        run: |
+          cyrius build tests/tcyr/identity.tcyr build/identity-root
+          out=$(sudo build/identity-root 2>&1)
+          tail -3 <<< "$out"
+          grep -qE '^[0-9]+ passed, 0 failed' <<< "$out"
+
       - name: Run the docs examples
         # Every docs/examples/*.cyr must still build and run against src/.
         run: |
@@ -262,6 +274,15 @@ jobs:
           done
           echo "suites: $pass pass, $fail fail | assertions: $asserts"
           test $fail -eq 0
+
+      - name: Test the identity drop as root, native
+        # The build job's root step, on arm64, whose setgroups/setgid/setuid
+        # numbers are its own.
+        run: |
+          cyrius build tests/tcyr/identity.tcyr build/identity-root
+          out=$(sudo build/identity-root 2>&1)
+          tail -3 <<< "$out"
+          grep -qE '^[0-9]+ passed, 0 failed' <<< "$out"
 
   qemu-pid1:
     name: qemu PID-1 harness (KVM)

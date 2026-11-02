@@ -7,6 +7,112 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.20.0] — 2026-11-02
+
+**Service identity.** A `ServiceDefinition` can now say who a service runs as: a uid, a gid,
+supplementary groups, and whether its cgroup is delegated to it. The default services use it, so on
+an AGNOS board daimon, llm-gateway, aethersafha and agnoshi no longer run as root.
+
+49 suites / 1,964 assertions, 0 failures, on x86_64 and under qemu-aarch64, and `identity.tcyr`
+again as root. Bench gate: neutral, by a 30-round A/B; see Performance.
+
+### Breaking
+
+- **Behaviour: four default services drop root.** Migration: none for kybernet ≥ 1.12.0, whose
+  pre-exec hook applies the identity. Another consumer must do the same, or register no hook (see
+  below).
+
+  | Service | uid:gid | groups | delegated |
+  |---|---|---|---|
+  | daimon (every mode it runs in) | 900:900 (agnos) | none | yes |
+  | llm-gateway | 901:901 (agnos-llm) | none | no |
+  | aethersafha | 900:900 | 44 (video), 104 (input) | no |
+  | agnoshi (minimal and desktop) | 1000:1000 (the interactive user) | none | no |
+
+  The numbers are agnosticos's, and numeric because the supervisor reads no `/etc/passwd`. They
+  are the `AgnosIdentity` enum in `src/services.cyr`. agnos-init (kybernet) owns the runtime paths
+  and grants the device nodes these services need by the same numbers, and kybernet's
+  `test_agnos_identity_contract` fails if the two sides drift. postgres, redis and ifran stay
+  root: agnosticos defines no user for them yet. agnos-init stays root, because it makes the layout.
+- **Behaviour: with no pre-exec hook, the spawn child applies the identity itself.**
+  `_apply_identity` runs setgroups, then setgid, then setuid, and checks each took. It fails
+  closed with exit 126, as a refusing hook does. So a standalone argonaut not run as root cannot
+  start the four services above. That is deliberate: the alternative is running a service
+  declared non-root as root. A uid without a gid is refused before any id changes (it would keep
+  gid 0), and so is a group list longer than the child's buffer (64).
+- **Layout: `ServiceDefinition` grew from 184 to 216 bytes**, four fields at the end. Every
+  existing offset is unchanged. A consumer that allocates the struct itself instead of calling
+  `svc_def_new` must allocate `sizeof(ServiceDefinition)` and set `uid` and `gid` to -1, since
+  0 means root.
+
+### Added
+
+- **`svc_def_uid`, `svc_def_gid`, `svc_def_groups`, `svc_def_delegate`, `svc_def_set_ids`,
+  `svc_def_set_groups`, `svc_def_set_delegate`** (`src/types.cyr`). -1 is unset for both ids,
+  never 0. `groups` is a vec of gids or 0, and replaces the list rather than adding to it.
+  Unlike seccomp and landlock, these are not opaque: argonaut owns what they mean.
+- **The pre-exec hook contract names the identity.** A registered hook owns it and applies it in
+  its own order, because a seccomp filter installed first would refuse the id calls, and
+  capabilities kept across a uid change need steps only the hook knows.
+- **`delegate`** asks the supervisor to hand the service its cgroup's `cgroup.procs`,
+  `cgroup.threads` and `cgroup.subtree_control`, as systemd's `Delegate=yes` does. daimon needs
+  it: it contains each agent in a cgroup below its own, and without the delegation it runs them
+  uncontained and says so. argonaut creates no cgroups, so this is data for the consumer.
+- **`generate_unit` writes the identity**: `User=`, `Group=`, `SupplementaryGroups=` (numeric,
+  which systemd accepts) and `Delegate=yes`. Without them a generated unit would run a non-root
+  definition as root.
+
+### Tests
+
+- **1,922 → 1,964 assertions (+42), and a 49th suite.** `identity.tcyr` checks the defaults
+  (-1 is not 0), the default services' identities in every boot mode, the no-hook drop, a hook
+  owning it, and the generated unit.
+- **The drop is checked as root too.** As the runner user, the spawn child can only be refused.
+  As root, the suite checks the child is exactly 12345:12345 with group 44, by running `id` inside
+  it, and that a uid without a gid is refused before any id changes. Both CI jobs, x86 and native
+  arm64, now run `identity.tcyr` again under `sudo`.
+- **Mutation-checked.** Three defects in `_apply_identity`, put back one at a time:
+
+  | Defect | As the runner user | As root |
+  |---|---|---|
+  | The no-hook child applies nothing | 3 failed | 4 failed |
+  | A uid without a gid allowed | 0 failed | 2 failed |
+  | The group list replaced by an empty one | 0 failed | 1 failed |
+
+  Two of the three are invisible without root, which is why CI's root step exists.
+
+### Performance
+
+**The bench gate: neutral.** `1.20.0-identity` was taken at load 20 from unrelated work, so the row
+is contention: micros this release does not touch read up to +205 %. A 30-round A/B of the 1.19.0
+and 1.20.0 bench binaries, pinned to one core, settled it. Every interquartile range overlaps, and
+the largest median moves are on untouched code, both ways (`health_history_record` −48 %,
+`init_new_minimal` +15 %). `init_new_*` builds the default services, which now set ids and
+allocate one two-entry vec for aethersafha's groups.
+
+| Bench (µs, median) | 1.19.0 | 1.20.0 |
+|---|---:|---:|
+| init_new_desktop | 71.016 | 65.984 |
+| init_new_minimal | 14.262 | 16.370 |
+| init_new_edge | 11.948 | 11.848 |
+| generate_unit | 8.974 | 8.896 |
+| mark_all_steps_complete | 80.620 | 85.488 |
+| audit_log_record | 7.431 | 7.731 |
+
+### Binary
+
+- **x86_64: 779,800 B**, +4,448 over 1.19.0's 775,352: the drop in the spawn child, the unit
+  lines, and the defaults' ids. 2,997 fns unreachable, 1,119,504 B of dead code eliminated.
+- **aarch64: 2,188,552 B**, +352.
+
+### Downstream
+
+kybernet 1.12.0 builds and tests against this tree: its hook applies the identity, its config
+parser writes it here (`security.uid`, `gid`, `groups`, `delegate`), and both of its boot gates
+check it from inside the services.
+
+---
+
 ## [1.19.0] — 2026-11-02
 
 **The reactor spends nothing.** kybernet's PID 1 never resets its arena, and the idle ticks were

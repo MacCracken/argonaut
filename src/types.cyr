@@ -919,6 +919,10 @@ struct ServiceDefinition {
     capabilities;        # vec of capabilities to drop (0 = none)
     cgroup_limits;       # opaque cgroup-limits config (0 = none)
     watchdog_ms;         # sd_notify watchdog interval, ms (0 = no watchdog)
+    uid;                 # run as this uid (-1 = unset, stays root)
+    gid;                 # and this gid (-1 = unset)
+    groups;              # vec of supplementary gids (0 = none)
+    delegate;            # 1 = the service manages cgroups below its own
 }
 
 fn svc_def_new(name, desc, binary) {
@@ -946,6 +950,10 @@ fn svc_def_new(name, desc, binary) {
     store64(sd + 160, 0);               # capabilities
     store64(sd + 168, 0);               # cgroup_limits
     store64(sd + 176, 0);               # watchdog_ms
+    store64(sd + 184, 0 - 1);           # uid: -1 = unset (0 would mean root)
+    store64(sd + 192, 0 - 1);           # gid: -1 = unset
+    store64(sd + 200, 0);               # groups
+    store64(sd + 208, 0);               # delegate
     return sd;
 }
 
@@ -1037,6 +1045,30 @@ fn svc_def_set_seccomp(sd, cfg)      { store64(sd + 144, cfg); return sd; }
 fn svc_def_set_landlock(sd, cfg)     { store64(sd + 152, cfg); return sd; }
 fn svc_def_set_capabilities(sd, caps) { store64(sd + 160, caps); return sd; }
 fn svc_def_set_cgroup_limits(sd, cl)  { store64(sd + 168, cl); return sd; }
+
+# Identity (1.20.0): the uid, gid and supplementary groups a service runs as, and
+# whether its cgroup is delegated to it.
+#
+# ⚠ UNLIKE seccomp AND landlock THESE ARE NOT OPAQUE. A uid means the same thing to
+# every consumer, so argonaut owns the meaning: -1 is unset (the service stays root),
+# never 0, which IS root. Who applies them is the pre-exec hook's contract
+# (process_mgmt.cyr): a registered hook applies them in its own order; with no hook,
+# the spawn child applies them itself and fails closed.
+#
+# `groups` is a vec of gids, or 0. A service with a uid and no groups runs with none:
+# the drop clears the supplementary list, it never inherits PID 1's.
+#
+# `delegate` asks the supervisor to hand the service its own cgroup (cgroup.procs,
+# cgroup.threads and cgroup.subtree_control owned by its uid), the way systemd's
+# `Delegate=yes` does, so a service that runs workloads can contain them in cgroups
+# below its own. argonaut creates no cgroups, so this is data for the consumer.
+fn svc_def_uid(sd)       { return load64(sd + 184); }
+fn svc_def_gid(sd)       { return load64(sd + 192); }
+fn svc_def_groups(sd)    { return load64(sd + 200); }
+fn svc_def_delegate(sd)  { return load64(sd + 208); }
+fn svc_def_set_ids(sd, uid, gid)  { store64(sd + 184, uid); store64(sd + 192, gid); return sd; }
+fn svc_def_set_groups(sd, gids)   { store64(sd + 200, gids); return sd; }
+fn svc_def_set_delegate(sd, on)   { store64(sd + 208, on); return sd; }
 
 # =========================================================================
 # Managed service — runtime state of a service

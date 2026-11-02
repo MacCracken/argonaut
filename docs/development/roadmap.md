@@ -12,7 +12,7 @@ that gate opens.
 
 ## Release plan
 
-**No release is pinned after 1.19.0.** The work left is [Gated](#gated--1x-pinned-when-the-gate-opens):
+**No release is pinned after 1.20.0.** The work left is [Gated](#gated--1x-pinned-when-the-gate-opens):
 each item takes the next free number when its gate opens.
 
 **Every release:**

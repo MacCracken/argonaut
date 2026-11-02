@@ -1,0 +1,139 @@
+# identity.tcyr — a service's uid, gid, supplementary groups and cgroup
+# delegation (1.20.0).
+#
+# Until 1.20.0 a ServiceDefinition had no identity, so every default service ran
+# as root and a consumer could not say otherwise for a built-in. These pin the
+# fields' defaults (-1 is unset, never 0, which is root), the identities the
+# default services carry, who applies them (a registered pre-exec hook; without
+# one, the spawn child, failing closed), and that a generated systemd unit keeps
+# them.
+include "tests/test_header.cyr"
+
+fn id_find(svcs, name) {
+    for (var i = 0; i < vec_len(svcs); i = i + 1) {
+        var sd = vec_get(svcs, i);
+        if (str_eq(svc_def_name(sd), str_from(name)) == 1) { return sd; }
+    }
+    return 0;
+}
+
+# Exit code of service `sd` spawned with fork_exec_service and reaped.
+fn id_spawn_code(sd) {
+    var pid = fork_exec_service(sd);
+    if (pid <= 0) { return 251; }
+    var wb[8];
+    store64(&wb, 0);
+    if (sys_waitpid(pid, &wb, 0) != pid) { return 252; }
+    var st = load64(&wb);
+    if (WIFEXITED(st)) { return WEXITSTATUS(st); }
+    return 250;
+}
+
+fn id_true(name) {
+    return svc_def_new(str_from(name), str_from("t"), str_from("/usr/bin/true"));
+}
+
+fn id_allow(sd) { return 0; }
+
+fn main() {
+    alloc_init();
+
+    # =====================================================================
+    test_group("a new definition has no identity, and -1 is not root");
+    var sd = id_true("id-plain");
+    assert_eq(svc_def_uid(sd), 0 - 1, "uid -1");
+    assert_eq(svc_def_gid(sd), 0 - 1, "gid -1");
+    assert_eq(svc_def_groups(sd), 0, "no groups");
+    assert_eq(svc_def_delegate(sd), 0, "not delegated");
+    svc_def_set_ids(sd, 0, 0);
+    assert_eq(svc_def_uid(sd), 0, "uid 0 is a value (root), distinct from unset");
+    var gv = vec_new();
+    vec_push(gv, 44);
+    svc_def_set_groups(sd, gv);
+    assert_eq(vec_get(svc_def_groups(sd), 0), 44, "groups round-trip");
+    svc_def_set_delegate(sd, 1);
+    assert_eq(svc_def_delegate(sd), 1, "delegate round-trips");
+
+    # =====================================================================
+    test_group("the default services' identities");
+    var dsk = default_services(BOOT_DESKTOP);
+    var dm = id_find(dsk, "daimon");
+    assert_eq(svc_def_uid(dm), AGNOS_ID_AGNOS, "daimon: uid agnos");
+    assert_eq(svc_def_gid(dm), AGNOS_ID_AGNOS, "daimon: gid agnos");
+    assert_eq(svc_def_delegate(dm), 1, "daimon: its cgroup is delegated (it contains agents)");
+    var gw = id_find(dsk, "llm-gateway");
+    assert_eq(svc_def_uid(gw), AGNOS_ID_AGNOS_LLM, "llm-gateway: uid agnos-llm");
+    assert_eq(svc_def_gid(gw), AGNOS_ID_AGNOS_LLM, "llm-gateway: gid agnos-llm");
+    assert_eq(svc_def_delegate(gw), 0, "llm-gateway: not delegated");
+    var comp = id_find(dsk, "aethersafha");
+    assert_eq(svc_def_uid(comp), AGNOS_ID_AGNOS, "aethersafha: uid agnos");
+    assert_eq(svc_def_gid(comp), AGNOS_ID_AGNOS, "aethersafha: gid agnos");
+    var cg = svc_def_groups(comp);
+    assert_eq(vec_len(cg), 2, "aethersafha: two supplementary groups");
+    assert_eq(vec_get(cg, 0), AGNOS_GID_VIDEO, "... video, for /dev/fb0");
+    assert_eq(vec_get(cg, 1), AGNOS_GID_INPUT, "... input, for /dev/input/event*");
+    assert_eq(svc_def_uid(id_find(dsk, "agnoshi")), AGNOS_ID_USER, "agnoshi: the interactive user");
+    assert_eq(svc_def_gid(id_find(dsk, "agnoshi")), AGNOS_ID_USER, "agnoshi: its gid");
+    assert_eq(svc_def_uid(id_find(dsk, "agnos-init")), 0 - 1, "agnos-init stays root: it makes and owns the layout");
+    assert_eq(svc_def_uid(id_find(dsk, "postgres")), 0 - 1, "postgres: no AGNOS user defined for it yet");
+    assert_eq(svc_def_uid(id_find(dsk, "redis")), 0 - 1, "redis: likewise");
+    assert_eq(svc_def_uid(id_find(dsk, "ifran")), 0 - 1, "ifran: likewise");
+    var min = default_services(BOOT_MINIMAL);
+    assert_eq(svc_def_uid(id_find(min, "daimon")), AGNOS_ID_AGNOS, "minimal daimon: agnos");
+    assert_eq(svc_def_uid(id_find(min, "agnoshi")), AGNOS_ID_USER, "minimal agnoshi: the interactive user");
+    var edge = default_services(BOOT_EDGE);
+    assert_eq(svc_def_uid(id_find(edge, "daimon")), AGNOS_ID_AGNOS, "edge daimon: agnos");
+    assert_eq(svc_def_delegate(id_find(edge, "daimon")), 1, "edge daimon: delegated");
+    assert_eq(vec_len(default_services(BOOT_RECOVERY)), 0, "recovery: no services, nothing to drop");
+
+    # =====================================================================
+    test_group("with no hook, the spawn child applies the identity and fails closed");
+    assert_eq(argonaut_pre_exec_hook(), 0, "no hook registered");
+    assert_eq(id_spawn_code(id_true("id-none")), 0, "control: no identity, the exec runs");
+    var half = id_true("id-half");
+    svc_def_set_ids(half, 12345, 0 - 1);
+    assert_eq(id_spawn_code(half), 126, "a uid without a gid is refused (126): it would keep gid 0");
+    # The child checks its own ids: exit 0 only as 12345:12345 with group 44.
+    var full = svc_def_new(str_from("id-full"), str_from("t"), str_from("/bin/sh"));
+    vec_push(svc_def_args(full), str_from("-c"));
+    vec_push(svc_def_args(full), str_from("test \"$(id -u):$(id -g):$(id -G)\" = '12345:12345:12345 44'"));
+    svc_def_set_ids(full, 12345, 12345);
+    var g44 = vec_new();
+    vec_push(g44, 44);
+    svc_def_set_groups(full, g44);
+    var want = 126;
+    if (sys_geteuid() == 0) { want = 0; }
+    assert_eq(id_spawn_code(full), want, "as root the child is exactly 12345:12345 + 44; else refused (126)");
+    if (sys_geteuid() == 0) {
+        assert_eq(id_spawn_code(half), 126, "as root too: a uid without a gid is refused before any id changes");
+    }
+    var grp = id_true("id-groups");
+    var many = vec_new();
+    for (var gi = 0; gi < AG_MAX_GROUPS + 1; gi = gi + 1) { vec_push(many, 100 + gi); }
+    svc_def_set_ids(grp, 12345, 12345);
+    svc_def_set_groups(grp, many);
+    assert_eq(id_spawn_code(grp), 126, "more groups than the child's buffer holds: refused, not truncated");
+
+    # =====================================================================
+    test_group("a registered hook owns the identity");
+    argonaut_set_pre_exec_hook(&id_allow);
+    assert_eq(id_spawn_code(half), 0, "the hook allowed it, so argonaut did not apply or refuse it");
+    argonaut_set_pre_exec_hook(0);
+
+    # =====================================================================
+    test_group("a generated unit keeps the identity");
+    var u = generate_unit(comp);
+    assert(str_contains(u, str_from("User=900\n")), "aethersafha: User=900");
+    assert(str_contains(u, str_from("Group=900\n")), "aethersafha: Group=900");
+    assert(str_contains(u, str_from("SupplementaryGroups=44 104\n")), "aethersafha: SupplementaryGroups=44 104");
+    assert(str_contains(u, str_from("Delegate=")) == 0, "aethersafha: not delegated");
+    var ud = generate_unit(dm);
+    assert(str_contains(ud, str_from("Delegate=yes\n")), "daimon: Delegate=yes");
+    var up = generate_unit(id_true("id-unit-plain"));
+    assert(str_contains(up, str_from("User=")) == 0, "no identity: no User=");
+    assert(str_contains(up, str_from("SupplementaryGroups=")) == 0, "no identity: no SupplementaryGroups=");
+
+    return assert_summary();
+}
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);
