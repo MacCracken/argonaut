@@ -128,6 +128,27 @@ enum AgnosIdentity {
     AGNOS_GID_INPUT = 104;         # /dev/input/event*
 }
 
+# agnos-init (1.15.3): the AGNOS directory layout and device grants, run once before the
+# services that need them: in BOOT_DESKTOP the compositor, and (unreleased, after 1.20.0) in
+# BOOT_MINIMAL the console agnoshi. /run is a fresh tmpfs every boot, and aethersafha binds its
+# sockets in /run/agnos/agents and /run/agnos/plugins without creating either; devtmpfs makes
+# every device node root 0600, and agnos-init grants /dev/fb0, /dev/input/event* and
+# /dev/console to the groups that open them. The binary ships in the kybernet package (kybernet
+# 1.7.6), the same package this default set is compiled into, so a dependency on it can never
+# reach a board without the program it names. It exits non-zero when the layout cannot be made,
+# and its dependents are then not started.
+fn _agnos_init_service(mode) {
+    var ainit = svc_def_new(
+      str_from("agnos-init"),
+      str_from("AGNOS directory layout"),
+      str_from("/usr/lib/agnos/agnos-init")
+      );
+    svc_def_set_service_type(ainit, SVC_ONESHOT);
+    svc_def_set_restart_policy(ainit, RESTART_NEVER);
+    vec_push(svc_def_modes(ainit), mode);
+    return ainit;
+}
+
 # daimon runs as agnos with its cgroup delegated: it contains each agent in a
 # cgroup below its own, and without the delegation it can make none and runs the
 # agents uncontained.
@@ -206,12 +227,17 @@ fn default_services(mode) {
 
     # BOOT_MINIMAL: console agnoshi — no aethersafha dep (no Wayland in minimal).
     # Enables boot-to-shell MVP: kernel + kybernet + agnoshi reach a prompt on iron.
+    # Unreleased (after 1.20.0): after agnos-init. agnoshi runs as 1000:1000 with /dev/null
+    # on its stdio, and since agnoshi 2.1.2 it opens /dev/console itself, which agnos-init
+    # grants to group 1000 (kybernet, unreleased after 1.12.0); devtmpfs makes it 0600 root.
     if (mode == BOOT_MINIMAL) {
+        vec_push(services, _agnos_init_service(BOOT_MINIMAL));
         var min_shell = svc_def_new(
           str_from("agnoshi"),
           str_from("AI shell (console mode)"),
           str_from("/usr/lib/agnos/agnoshi")
           );
+        vec_push(svc_def_deps(min_shell), str_from("agnos-init"));
         vec_push(svc_def_modes(min_shell), BOOT_MINIMAL);
         svc_def_set_ids(min_shell, AGNOS_ID_USER, AGNOS_ID_USER);
         store64(min_shell + 72, health_check_new(HC_PROCESS_ALIVE, 0, 0, 10000, 1000, 3));
@@ -240,22 +266,7 @@ fn default_services(mode) {
 
     # Desktop-only services
     if (mode == BOOT_DESKTOP) {
-        # agnos-init (1.15.3): the AGNOS directory layout, run once before the
-        # compositor. /run is a fresh tmpfs every boot, and aethersafha binds its
-        # sockets in /run/agnos/agents and /run/agnos/plugins without creating
-        # either. The binary ships in the kybernet package (kybernet 1.7.6), the same
-        # package this default set is compiled into, so the dependency below can
-        # never reach a board without the program it names. It exits non-zero when
-        # the layout cannot be made, and the compositor is then not started.
-        var ainit = svc_def_new(
-          str_from("agnos-init"),
-          str_from("AGNOS directory layout"),
-          str_from("/usr/lib/agnos/agnos-init")
-          );
-        svc_def_set_service_type(ainit, SVC_ONESHOT);
-        svc_def_set_restart_policy(ainit, RESTART_NEVER);
-        vec_push(svc_def_modes(ainit), BOOT_DESKTOP);
-        vec_push(services, ainit);
+        vec_push(services, _agnos_init_service(BOOT_DESKTOP));
 
         var comp = svc_def_new(
           str_from("aethersafha"),

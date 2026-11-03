@@ -186,6 +186,10 @@ fn main() {
     expect_str(join_order(resolve_service_order(dsk)),
         "agnos-init,postgres,redis,daimon,aethersafha,llm-gateway,agnoshi,ifran",
         "desktop order pinned");
+    # The minimal boot order, pinned the same way: agnoshi waits for agnos-init, which grants
+    # it /dev/console (unreleased, after 1.20.0).
+    var mnl = default_services(BOOT_MINIMAL);
+    expect_str(join_waves(resolve_service_waves(mnl)), "agnos-init,daimon|agnoshi", "minimal waves pinned");
 
     return assert_summary();
 }

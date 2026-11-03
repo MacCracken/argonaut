@@ -81,6 +81,7 @@ fn main() {
     var min = default_services(BOOT_MINIMAL);
     assert_eq(svc_def_uid(id_find(min, "daimon")), AGNOS_ID_AGNOS, "minimal daimon: agnos");
     assert_eq(svc_def_uid(id_find(min, "agnoshi")), AGNOS_ID_USER, "minimal agnoshi: the interactive user");
+    assert_eq(svc_def_uid(id_find(min, "agnos-init")), 0 - 1, "minimal agnos-init stays root: it grants the console");
     var edge = default_services(BOOT_EDGE);
     assert_eq(svc_def_uid(id_find(edge, "daimon")), AGNOS_ID_AGNOS, "edge daimon: agnos");
     assert_eq(svc_def_delegate(id_find(edge, "daimon")), 1, "edge daimon: delegated");

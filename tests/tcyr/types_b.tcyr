@@ -5,9 +5,27 @@ fn main() {
     test_group("svc-cfg-rl");
     # --- Default services ---
     var min_v = default_services(BOOT_MINIMAL);
-    assert_eq(vec_len(min_v), 2, "min 2 svcs");
+    assert_eq(vec_len(min_v), 3, "min 3 svcs");
     assert(svcs_has_name(min_v, "daimon"), "min daimon");
     assert(svcs_has_name(min_v, "agnoshi"), "min agnoshi");
+    # Unreleased (after 1.20.0): agnos-init grants /dev/console, which the console agnoshi opens.
+    assert(svcs_has_name(min_v, "agnos-init"), "min agnos-init");
+    var min_shell_has_init = 0;
+    var min_init_oneshot = 0;
+    for (var mi = 0; mi < vec_len(min_v); mi = mi + 1) {
+        var msd = vec_get(min_v, mi);
+        if (str_eq_cstr(svc_def_name(msd), "agnoshi")) {
+            var mdeps = svc_def_deps(msd);
+            for (var mj = 0; mj < vec_len(mdeps); mj = mj + 1) {
+                if (str_eq_cstr(vec_get(mdeps, mj), "agnos-init")) { min_shell_has_init = 1; }
+            }
+        }
+        if (str_eq_cstr(svc_def_name(msd), "agnos-init")) {
+            if (svc_def_service_type(msd) == SVC_ONESHOT) { min_init_oneshot = 1; }
+        }
+    }
+    assert(min_shell_has_init, "minimal agnoshi depends_on agnos-init");
+    assert(min_init_oneshot, "minimal agnos-init is a oneshot");
 
     var srv_v = default_services(BOOT_SERVER);
     assert_eq(vec_len(srv_v), 5, "srv 5 svcs");
@@ -21,7 +39,7 @@ fn main() {
     assert(svcs_has_name(dsk_v, "agnoshi"), "dsk shell");
     # 1.15.3: agnos-init makes /run/agnos/{agents,plugins} before the compositor.
     assert(svcs_has_name(dsk_v, "agnos-init"), "dsk agnos-init");
-    assert(1 - svcs_has_name(srv_v, "agnos-init"), "srv no agnos-init (desktop only)");
+    assert(1 - svcs_has_name(srv_v, "agnos-init"), "srv no agnos-init (desktop and minimal only)");
     # The dependency itself, not only the order: agnos-init is listed first, so an
     # order check alone would pass without the edge.
     var comp_has_init = 0;

@@ -85,7 +85,7 @@ Suite counts, binary sizes and dependency pins change every release; they are in
 | Desktop | postgres, redis, daimon, llm-gateway (hoosh), agnos-init, aethersafha, agnoshi | Daily driver |
 | Server | postgres, redis, daimon, llm-gateway (hoosh) | Servers, CI |
 | Edge | daimon (edge mode) | IoT, edge nodes |
-| Minimal | daimon, console agnoshi | Debugging |
+| Minimal | daimon, agnos-init, console agnoshi | Debugging |
 | Recovery | none; emergency shell | Broken-system repair |
 
 ## Service Definition

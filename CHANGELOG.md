@@ -7,6 +7,35 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+**The console agnoshi starts after agnos-init.** Nothing owns the terminal. agnoshi 2.1.2 runs a
+session started with `/dev/null` on its stdio on `/dev/console`, which it opens itself with
+`O_NOCTTY`. As 1000:1000 it needs the console granted to its group, and kybernet's agnos-init does
+that (kybernet, unreleased after 1.12.0). But `default_services` ran agnos-init in BOOT_DESKTOP only,
+so on a BOOT_MINIMAL board nothing granted the console, and agnoshi exited 1 with EACCES.
+
+### Changed
+
+- **`default_services(BOOT_MINIMAL)`: daimon and agnoshi → daimon, agnos-init and agnoshi**, and the
+  console agnoshi `depends_on` agnos-init, as the desktop one does through aethersafha. The minimal
+  waves are `agnos-init,daimon | agnoshi`.
+- ⚠ **If agnos-init fails, the minimal agnoshi is not started**, as the compositor is not on a
+  desktop board. agnos-init fails only when it cannot make its directory layout; a device it cannot
+  grant is reported, not a failure. Before agnoshi 2.1.2, the minimal agnoshi read EOF at its first
+  prompt and exited, so no working shell is lost.
+- **agnos-init is built by one helper, `_agnos_init_service(mode)`**, for both modes. The desktop set,
+  its order and its waves are unchanged; `resolve_order` still pins them.
+
+### Tests
+
+49 suites, **1,969 assertions** (from 1,964), 0 failures. The three changed suites also pass under
+qemu-aarch64.
+- **types_b:** the minimal set is 3 services. agnos-init is in it, as a oneshot, and the minimal
+  agnoshi depends on it.
+- **identity:** the minimal agnos-init stays root.
+- **resolve_order:** the minimal waves are pinned to `agnos-init,daimon|agnoshi`.
+
 ## [1.20.0] — 2026-11-02
 
 **Service identity.** A `ServiceDefinition` can now say who a service runs as: a uid, a gid,
